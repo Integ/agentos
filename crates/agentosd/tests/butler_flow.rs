@@ -90,11 +90,15 @@ impl Harness {
     }
 
     async fn say(&mut self, text: &str) -> Expression {
+        self.say_from("test", text).await
+    }
+
+    async fn say_from(&mut self, source: &str, text: &str) -> Expression {
         self.next += 1;
         self.butler
             .handle(Intent {
                 id: IntentId(self.next),
-                source: DeviceId::new("test"),
+                source: DeviceId::new(source),
                 speaker: Some("adele".into()),
                 text: text.into(),
                 urgency: Urgency::Normal,
@@ -164,4 +168,31 @@ async fn unknown_request_lists_capabilities() {
     let r = h.say("讲个笑话").await;
     assert_eq!(r.kind, ExpressionKind::Report);
     assert!(r.text.contains("notes.list"));
+}
+
+#[tokio::test]
+async fn voice_cannot_approve_irreversible_steps() {
+    let mut h = Harness::new("voice-confirm", |_| true);
+    h.say("记一下 买牛奶").await;
+    h.say("清空笔记").await;
+    assert!(h.butler.awaiting_confirmation());
+
+    // A spoken "确认。" (with the recognizer's punctuation) is not enough for L3.
+    let r = h.say_from(agentosd::voice::MIC_DEVICE, "确认。").await;
+    assert_eq!(r.kind, ExpressionKind::AskConfirm);
+    assert!(r.text.contains("不能用语音确认"));
+    assert!(h.butler.awaiting_confirmation());
+    assert_eq!(h.notes(), vec!["买牛奶"]);
+
+    // The screen (or keyboard) can; punctuation is tolerated there too.
+    let r = h.say("确认！").await;
+    assert_eq!(r.kind, ExpressionKind::Report);
+    assert!(h.notes().is_empty());
+
+    // Voice can always cancel.
+    h.say("记一下 牛奶").await;
+    h.say("清空笔记").await;
+    h.say_from(agentosd::voice::MIC_DEVICE, "算了").await;
+    assert!(!h.butler.awaiting_confirmation());
+    assert_eq!(h.notes(), vec!["牛奶"]);
 }

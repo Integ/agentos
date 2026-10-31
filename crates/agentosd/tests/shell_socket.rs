@@ -74,6 +74,7 @@ async fn shell_drives_the_butler_over_the_socket() {
             bus,
             audit: audit_path.clone(),
             percepts: tx,
+            voice: None,
         }
         .serve(listener),
     );

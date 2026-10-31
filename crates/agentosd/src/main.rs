@@ -23,6 +23,7 @@ use agentosd::plugin::SandboxMode;
 use agentosd::plugin_store::PluginManager;
 use agentosd::registry::CapabilityRegistry;
 use agentosd::shell_api::{self, ShellServer, SocketOutput};
+use agentosd::voice::{SpeechOutput, Voice, VoiceConfig, MIC_DEVICE};
 use tokio::sync::mpsc;
 
 fn arg(name: &str) -> Option<String> {
@@ -170,16 +171,28 @@ async fn main() -> std::io::Result<()> {
     grant_manifest(&mut policy, &butler_id, &manifest);
 
     let bus = shell_api::event_bus();
+    // Sensors run as independent tasks and feed one percept channel.
+    let (tx, mut rx) = mpsc::channel(64);
+
+    // Voice only works through a graphical shell (it owns the talk button).
+    let voice = socket_path().map(|_| {
+        let (cfg, notes) = VoiceConfig::from_env();
+        for n in notes {
+            eprintln!("{n}");
+        }
+        Voice::new(cfg, bus.clone(), tx.clone(), audit.clone())
+    });
+
     let mut expr = ExpressionHub::new(audit.clone());
     expr.add_output(Arc::new(ConsoleOutput::default()));
     expr.add_output(Arc::new(SocketOutput::new(bus.clone())));
+    if let Some(v) = &voice {
+        expr.add_output(Arc::new(SpeechOutput::new(v.clone())));
+    }
 
     let mut butler = Butler::new(butler_id, registry, policy, planner, audit.clone(), expr)
         .with_plugins(plugins.clone())
         .with_events(bus.clone());
-
-    // Sensors run as independent tasks and feed one percept channel.
-    let (tx, mut rx) = mpsc::channel(64);
 
     if let Some(path) = socket_path() {
         let listener = shell_api::bind(&path)?;
@@ -189,10 +202,12 @@ async fn main() -> std::io::Result<()> {
                 "type": "hello",
                 "planner": planner_label,
                 "version": env!("CARGO_PKG_VERSION"),
+                "voice": voice.as_ref().map(|v| v.describe()),
             }),
             bus,
             audit: audit.path().to_path_buf(),
             percepts: tx.clone(),
+            voice: voice.clone(),
         };
         tokio::spawn(server.serve(listener));
     }
@@ -214,9 +229,26 @@ async fn main() -> std::io::Result<()> {
         plugins.root().display(),
         sandbox.label()
     );
+    if let Some(v) = &voice {
+        let d = v.describe();
+        let label = |k: &str| d[k].as_str().unwrap_or("未配置").to_string();
+        println!(
+            "语音：识别 {}，播报 {}（{}）。",
+            label("input_label"),
+            label("output_label"),
+            match d["speak"].as_str() {
+                Some("always") => "总是朗读回复",
+                Some("off") => "不朗读",
+                _ => "语音提问时朗读回复",
+            }
+        );
+    }
     let mut perception = PerceptionHub::new();
     while let Some(p) = rx.recv().await {
         if let Some(intent) = perception.to_intent(p) {
+            if let (Some(v), MIC_DEVICE) = (&voice, intent.source.as_str()) {
+                v.mark_voice_intent(intent.id);
+            }
             butler.handle(intent).await;
         }
     }

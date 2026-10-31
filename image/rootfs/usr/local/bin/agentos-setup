@@ -12,7 +12,7 @@ export NEWT_COLORS='root=white,black window=black,lightgray border=black,lightgr
   entry=black,white checkbox=black,lightgray actcheckbox=white,blue emptyscale=,gray fullscale=,blue'
 W() { whiptail --backtitle "AgentOS 设置" "$@" 3>&1 1>&2 2>&3; }
 
-W --title "欢迎" --msgbox "欢迎使用 AgentOS！\n\n接下来只需要两步：\n  1. 连接网络\n  2. 选择管家 Agent 使用的 AI 模型\n\n用方向键和回车操作，Tab 切换按钮。" 14 60
+W --title "欢迎" --msgbox "欢迎使用 AgentOS！\n\n接下来只需要几步：\n  1. 连接网络\n  2. 选择管家 Agent 使用的 AI 模型\n  3. 选择要不要用语音\n\n用方向键和回车操作，Tab 切换按钮。" 15 60
 
 # --- network ---------------------------------------------------------------
 online() { nm-online -q -t "${1:-8}" 2>/dev/null; }
@@ -53,6 +53,31 @@ case "$planner" in
     printf 'OPENAI_BASE_URL=%q\nOPENAI_API_KEY=%q\nOPENAI_MODEL=%q\n' "$base" "$key" "$model" >> "$tmp"
     ;;
 esac
+
+# --- voice -------------------------------------------------------------------
+voice=$(W --title "语音" --menu "要用语音和管家说话吗？\n\n按住屏幕上的麦克风按钮（或右 Ctrl）说话，松开发送。\n只在按住时录音，菜单栏会亮起橙色的麦克风标志。" 16 76 2 \
+  openai "云端识别和朗读（OpenAI 兼容接口，录音会上传到该服务）" \
+  off    "先不用语音（以后可以在菜单里重新设置）") || voice=off
+
+if [ "$voice" = openai ]; then
+  default_base="https://api.openai.com/v1"
+  [ "$planner" = openai ] && [ -n "${base:-}" ] && default_base=$base
+  vbase=$(W --title "语音" --inputbox "语音接口地址（需要支持 /audio/transcriptions 和 /audio/speech）：" 10 76 "$default_base") || vbase=""
+  hint="API Key："
+  [ "$planner" = openai ] && hint="API Key（留空沿用规划器的 OPENAI_API_KEY）："
+  vkey=$(W --title "语音" --passwordbox "$hint" 10 76) || vkey=""
+  speak=$(W --title "语音" --menu "什么时候把管家的回复读出来？" 13 64 3 \
+    auto   "我用语音提问时" \
+    always "总是" \
+    off    "不朗读，只显示在屏幕上") || speak=auto
+  {
+    echo "AGENTOS_STT=openai"
+    echo "AGENTOS_TTS=openai"
+    printf 'AGENTOS_SPEAK=%q\n' "$speak"
+    [ -n "$vbase" ] && printf 'AGENTOS_VOICE_BASE_URL=%q\n' "$vbase"
+    [ -n "$vkey" ] && printf 'AGENTOS_VOICE_API_KEY=%q\n' "$vkey"
+  } >> "$tmp"
+fi
 
 install -m 0640 -o root -g agent "$tmp" "$ENV_FILE"
 rm -f "$tmp"

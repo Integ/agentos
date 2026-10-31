@@ -8,6 +8,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 - 架构概要与 P0 进度：[docs/architecture.md](docs/architecture.md)
 - 自我进化：[docs/self-evolution.md](docs/self-evolution.md)
 - 图形界面：[docs/shell.md](docs/shell.md)
+- 语音输入与朗读：[docs/voice.md](docs/voice.md)
 
 ## 安装到 PC
 
