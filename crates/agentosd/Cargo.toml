@@ -11,4 +11,6 @@ agentos-policy.workspace = true
 agentos-audit.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
+reqwest.workspace = true
+serde.workspace = true
 tokio.workspace = true

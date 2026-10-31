@@ -35,6 +35,18 @@ cargo run -p agentosd
 y
 ```
 
+### 用 Claude 做规划
+
+设置 `ANTHROPIC_API_KEY` 后，`agentosd` 自动改用 Claude 规划器（默认模型 `claude-opus-5-5`）：每个意图调用一次 Messages API，所有能力作为工具提供，模型返回的工具调用按顺序成为计划步骤，仍然逐步经过策略引擎。
+
+```sh
+export ANTHROPIC_API_KEY=...
+cargo run -p agentosd                    # 自动使用 Claude
+cargo run -p agentosd -- --planner rule  # 强制使用离线规则规划器
+```
+
+可选环境变量：`AGENTOS_MODEL`（换模型）、`ANTHROPIC_BASE_URL`（换 API 地址）。
+
 审计日志默认写到 `agentos-audit.jsonl`，可用 `--audit <路径>` 或环境变量 `AGENTOS_AUDIT` 指定。
 
 ## 开发

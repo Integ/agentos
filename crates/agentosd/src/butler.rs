@@ -137,6 +137,10 @@ impl Butler {
             return;
         }
 
+        if let Some(reply) = &plan.reply {
+            self.say(&intent, ExpressionKind::Report, reply.clone())
+                .await;
+        }
         let outline = plan
             .steps
             .iter()
