@@ -13,7 +13,9 @@
 #
 # Environment:
 #   DISTRO        debian | ubuntu                       (default: debian)
-#   MIRROR        package mirror URL                    (default: distro's)
+#   MIRROR        package mirror used while building    (default: distro's)
+#                 The finished image always points apt at the distro's
+#                 default mirror, so a CI-local mirror never leaks into it.
 #   OUT           output directory                      (default: out/)
 #   AGENTOSD_BIN  prebuilt agentosd binary (skips cargo build)
 #   EXTRA_MB      free space left in the root fs, in MiB (default: 1024)
@@ -43,18 +45,19 @@ done
 case "$DISTRO" in
   debian)
     SUITE=trixie
-    MIRROR="${MIRROR:-http://deb.debian.org/debian}"
+    DEFAULT_MIRROR=http://deb.debian.org/debian
     COMPONENTS=main,contrib,non-free,non-free-firmware
     KERNEL_PKGS="linux-image-amd64 firmware-linux firmware-iwlwifi firmware-realtek firmware-atheros"
     ;;
   ubuntu)
     SUITE=noble
-    MIRROR="${MIRROR:-http://archive.ubuntu.com/ubuntu}"
+    DEFAULT_MIRROR=http://archive.ubuntu.com/ubuntu
     COMPONENTS=main,restricted,universe
     KERNEL_PKGS="linux-image-generic"
     ;;
   *) die "不支持的 DISTRO=$DISTRO（可选 debian、ubuntu）" ;;
 esac
+MIRROR="${MIRROR:-$DEFAULT_MIRROR}"
 
 # Everything a desktop AgentOS session needs. Kept explicit and
 # --no-install-recommends so the image stays small and predictable.
@@ -216,6 +219,7 @@ sed "s/@ROOT_UUID@/$ROOT_UUID/g" "$ROOT/usr/share/agentos/grub.cfg.in" > "$EFI_S
 cp "$EFI_SRC/EFI/BOOT/grub.cfg" "$EFI_SRC/EFI/$DISTRO/grub.cfg"
 
 log "清理"
+sed -i "s|$MIRROR|$DEFAULT_MIRROR|g" "$ROOT/etc/apt/sources.list"
 rm -f "$ROOT/usr/sbin/policy-rc.d"
 in_root apt-get clean
 rm -rf "$ROOT"/var/lib/apt/lists/* "$ROOT"/var/cache/apt/*.bin "$ROOT"/tmp/* "$ROOT"/var/log/*.log

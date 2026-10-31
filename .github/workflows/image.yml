@@ -44,6 +44,9 @@ jobs:
         env:
           DISTRO: ${{ matrix.distro }}
           COMPRESS: "1"
+          # archive.ubuntu.com is slow from GitHub's runners (~1.4 MB/s);
+          # the in-region Azure mirror is the one the runners themselves use.
+          MIRROR: ${{ matrix.distro == 'ubuntu' && 'http://azure.archive.ubuntu.com/ubuntu' || '' }}
         run: image/build-in-docker.sh
 
       - name: Enable KVM
