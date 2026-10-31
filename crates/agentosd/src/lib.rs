@@ -17,6 +17,7 @@ pub mod planner;
 pub mod plugin;
 pub mod plugin_store;
 pub mod registry;
+pub mod shell_api;
 
 #[cfg(test)]
 mod test_http;

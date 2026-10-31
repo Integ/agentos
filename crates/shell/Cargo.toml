@@ -1,0 +1,15 @@
+[package]
+name = "agentos-shell"
+description = "AgentOS graphical shell: a full-screen glass desktop that talks to agentosd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "agentos-shell"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+tao = "0.37.2"
+wry = "0.57.1"

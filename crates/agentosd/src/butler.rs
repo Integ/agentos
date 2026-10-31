@@ -9,12 +9,13 @@ use std::sync::Arc;
 use agentos_audit::{AuditEvent, AuditLog, IntentRecord};
 use agentos_core::{AgentId, CapabilityName, Expression, ExpressionKind, Intent, Urgency};
 use agentos_policy::{CallContext, Decision, PolicyEngine};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::expression::ExpressionHub;
 use crate::planner::{Plan, Planner, Step};
 use crate::plugin_store::PluginManager;
 use crate::registry::CapabilityRegistry;
+use crate::shell_api::{risk_label, EventBus};
 
 struct Pending {
     intent: Intent,
@@ -33,6 +34,7 @@ pub struct Butler {
     plugins: Option<Arc<PluginManager>>,
     plugin_generation: u64,
     plugin_names: Vec<CapabilityName>,
+    events: Option<EventBus>,
 }
 
 fn is_yes(text: &str) -> bool {
@@ -62,6 +64,7 @@ impl Butler {
             plugins: None,
             plugin_generation: 0,
             plugin_names: Vec::new(),
+            events: None,
         }
     }
 
@@ -71,6 +74,43 @@ impl Butler {
         self.plugins = Some(pm);
         self.sync_plugins();
         self
+    }
+
+    /// Publish structured progress (plan, step status, confirmations) to shells.
+    pub fn with_events(mut self, bus: EventBus) -> Self {
+        self.events = Some(bus);
+        self
+    }
+
+    fn emit(&self, v: Value) {
+        if let Some(bus) = &self.events {
+            let _ = bus.send(v);
+        }
+    }
+
+    fn emit_plan(&self, intent: &Intent, plan: &Plan) {
+        if self.events.is_none() {
+            return;
+        }
+        let steps: Vec<Value> = plan
+            .steps
+            .iter()
+            .map(|s| {
+                let spec = self.registry.get(&s.capability).map(|c| c.spec());
+                json!({
+                    "capability": s.capability.to_string(),
+                    "description": spec.map(|s| s.description.clone()).unwrap_or_default(),
+                    "risk": spec.map(|s| risk_label(s.risk)),
+                })
+            })
+            .collect();
+        self.emit(
+            json!({"type": "plan", "intent": intent.id, "text": intent.text, "steps": steps}),
+        );
+    }
+
+    fn emit_step(&self, intent: &Intent, index: usize, status: &str) {
+        self.emit(json!({"type": "step", "intent": intent.id, "index": index, "status": status}));
     }
 
     /// Bring the registry and grants in line with the active plugins.
@@ -132,6 +172,14 @@ impl Butler {
     }
 
     pub async fn handle(&mut self, intent: Intent) {
+        let id = intent.id;
+        self.handle_inner(intent).await;
+        if self.pending.is_none() {
+            self.emit(json!({"type": "done", "intent": id}));
+        }
+    }
+
+    async fn handle_inner(&mut self, intent: Intent) {
         self.log(AuditEvent::IntentReceived {
             intent: Box::new(IntentRecord::from(&intent)),
         });
@@ -147,6 +195,7 @@ impl Butler {
             if approved {
                 self.run(p.intent, p.plan, p.step, true).await;
             } else {
+                self.emit_step(&p.intent, p.step, "cancelled");
                 self.say(
                     &p.intent,
                     ExpressionKind::Report,
@@ -190,6 +239,7 @@ impl Butler {
             .map(|(i, s)| format!("{}. {}", i + 1, s.capability))
             .collect::<Vec<_>>()
             .join("；");
+        self.emit_plan(&intent, &plan);
         self.say(&intent, ExpressionKind::Plan, outline).await;
         self.run(intent, plan, 0, false).await;
     }
@@ -205,6 +255,7 @@ impl Butler {
             self.sync_plugins();
             let step = &plan.steps[i];
             let Some(cap) = self.registry.get(&step.capability).cloned() else {
+                self.emit_step(&intent, i, "failed");
                 self.say(
                     &intent,
                     ExpressionKind::Error,
@@ -228,6 +279,7 @@ impl Butler {
             match decision {
                 Decision::Allow => {}
                 Decision::Deny { reason } => {
+                    self.emit_step(&intent, i, "denied");
                     self.say(
                         &intent,
                         ExpressionKind::Error,
@@ -250,6 +302,18 @@ impl Butler {
                         step.capability,
                         cap.spec().description
                     );
+                    self.emit_step(&intent, i, "confirm");
+                    self.emit(json!({
+                        "type": "confirm",
+                        "intent": intent.id,
+                        "index": i,
+                        "capability": step.capability.to_string(),
+                        "description": cap.spec().description,
+                        "risk": risk_label(cap.spec().risk),
+                        "reason": reason,
+                        "verify_identity": verify_identity,
+                        "args": step.args,
+                    }));
                     self.say(&intent, ExpressionKind::AskConfirm, text).await;
                     self.pending = Some(Pending {
                         intent,
@@ -260,6 +324,7 @@ impl Butler {
                 }
             }
 
+            self.emit_step(&intent, i, "running");
             let result = cap.invoke(step.args.clone()).await;
             let (ok, value) = match &result {
                 Ok(v) => (true, v.clone()),
@@ -278,8 +343,10 @@ impl Butler {
                     // A trusted capability may ask for a next step (for example,
                     // a proposal asks to be installed). It still goes through policy.
                     // Plugins cannot do this: their output is stripped of `follow_up`.
+                    self.emit_step(&intent, i, "done");
                     if let Some(next) = follow_up(&v) {
                         plan.steps.insert(i + 1, next);
+                        self.emit_plan(&intent, &plan);
                     }
                     let msg = v
                         .get("message")
@@ -289,6 +356,7 @@ impl Butler {
                     self.say(&intent, ExpressionKind::Report, msg).await;
                 }
                 Err(e) => {
+                    self.emit_step(&intent, i, "failed");
                     self.say(
                         &intent,
                         ExpressionKind::Error,
