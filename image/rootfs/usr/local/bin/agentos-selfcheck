@@ -31,6 +31,18 @@ else
   console "AGENTOS-NETWORK: FAIL"
 fi
 
+# Graphical desktop: agentos-shell loaded its page and is talking to agentosd
+# (it leaves a marker in the session user's runtime dir). Needs a display, so
+# a machine without one simply reports a timeout here.
+marker=/run/user/$(id -u agent)/agentos-shell.ready
+for _ in $(seq 90); do [ -e "$marker" ] && break; sleep 2; done
+if [ -e "$marker" ]; then
+  console "AGENTOS-DESKTOP: OK ($(cat "$marker"))"
+else
+  console "AGENTOS-DESKTOP: FAIL"
+  tail -n 20 "/run/user/$(id -u agent)/agentos-shell.log" /tmp/agentos-sway.log 2>/dev/null
+fi
+
 # Test hook, only reachable from a VM: QEMU's
 #   -fw_cfg name=opt/agentos/autoinstall,string=/dev/vdb
 # asks us to install onto that disk unattended and power off.

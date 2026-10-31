@@ -1,6 +1,6 @@
 #!/bin/bash
 # First-boot setup: network, AI planner and API key. Re-run any time from the
-# agentos-shell menu. Writes /etc/agentos/agentos.env (root:agent, 0640).
+# system menu. Writes /etc/agentos/agentos.env (root:agent, 0640).
 set -u
 [ "$EUID" -eq 0 ] || exec sudo "$0" "$@"
 

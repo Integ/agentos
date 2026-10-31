@@ -82,8 +82,58 @@ fn daemon_loop(path: PathBuf, conn: Conn, proxy: EventLoopProxy<Value>) {
     }
 }
 
+/// System actions the UI may ask for, run by the `agentos-system` helper that
+/// the AgentOS image installs.
+const SYSTEM_ACTIONS: [&str; 5] = ["terminal", "setup", "install", "reboot", "poweroff"];
+
+/// `AGENTOS_SYSTEM`, else `/usr/local/bin/agentos-system` if it exists.
+fn system_helper() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("AGENTOS_SYSTEM") {
+        return (!p.is_empty()).then(|| p.into());
+    }
+    let p = PathBuf::from("/usr/local/bin/agentos-system");
+    p.exists().then_some(p)
+}
+
+/// The action named by a `{"type":"system","action":…}` request, if allowed.
+fn system_action(v: &Value) -> Option<&'static str> {
+    let a = v.get("action")?.as_str()?;
+    SYSTEM_ACTIONS.iter().copied().find(|x| *x == a)
+}
+
+fn run_system(action: &str) {
+    match system_helper() {
+        Some(helper) => {
+            if let Err(e) = std::process::Command::new(&helper).arg(action).spawn() {
+                eprintln!("无法执行 {} {action}：{e}", helper.display());
+            }
+        }
+        // Outside the AgentOS image only the terminal is available.
+        None if action == "terminal" => launch_terminal(),
+        None => eprintln!("没有 agentos-system，忽略 {action}"),
+    }
+}
+
+/// Facts about this machine the UI needs for its system menu.
+fn host_info() -> Value {
+    json!({
+        "type": "host",
+        "managed": system_helper().is_some(),
+        "installed": std::path::Path::new("/etc/agentos/installed").exists(),
+    })
+}
+
+/// Once the page shows a connected daemon, leave a marker for the boot
+/// self-check: `$XDG_RUNTIME_DIR/agentos-shell.ready`.
+fn mark_ready(hello: &Value) {
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        let planner = hello.get("planner").and_then(Value::as_str).unwrap_or("");
+        let _ = std::fs::write(PathBuf::from(dir).join("agentos-shell.ready"), planner);
+    }
+}
+
 /// What the UI may ask for. Only intents and confirmation answers reach the
-/// daemon, rebuilt from known fields; `launch` opens a fixed set of programs.
+/// daemon, rebuilt from known fields; `system` runs a fixed set of actions.
 fn handle_ipc(body: &str, conn: &Conn, proxy: &EventLoopProxy<Value>) {
     let Ok(v) = serde_json::from_str::<Value>(body) else {
         return;
@@ -102,9 +152,9 @@ fn handle_ipc(body: &str, conn: &Conn, proxy: &EventLoopProxy<Value>) {
             let _ = proxy.send_event(json!({"type": READY}));
             return;
         }
-        Some("launch") => {
-            if v.get("app").and_then(Value::as_str) == Some("terminal") {
-                launch_terminal();
+        Some("system") => {
+            if let Some(action) = system_action(&v) {
+                run_system(action);
             }
             return;
         }
@@ -184,9 +234,15 @@ fn main() -> wry::Result<()> {
                     let js = format!("window.agentos && window.agentos.receive({v})");
                     if let Err(e) = webview.evaluate_script(&js) {
                         eprintln!("UI 更新失败：{e}");
+                    } else if v.get("type").and_then(Value::as_str) == Some("hello") {
+                        mark_ready(v);
                     }
                 };
                 if v.get("type").and_then(Value::as_str) == Some(READY) {
+                    if queued.is_none() {
+                        return; // the page reloaded; nothing is queued any more
+                    }
+                    deliver(&host_info());
                     for v in queued.take().unwrap_or_default() {
                         deliver(&v);
                     }
@@ -203,4 +259,24 @@ fn main() -> wry::Result<()> {
             _ => {}
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_known_system_actions_are_accepted() {
+        let a = |s: &str| system_action(&serde_json::from_str(s).unwrap());
+        assert_eq!(
+            a(r#"{"type":"system","action":"poweroff"}"#),
+            Some("poweroff")
+        );
+        assert_eq!(
+            a(r#"{"type":"system","action":"terminal"}"#),
+            Some("terminal")
+        );
+        assert_eq!(a(r#"{"type":"system","action":"rm -rf /"}"#), None);
+        assert_eq!(a(r#"{"type":"system"}"#), None);
+    }
 }

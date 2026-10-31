@@ -1,8 +1,8 @@
 #!/bin/bash
-# tty1 autologin → full-screen terminal in a sway kiosk → agentos-shell.
+# tty1 autologin → sway → AgentOS desktop (agentosd + agentos-shell).
 # Falls back to the plain text console if the graphical session can't start.
 if grep -qw 'agentos.safe=1' /proc/cmdline || ! command -v sway >/dev/null; then
-  exec /usr/local/bin/agentos-shell
+  exec /usr/local/bin/agentos-console
 fi
 
 export XDG_CURRENT_DESKTOP=sway XDG_SESSION_TYPE=wayland
@@ -17,5 +17,5 @@ log=/tmp/agentos-sway.log
 if ! sway --config /usr/share/agentos/sway.conf >"$log" 2>&1; then
   echo "图形界面启动失败（日志：$log），改用文本模式。"
   sleep 3
-  exec /usr/local/bin/agentos-shell
+  exec /usr/local/bin/agentos-console
 fi

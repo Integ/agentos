@@ -16,11 +16,16 @@
 #   MIRROR        package mirror URL                    (default: distro's)
 #   OUT           output directory                      (default: out/)
 #   AGENTOSD_BIN  prebuilt agentosd binary (skips cargo build)
+#   AGENTOS_SHELL_BIN  prebuilt agentos-shell binary (skips cargo build)
 #   EXTRA_MB      free space left in the root fs, in MiB (default: 1024)
 #   COMPRESS      1 to also write <image>.xz            (default: 0)
 #
 # Host requirements: debootstrap, sfdisk (fdisk), mkfs.vfat (dosfstools),
-# mtools, mkfs.ext4 (e2fsprogs >= 1.47), cargo (unless AGENTOSD_BIN is set).
+# mtools, mkfs.ext4 (e2fsprogs >= 1.47), cargo and libwebkit2gtk-4.1-dev
+# (unless both binaries are given).
+#
+# Binaries must be linked against a glibc no newer than the target's; see
+# build-in-docker.sh, which builds them on Debian 12.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,8 +69,10 @@ PACKAGES=(
   network-manager systemd-resolved wpasupplicant iproute2 iputils-ping curl less nano
   # Runtime for agent plugins: bubblewrap sandbox, Python plugins.
   bubblewrap python3
-  # Graphical session: sway in kiosk mode + foot terminal, CJK fonts, pinyin IME.
+  # Graphical session: sway + the agentos-shell desktop (WebKitGTK), foot
+  # terminal, CJK and Latin fonts, pinyin IME.
   sway foot fonts-noto-cjk fcitx5 fcitx5-chinese-addons
+  libwebkit2gtk-4.1-0 fonts-inter
   libgl1-mesa-dri libpam-systemd dbus-user-session
 )
 
@@ -80,15 +87,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- 1. agentosd -------------------------------------------------------------
-if [[ -n "${AGENTOSD_BIN:-}" ]]; then
-  BIN="$AGENTOSD_BIN"
-else
-  log "编译 agentosd（release）"
-  (cd "$REPO" && cargo build --release -p agentosd)
-  BIN="$REPO/target/release/agentosd"
+# --- 1. agentosd and agentos-shell -------------------------------------------
+if [[ -z "${AGENTOSD_BIN:-}" || -z "${AGENTOS_SHELL_BIN:-}" ]]; then
+  log "编译 agentosd 和 agentos-shell（release）"
+  (cd "$REPO" && cargo build --release -p agentosd -p agentos-shell)
 fi
+BIN="${AGENTOSD_BIN:-$REPO/target/release/agentosd}"
+SHELL_BIN="${AGENTOS_SHELL_BIN:-$REPO/target/release/agentos-shell}"
 [[ -x "$BIN" ]] || die "找不到 agentosd 可执行文件：$BIN"
+[[ -x "$SHELL_BIN" ]] || die "找不到 agentos-shell 可执行文件：$SHELL_BIN"
 
 # --- 2. base system ----------------------------------------------------------
 rm -rf "$WORK"
@@ -172,6 +179,7 @@ cp "$GRUB" "$EFI_SRC/EFI/BOOT/grubx64.efi"
 log "安装 AgentOS 用户态"
 cp -a "$HERE/rootfs/." "$ROOT/"
 install -m 0755 "$BIN" "$ROOT/usr/local/bin/agentosd"
+install -m 0755 "$SHELL_BIN" "$ROOT/usr/local/bin/agentos-shell"
 chmod 0755 "$ROOT"/usr/local/bin/agentos-*
 chmod 0440 "$ROOT/etc/sudoers.d/agentos"
 echo "$DISTRO" > "$ROOT/usr/share/agentos/distro"

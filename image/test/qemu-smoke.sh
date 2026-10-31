@@ -8,6 +8,9 @@
 #   2. boot from the installed disk alone; the self-check must pass again,
 #      and a screenshot of the graphical session is saved
 #
+# In both boots the graphical desktop (sway + agentos-shell connected to
+# agentosd) must come up.
+#
 # Usage: image/test/qemu-smoke.sh out/agentos-debian-x86_64.img [workdir]
 set -euo pipefail
 
@@ -108,6 +111,8 @@ wait_for "$WORK/serial-usb.log" 'AGENTOS-SANDBOX: OK' 120 || fail usb "bubblewra
 log "插件沙箱（bubblewrap + Python）可用"
 wait_for "$WORK/serial-usb.log" 'AGENTOS-NETWORK: OK' 120 || fail usb "网络没有自动连上（NetworkManager + DNS）"
 log "有线网络自动连接、DNS 正常"
+wait_for "$WORK/serial-usb.log" 'AGENTOS-DESKTOP: OK' 240 || fail usb "图形桌面（agentos-shell）没有就绪"
+log "图形桌面就绪：$(grep -ao 'AGENTOS-DESKTOP: OK[^\r]*' "$WORK/serial-usb.log" | tail -1)"
 wait_for "$WORK/serial-usb.log" 'AGENTOS-AUTOINSTALL: OK' "$TIMEOUT" || fail usb "自动安装失败"
 log "安装完成，等待关机"
 for _ in $(seq 120); do kill -0 "$QEMU_PID" 2>/dev/null || break; sleep 1; done
@@ -117,7 +122,9 @@ log "第 2 步：只从安装好的硬盘启动"
 run_vm disk -drive if=virtio,format=qcow2,file="$WORK/disk.qcow2"
 wait_for "$WORK/serial-disk.log" 'AGENTOS-SELFCHECK: OK' "$TIMEOUT" || fail disk "硬盘启动自检失败"
 log "硬盘启动自检通过"
-sleep "${SCREENSHOT_DELAY:-60}"   # let sway + foot + the setup wizard come up
+wait_for "$WORK/serial-disk.log" 'AGENTOS-DESKTOP: OK' 240 || fail disk "硬盘启动后图形桌面没有就绪"
+log "硬盘启动后图形桌面就绪"
+sleep "${SCREENSHOT_DELAY:-20}"   # let the setup wizard window settle over the desktop
 # Wiggle the pointer so the compositor repaints the whole output first.
 for xy in "40 40" "-40 -40" "40 40"; do monitor disk "mouse_move $xy"; done
 sleep 5
