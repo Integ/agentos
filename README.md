@@ -47,6 +47,23 @@ cargo run -p agentosd -- --planner rule  # 强制使用离线规则规划器
 
 可选环境变量：`AGENTOS_MODEL`（换模型）、`ANTHROPIC_BASE_URL`（换 API 地址）。
 
+### 用 OpenAI 兼容接口做规划
+
+任何兼容 OpenAI Chat Completions 的服务都可以（OpenAI、DeepSeek、通义千问、Moonshot，或本地的 Ollama、vLLM、LM Studio），需要支持 function calling。
+
+```sh
+# 云端服务
+export OPENAI_API_KEY=...
+export OPENAI_BASE_URL=https://api.deepseek.com/v1   # 不设则为 https://api.openai.com/v1
+export OPENAI_MODEL=deepseek-chat
+cargo run -p agentosd -- --planner openai
+
+# 本地 Ollama（不需要 key）
+OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_MODEL=qwen3 cargo run -p agentosd
+```
+
+规划器选择：`--planner claude|openai|rule`（或环境变量 `AGENTOS_PLANNER`）。不指定时，设置了 `ANTHROPIC_API_KEY` 就用 Claude，否则配置了 OpenAI 兼容接口就用它，都没有则用离线规则规划器。
+
 审计日志默认写到 `agentos-audit.jsonl`，可用 `--audit <路径>` 或环境变量 `AGENTOS_AUDIT` 指定。
 
 ## 开发

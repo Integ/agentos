@@ -8,6 +8,23 @@ use agentos_core::{CapabilityName, CapabilitySpec, Intent};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+/// System prompt shared by the LLM-backed planners.
+pub const SYSTEM_PROMPT: &str = "你是 AgentOS 的管家 Agent，运行在用户的桌面工作站上。\
+用户通过键盘或语音向你表达意图，你通过调用工具完成任务。\
+\n\n- 能用工具完成的，就调用对应的工具；需要多个步骤时，按执行顺序依次调用。\
+\n- 工具调用会先经过系统的权限检查，高风险操作会由系统向用户请求确认，你不需要自己再问。\
+\n- 没有合适的工具时，用一两句话直接回答或说明做不到，不要编造工具。\
+\n- 用用户使用的语言回复，简洁。";
+
+/// Tool names must match `^[a-zA-Z0-9_-]{1,64}$`; capability names use dots.
+pub fn tool_name(cap: &CapabilityName) -> String {
+    cap.as_str().replace('.', "__")
+}
+
+pub fn capability_name(tool: &str) -> CapabilityName {
+    CapabilityName::new(tool.replace("__", "."))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Step {
     pub capability: CapabilityName,
