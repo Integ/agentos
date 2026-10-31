@@ -8,10 +8,14 @@ pub mod builtin;
 pub mod butler;
 pub mod claude_planner;
 pub mod devices;
+pub mod evolve;
 pub mod expression;
+pub mod llm;
 pub mod openai_planner;
 pub mod perception;
 pub mod planner;
+pub mod plugin;
+pub mod plugin_store;
 pub mod registry;
 
 #[cfg(test)]

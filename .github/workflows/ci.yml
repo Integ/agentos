@@ -14,6 +14,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # Plugin sandbox. Ubuntu 24.04 blocks unprivileged user namespaces via
+      # AppArmor; lift that so bubblewrap works and the sandbox tests run.
+      - run: |
+          sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / --unshare-all true && echo "bubblewrap OK"
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all

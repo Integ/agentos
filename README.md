@@ -6,6 +6,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 - 设计草案：[AgentOS 架构设计草案](https://claude.ai/artifact/RzRDjHkBbJVbnyFDRSZ4BN)
 - 架构概要与 P0 进度：[docs/architecture.md](docs/architecture.md)
+- 自我进化：[docs/self-evolution.md](docs/self-evolution.md)
 
 ## 仓库结构
 
@@ -14,7 +15,7 @@ crates/
   core/      核心类型：Intent、Percept、Expression、Capability，Sensor/Output trait
   policy/    策略引擎：能力授权 + 风险分级确认 + 污点追踪
   audit/     只追加审计日志（JSON Lines），可回放
-  agentosd/  P0 守护进程：感知中枢 → 管家 Agent → 表达中枢
+  agentosd/  P0 守护进程：感知中枢 → 管家 Agent → 表达中枢；插件运行时与自我进化（evolve）
 ```
 
 ## 快速开始
@@ -63,6 +64,20 @@ OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_MODEL=qwen3 cargo run -p agento
 ```
 
 规划器选择：`--planner claude|openai|rule`（或环境变量 `AGENTOS_PLANNER`）。不指定时，设置了 `ANTHROPIC_API_KEY` 就用 Claude，否则配置了 OpenAI 兼容接口就用它，都没有则用离线规则规划器。
+
+### 自我进化
+
+配置了大模型（Claude 或 OpenAI 兼容接口）后，可以让 AgentOS 给自己写新能力：
+
+```
+学会：把摄氏度换算成华氏度   # 生成插件、沙箱自测，展示代码和权限
+y                             # 确认安装（L3）
+37 摄氏度是多少华氏度          # 新能力立即可用（需要 LLM 规划器）
+看看插件
+回滚 unit.c_to_f
+```
+
+插件在 bubblewrap 沙箱中运行（`apt install bubblewrap python3`），存放在 `~/.local/share/agentos/evolve`（`--home` 或 `AGENTOS_HOME` 可改）。详见 [docs/self-evolution.md](docs/self-evolution.md)。
 
 审计日志默认写到 `agentos-audit.jsonl`，可用 `--audit <路径>` 或环境变量 `AGENTOS_AUDIT` 指定。
 
