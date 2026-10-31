@@ -3,6 +3,10 @@ name: Image
 # Builds the bootable AgentOS disk image and boots it in QEMU (Secure Boot
 # on): self-check from the "USB stick", unattended install onto a second disk,
 # then self-check again from the installed disk.
+#
+# Push / PR / tag builds only the Debian image. The Ubuntu image is slow to
+# build and test, so it runs only when started by hand (Actions → Image →
+# Run workflow → distro: ubuntu).
 
 on:
   push:
@@ -15,6 +19,12 @@ on:
       - "Cargo.*"
       - ".github/workflows/image.yml"
   workflow_dispatch:
+    inputs:
+      distro:
+        description: "Base distribution"
+        type: choice
+        options: [debian, ubuntu]
+        default: debian
 
 permissions:
   contents: write # attach images to releases on tags
@@ -26,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        distro: [debian, ubuntu]
+        distro: ${{ fromJSON(github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.distro) || '["debian"]') }}
     steps:
       - uses: actions/checkout@v4
 

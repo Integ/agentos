@@ -18,7 +18,7 @@ AgentOS 以一个**可启动的磁盘镜像**发布：写进 U 盘，从 U 盘�
 | 文件 | 说明 |
 | --- | --- |
 | `agentos-debian-x86_64.img.xz` | 默认，基于 Debian 13 |
-| `agentos-ubuntu-x86_64.img.xz` | 基于 Ubuntu 24.04，内核对很新的硬件支持更好 |
+| `agentos-ubuntu-x86_64.img.xz` | 基于 Ubuntu 24.04，内核对很新的硬件支持更好。CI 不自动构建，需要时在 Actions → Image → Run workflow 里选 `ubuntu` 手动触发 |
 
 用 [balenaEtcher](https://etcher.balena.io/) 直接选 `.img.xz` 写入 U 盘即可（它能直接读 xz 压缩的镜像，Windows 上也可以用 Rufus）。命令行方式：
 
