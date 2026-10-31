@@ -7,6 +7,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 - 设计草案：[AgentOS 架构设计草案](https://claude.ai/artifact/RzRDjHkBbJVbnyFDRSZ4BN)
 - 架构概要与 P0 进度：[docs/architecture.md](docs/architecture.md)
 - 自我进化：[docs/self-evolution.md](docs/self-evolution.md)
+- 图形界面：[docs/shell.md](docs/shell.md)
 
 ## 安装到 PC
 
@@ -21,6 +22,7 @@ crates/
   audit/     只追加审计日志（JSON Lines），可回放
   image/       可启动磁盘镜像：构建脚本、系统集成文件、QEMU 冒烟测试
   agentosd/  P0 守护进程：感知中枢 → 管家 Agent → 表达中枢；插件运行时与自我进化（evolve）
+  shell/     图形界面 agentos-shell：玻璃风格桌面，通过 Unix socket 连接 agentosd
 ```
 
 ## 快速开始
@@ -40,6 +42,17 @@ cargo run -p agentosd
 清空笔记      # L3 不可逆操作，会先请求确认
 y
 ```
+
+### 图形界面
+
+```sh
+cargo run -p agentosd -- --listen $XDG_RUNTIME_DIR/agentos.sock
+cargo run -p agentos-shell -- --windowed   # 需要 libwebkit2gtk-4.1-dev
+```
+
+![AgentOS 桌面](docs/images/shell-desktop.jpg)
+
+详见 [docs/shell.md](docs/shell.md)。
 
 ### 用 Claude 做规划
 

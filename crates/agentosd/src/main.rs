@@ -22,6 +22,7 @@ use agentosd::planner::{Planner, RulePlanner};
 use agentosd::plugin::SandboxMode;
 use agentosd::plugin_store::PluginManager;
 use agentosd::registry::CapabilityRegistry;
+use agentosd::shell_api::{self, ShellServer, SocketOutput};
 use tokio::sync::mpsc;
 
 fn arg(name: &str) -> Option<String> {
@@ -51,6 +52,14 @@ fn home_dir() -> std::path::PathBuf {
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     std::path::Path::new(&home).join(".local/share/agentos")
+}
+
+/// `--listen <path>` or `AGENTOS_SOCKET`: serve graphical shells on a Unix socket.
+fn socket_path() -> Option<std::path::PathBuf> {
+    arg("--listen")
+        .or_else(|| std::env::var("AGENTOS_SOCKET").ok())
+        .filter(|p| !p.is_empty())
+        .map(Into::into)
 }
 
 /// A planner, the same model as plain text (for writing plugins), and a label.
@@ -160,14 +169,33 @@ async fn main() -> std::io::Result<()> {
     let manifest: Vec<_> = registry.specs().into_iter().map(|s| s.name).collect();
     grant_manifest(&mut policy, &butler_id, &manifest);
 
+    let bus = shell_api::event_bus();
     let mut expr = ExpressionHub::new(audit.clone());
     expr.add_output(Arc::new(ConsoleOutput::default()));
+    expr.add_output(Arc::new(SocketOutput::new(bus.clone())));
 
     let mut butler = Butler::new(butler_id, registry, policy, planner, audit.clone(), expr)
-        .with_plugins(plugins.clone());
+        .with_plugins(plugins.clone())
+        .with_events(bus.clone());
 
     // Sensors run as independent tasks and feed one percept channel.
     let (tx, mut rx) = mpsc::channel(64);
+
+    if let Some(path) = socket_path() {
+        let listener = shell_api::bind(&path)?;
+        println!("图形界面接口：{}", path.display());
+        let server = ShellServer {
+            hello: serde_json::json!({
+                "type": "hello",
+                "planner": planner_label,
+                "version": env!("CARGO_PKG_VERSION"),
+            }),
+            bus,
+            audit: audit.path().to_path_buf(),
+            percepts: tx.clone(),
+        };
+        tokio::spawn(server.serve(listener));
+    }
     let mut sensor = LineSensor::stdin();
     tokio::spawn(async move {
         while let Some(p) = sensor.next().await {
