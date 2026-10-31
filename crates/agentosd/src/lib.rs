@@ -6,6 +6,7 @@
 
 pub mod builtin;
 pub mod butler;
+pub mod claude_planner;
 pub mod devices;
 pub mod expression;
 pub mod perception;

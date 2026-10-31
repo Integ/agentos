@@ -8,6 +8,7 @@ edition = "2021"
 rust-version = "1.80"
 
 [workspace.dependencies]
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 agentos-core = { path = "crates/core" }
 agentos-policy = { path = "crates/policy" }
 agentos-audit = { path = "crates/audit" }
