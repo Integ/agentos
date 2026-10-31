@@ -4,30 +4,23 @@ name: Image
 # on): self-check from the "USB stick", unattended install onto a second disk,
 # then self-check again from the installed disk.
 #
-# Push / PR / tag builds only the Debian image. The Ubuntu image is slow to
-# build and test, so it runs only when started by hand (Actions → Image →
-# Run workflow → distro: ubuntu).
+# Runs only when a GitHub release is published (both Debian and Ubuntu,
+# images attached to the release) or when started by hand from Actions →
+# Image → Run workflow. Pushes and pull requests do not build images.
 
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
-  pull_request:
-    paths:
-      - "image/**"
-      - "crates/**"
-      - "Cargo.*"
-      - ".github/workflows/image.yml"
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       distro:
         description: "Base distribution"
         type: choice
-        options: [debian, ubuntu]
+        options: [debian, ubuntu, both]
         default: debian
 
 permissions:
-  contents: write # attach images to releases on tags
+  contents: write # attach images to the release
 
 jobs:
   image:
@@ -36,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        distro: ${{ fromJSON(github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.distro) || '["debian"]') }}
+        distro: ${{ fromJSON((github.event_name == 'release' || inputs.distro == 'both') && '["debian","ubuntu"]' || format('["{0}"]', inputs.distro)) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -85,12 +78,11 @@ jobs:
           retention-days: 14
 
       - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "AgentOS $GITHUB_REF_NAME" --notes "见 docs/install.md"
-          gh release upload "$GITHUB_REF_NAME" --clobber \
+          gh release upload "$TAG" --clobber --repo "$GITHUB_REPOSITORY" \
             out/agentos-${{ matrix.distro }}-x86_64.img.xz \
             out/agentos-${{ matrix.distro }}-x86_64.img.xz.sha256
