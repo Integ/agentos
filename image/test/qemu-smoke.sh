@@ -104,6 +104,8 @@ run_vm usb \
   -fw_cfg name=opt/agentos/autoinstall,string=/dev/vdb
 wait_for "$WORK/serial-usb.log" 'AGENTOS-SELFCHECK: OK' "$TIMEOUT" || fail usb "U 盘启动自检失败"
 log "U 盘启动自检通过：$(grep -ao 'AGENTOS-SELFCHECK: [^)]*)' "$WORK/serial-usb.log" | tail -1)"
+wait_for "$WORK/serial-usb.log" 'AGENTOS-SANDBOX: OK' 120 || fail usb "bubblewrap 沙箱里跑不起 Python"
+log "插件沙箱（bubblewrap + Python）可用"
 wait_for "$WORK/serial-usb.log" 'AGENTOS-NETWORK: OK' 120 || fail usb "网络没有自动连上（NetworkManager + DNS）"
 log "有线网络自动连接、DNS 正常"
 wait_for "$WORK/serial-usb.log" 'AGENTOS-AUTOINSTALL: OK' "$TIMEOUT" || fail usb "自动安装失败"

@@ -62,6 +62,8 @@ PACKAGES=(
   systemd-sysv udev dbus kmod sudo locales tzdata ca-certificates
   initramfs-tools zstd e2fsprogs dosfstools fdisk efibootmgr rsync whiptail
   network-manager systemd-resolved wpasupplicant iproute2 iputils-ping curl less nano
+  # Runtime for agent plugins: bubblewrap sandbox, Python plugins.
+  bubblewrap python3
   # Graphical session: sway in kiosk mode + foot terminal, CJK fonts, pinyin IME.
   sway foot fonts-noto-cjk fcitx5 fcitx5-chinese-addons
   libgl1-mesa-dri libpam-systemd dbus-user-session

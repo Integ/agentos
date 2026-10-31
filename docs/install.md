@@ -91,8 +91,9 @@ sudo image/test/qemu-smoke.sh out/agentos-debian-x86_64.img
 | 引导 | 发行版签名的 shim + grub（支持安全启动），根分区按 UUID 挂载 |
 | 会话 | tty1 自动登录用户 `agent` → sway（kiosk 模式）→ foot 全屏终端 → `agentos-shell` |
 | 中文 | Noto CJK 字体，fcitx5 拼音输入法，`zh_CN.UTF-8`，时区 Asia/Shanghai |
+| 插件运行时 | bubblewrap 沙箱，Python 3 |
 | AgentOS | `/usr/local/bin/agentosd`，以及 `agentos-setup`、`agentos-install`、`agentos-session`、`agentos-shell` |
-| 开机服务 | `agentos-growroot`（首次启动扩展分区）、`agentos-selfcheck`（用离线规划器跑一遍 agentosd） |
+| 开机服务 | `agentos-growroot`（首次启动扩展分区）、`agentos-selfcheck`（用离线规划器跑一遍 agentosd，检查插件沙箱和网络） |
 
 ## 目前的限制
 

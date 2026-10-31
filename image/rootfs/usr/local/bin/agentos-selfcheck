@@ -16,6 +16,14 @@ else
   printf '%s\n' "$out"
 fi
 
+# Plugin sandbox: an unprivileged bubblewrap sandbox can run Python.
+if [ "$(runuser -u agent -- bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
+       --unshare-all --die-with-parent python3 -c 'print("sandbox-ok")' 2>&1)" = sandbox-ok ]; then
+  console "AGENTOS-SANDBOX: OK"
+else
+  console "AGENTOS-SANDBOX: FAIL"
+fi
+
 # Network: NetworkManager brought a connection up and DNS resolves.
 if nm-online -q -t 60 && { getent hosts archive.ubuntu.com || getent hosts deb.debian.org; } >/dev/null; then
   console "AGENTOS-NETWORK: OK"
