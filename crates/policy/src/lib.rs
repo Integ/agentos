@@ -81,7 +81,7 @@ impl PolicyEngine {
     pub fn check(&self, agent: &AgentId, spec: &CapabilitySpec, ctx: CallContext) -> Decision {
         if !self.is_granted(agent, &spec.name) {
             return Decision::Deny {
-                reason: format!("{agent} holds no grant for {}", spec.name),
+                reason: format!("{agent} 没有 {} 的授权", spec.name),
             };
         }
         let pre = self.is_preapproved(agent, &spec.name);
@@ -90,15 +90,15 @@ impl PolicyEngine {
             RiskLevel::Reversible if !ctx.tainted => Decision::Allow,
             RiskLevel::Reversible | RiskLevel::External if pre && !ctx.tainted => Decision::Allow,
             RiskLevel::Reversible => Decision::NeedsConfirmation {
-                reason: "reversible action driven by untrusted content".into(),
+                reason: "该操作受不可信的外部内容影响".into(),
                 verify_identity: false,
             },
             RiskLevel::External => Decision::NeedsConfirmation {
-                reason: "action leaves this machine or spends money".into(),
+                reason: "该操作会把数据发出本机或产生费用".into(),
                 verify_identity: false,
             },
             RiskLevel::Irreversible => Decision::NeedsConfirmation {
-                reason: "irreversible or safety-relevant action".into(),
+                reason: "该操作不可撤销或涉及安全".into(),
                 verify_identity: true,
             },
         }
