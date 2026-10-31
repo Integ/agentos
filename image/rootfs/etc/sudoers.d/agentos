@@ -1,0 +1,3 @@
+# P0: the single desktop user administers the machine without a password.
+# The AgentOS policy engine, not sudo, gates what agents may do.
+agent ALL=(ALL) NOPASSWD: ALL

@@ -1,0 +1,83 @@
+name: Image
+
+# Builds the bootable AgentOS disk image and boots it in QEMU (Secure Boot
+# on): self-check from the "USB stick", unattended install onto a second disk,
+# then self-check again from the installed disk.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "image/**"
+      - "crates/**"
+      - "Cargo.*"
+      - ".github/workflows/image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write # attach images to releases on tags
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [debian, ubuntu]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        env:
+          DISTRO: ${{ matrix.distro }}
+          COMPRESS: "1"
+        run: image/build-in-docker.sh
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-utils ovmf
+
+      - name: Smoke test in QEMU
+        run: sudo TIMEOUT=600 image/test/qemu-smoke.sh out/agentos-${{ matrix.distro }}-x86_64.img out/smoke
+
+      - name: Upload smoke test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.distro }}
+          path: |
+            out/smoke/*.log
+            out/smoke/*.png
+          if-no-files-found: ignore
+
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentos-${{ matrix.distro }}-x86_64
+          path: |
+            out/agentos-${{ matrix.distro }}-x86_64.img.xz
+            out/agentos-${{ matrix.distro }}-x86_64.img.xz.sha256
+          compression-level: 0
+          retention-days: 14
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "AgentOS $GITHUB_REF_NAME" --notes "见 docs/install.md"
+          gh release upload "$GITHUB_REF_NAME" --clobber \
+            out/agentos-${{ matrix.distro }}-x86_64.img.xz \
+            out/agentos-${{ matrix.distro }}-x86_64.img.xz.sha256

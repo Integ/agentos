@@ -1,0 +1,69 @@
+#!/bin/bash
+# First-boot setup: network, AI planner and API key. Re-run any time from the
+# agentos-shell menu. Writes /etc/agentos/agentos.env (root:agent, 0640).
+set -u
+[ "$EUID" -eq 0 ] || exec sudo "$0" "$@"
+
+ENV_FILE=/etc/agentos/agentos.env
+# Calm dark palette instead of newt's default blue/magenta.
+export NEWT_COLORS='root=white,black window=black,lightgray border=black,lightgray title=black,lightgray
+  textbox=black,lightgray button=white,blue actbutton=white,blue compactbutton=black,lightgray
+  listbox=black,lightgray actlistbox=white,blue actsellistbox=white,blue sellistbox=black,lightgray
+  entry=black,white checkbox=black,lightgray actcheckbox=white,blue emptyscale=,gray fullscale=,blue'
+W() { whiptail --backtitle "AgentOS 设置" "$@" 3>&1 1>&2 2>&3; }
+
+W --title "欢迎" --msgbox "欢迎使用 AgentOS！\n\n接下来只需要两步：\n  1. 连接网络\n  2. 选择管家 Agent 使用的 AI 模型\n\n用方向键和回车操作，Tab 切换按钮。" 14 60
+
+# --- network ---------------------------------------------------------------
+online() { nm-online -q -t "${1:-8}" 2>/dev/null; }
+while ! online 8; do
+  if command -v nmtui >/dev/null; then
+    W --title "网络" --yes-button "连接 Wi-Fi" --no-button "跳过" \
+      --yesno "还没有连上网络。\n\n插网线会自动连接；要连 Wi-Fi 请选「连接 Wi-Fi」。\n使用离线规则规划器可以跳过。" 12 64 || break
+    nmtui-connect
+  else
+    W --title "网络" --msgbox "还没有连上互联网。可以插网线，或稍后在命令行用 nmcli 连接 Wi-Fi。" 10 64
+    break
+  fi
+done
+
+# --- planner -----------------------------------------------------------------
+planner=$(W --title "AI 规划器" --menu "管家 Agent 用哪个模型来理解你的意图？" 15 76 3 \
+  claude "Claude（Anthropic API）" \
+  openai "OpenAI 兼容接口（DeepSeek、通义千问、Ollama 等）" \
+  rule   "离线规则规划器（不联网，只懂固定句式）") || planner=rule
+
+tmp=$(mktemp)
+{
+  echo "# 由 agentos-setup 生成；可以手动编辑。"
+  printf 'AGENTOS_PLANNER=%q\n' "$planner"
+} > "$tmp"
+
+case "$planner" in
+  claude)
+    key=$(W --title "Claude" --passwordbox "请输入 ANTHROPIC_API_KEY：" 10 70) || key=""
+    model=$(W --title "Claude" --inputbox "模型（留空使用默认模型）：" 10 70 "") || model=""
+    printf 'ANTHROPIC_API_KEY=%q\n' "$key" >> "$tmp"
+    [ -n "$model" ] && printf 'AGENTOS_MODEL=%q\n' "$model" >> "$tmp"
+    ;;
+  openai)
+    base=$(W --title "OpenAI 兼容接口" --inputbox "接口地址 OPENAI_BASE_URL：" 10 70 "https://api.openai.com/v1") || base=""
+    key=$(W --title "OpenAI 兼容接口" --passwordbox "OPENAI_API_KEY（本地 Ollama 等可留空）：" 10 70) || key=""
+    model=$(W --title "OpenAI 兼容接口" --inputbox "模型名 OPENAI_MODEL：" 10 70 "gpt-4.1") || model=""
+    printf 'OPENAI_BASE_URL=%q\nOPENAI_API_KEY=%q\nOPENAI_MODEL=%q\n' "$base" "$key" "$model" >> "$tmp"
+    ;;
+esac
+
+install -m 0640 -o root -g agent "$tmp" "$ENV_FILE"
+rm -f "$tmp"
+touch /etc/agentos/setup-done
+
+# --- offer to install --------------------------------------------------------
+if [ ! -f /etc/agentos/installed ]; then
+  if W --title "安装" --yes-button "安装到硬盘" --no-button "先试用" \
+       --yesno "你现在是从 U 盘运行 AgentOS。\n\n要把它安装到这台电脑的硬盘上吗？刚才的设置会一起带过去。\n（以后也可以在菜单里选「安装到硬盘」。）" 12 66; then
+    /usr/local/bin/agentos-install
+    read -r -p "按回车继续" _
+  fi
+fi
+exit 0

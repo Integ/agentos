@@ -1,0 +1,39 @@
+#!/bin/bash
+# Boot self-check: prove agentosd runs on this machine (offline rule planner,
+# no network or API key needed). The result goes to the journal and to the
+# serial console, where the QEMU smoke test looks for it.
+console() {
+  echo "$*"
+  [ -e /dev/ttyS0 ] && timeout 2 sh -c "echo '$*' > /dev/ttyS0" 2>/dev/null || true
+}
+
+out=$(printf '记一下 开机自检\n看看笔记\n' |
+  timeout 60 /usr/local/bin/agentosd --planner rule --audit /run/agentos-selfcheck.jsonl 2>&1)
+if grep -q '开机自检' <<<"$out"; then
+  console "AGENTOS-SELFCHECK: OK ($(cat /usr/share/agentos/distro 2>/dev/null) $(cat /usr/share/agentos/version 2>/dev/null), root $(df -h --output=size / | tail -1 | tr -d " "))"
+else
+  console "AGENTOS-SELFCHECK: FAIL"
+  printf '%s\n' "$out"
+fi
+
+# Network: NetworkManager brought a connection up and DNS resolves.
+if nm-online -q -t 60 && { getent hosts archive.ubuntu.com || getent hosts deb.debian.org; } >/dev/null; then
+  console "AGENTOS-NETWORK: OK"
+else
+  console "AGENTOS-NETWORK: FAIL"
+fi
+
+# Test hook, only reachable from a VM: QEMU's
+#   -fw_cfg name=opt/agentos/autoinstall,string=/dev/vdb
+# asks us to install onto that disk unattended and power off.
+modprobe qemu_fw_cfg 2>/dev/null || true
+fw=/sys/firmware/qemu_fw_cfg/by_name/opt/agentos/autoinstall/raw
+if [ -r "$fw" ] && [ ! -e /etc/agentos/installed ]; then
+  target=$(tr -d '\n' < "$fw")
+  if /usr/local/bin/agentos-install --yes "$target"; then
+    console "AGENTOS-AUTOINSTALL: OK"
+  else
+    console "AGENTOS-AUTOINSTALL: FAIL"
+  fi
+  systemctl poweroff
+fi

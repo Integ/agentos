@@ -1,0 +1,48 @@
+#!/bin/bash
+# The AgentOS front door: runs the butler agent, and offers a small menu
+# when it exits (Ctrl-D).
+ENV_FILE=/etc/agentos/agentos.env
+AUDIT=/var/lib/agentos/audit.jsonl
+
+# In the kiosk the terminal is resized to full screen just after it starts;
+# wait for the size to settle so full-screen dialogs are laid out correctly.
+if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+  prev="" n=0
+  while [ "$n" -lt 20 ]; do
+    cur=$(stty size 2>/dev/null)
+    [ -n "$cur" ] && [ "$cur" = "$prev" ] && break
+    prev=$cur n=$((n + 1))
+    sleep 0.5
+  done
+fi
+
+if [ ! -f /etc/agentos/setup-done ]; then
+  sudo /usr/local/bin/agentos-setup
+fi
+
+while true; do
+  clear
+  (
+    set -a
+    # shellcheck disable=SC1090
+    [ -r "$ENV_FILE" ] && . "$ENV_FILE"
+    set +a
+    exec /usr/local/bin/agentosd --audit "$AUDIT"
+  )
+  echo
+  echo "────────────────────────────────────────"
+  echo " 回车  重新启动管家 Agent"
+  echo " s     打开命令行（exit 返回）"
+  echo " c     重新设置网络和 AI 规划器"
+  [ -f /etc/agentos/installed ] || echo " i     安装到这台电脑的硬盘"
+  echo " r     重启      p  关机"
+  echo "────────────────────────────────────────"
+  read -r -p "> " choice || choice=p
+  case "$choice" in
+    s) AGENTOS_NO_SESSION=1 bash -l ;;
+    c) sudo /usr/local/bin/agentos-setup ;;
+    i) sudo /usr/local/bin/agentos-install; read -r -p "按回车继续" _ ;;
+    r) sudo systemctl reboot ;;
+    p) sudo systemctl poweroff ;;
+  esac
+done

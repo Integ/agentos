@@ -1,0 +1,18 @@
+#!/bin/bash
+# First boot: grow the root partition and file system to fill the disk, so a
+# small image written to a large USB stick (or disk) uses all of it.
+set -eu
+mark=/var/lib/agentos/grown
+src=$(findmnt -no SOURCE /)
+part=$(basename "$src")
+disk=/dev/$(lsblk -no PKNAME "$src")
+num=$(cat "/sys/class/block/$part/partition")
+
+# The backup GPT sits at the end of the image, not the end of the device.
+sfdisk --relocate gpt-bk-std "$disk" 2>/dev/null || true
+if echo ", +" | sfdisk --no-reread --no-tell-kernel --force -N "$num" "$disk"; then
+  partx -u -n "$num" "$disk" || true
+  resize2fs "$src" || true
+fi
+mkdir -p "$(dirname "$mark")"
+touch "$mark"

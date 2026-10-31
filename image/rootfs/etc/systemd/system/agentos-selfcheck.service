@@ -1,0 +1,12 @@
+[Unit]
+Description=AgentOS: boot self-check (runs agentosd with the offline planner)
+After=network.target agentos-growroot.service
+Wants=agentos-growroot.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/agentos-selfcheck
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
