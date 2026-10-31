@@ -9,23 +9,16 @@
 
 use std::time::Duration;
 
-use agentos_core::{CapabilityName, CapabilitySpec, Intent};
+use agentos_core::{CapabilitySpec, Intent};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::planner::{Plan, Planner, Step};
+use crate::planner::{capability_name, tool_name, Plan, Planner, Step, SYSTEM_PROMPT};
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2026-10-21";
 const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
-
-const SYSTEM_PROMPT: &str = "你是 AgentOS 的管家 Agent，运行在用户的桌面工作站上。\
-用户通过键盘或语音向你表达意图，你通过调用工具完成任务。\
-\n\n- 能用工具完成的，就调用对应的工具；需要多个步骤时，按执行顺序依次调用。\
-\n- 工具调用会先经过系统的权限检查，高风险操作会由系统向用户请求确认，你不需要自己再问。\
-\n- 没有合适的工具时，用一两句话直接回答或说明做不到，不要编造工具。\
-\n- 用用户使用的语言回复，简洁。";
 
 #[derive(Debug, Clone)]
 pub struct ClaudeConfig {
@@ -52,15 +45,6 @@ impl ClaudeConfig {
             max_tokens: 16_000,
         })
     }
-}
-
-/// Tool names must match `^[a-zA-Z0-9_-]{1,64}$`; capability names use dots.
-pub fn tool_name(cap: &CapabilityName) -> String {
-    cap.as_str().replace('.', "__")
-}
-
-fn capability_name(tool: &str) -> CapabilityName {
-    CapabilityName::new(tool.replace("__", "."))
 }
 
 /// Request body for one intent.
@@ -204,9 +188,8 @@ impl Planner for ClaudePlanner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentos_core::{now_ms, DeviceId, IntentId, RiskLevel, Urgency};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use crate::test_http::one_shot_server;
+    use agentos_core::{now_ms, CapabilityName, DeviceId, IntentId, RiskLevel, Urgency};
 
     fn cfg(base_url: &str) -> ClaudeConfig {
         ClaudeConfig {
@@ -277,50 +260,6 @@ mod tests {
     fn local_planner(url: &str) -> ClaudePlanner {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         ClaudePlanner::with_client(cfg(url), http)
-    }
-
-    /// Serve one canned HTTP response and capture the request.
-    async fn one_shot_server(
-        status: &str,
-        body: Value,
-    ) -> (String, tokio::task::JoinHandle<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let payload = body.to_string();
-        let status = status.to_string();
-        let handle = tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 65536];
-            let mut req = Vec::new();
-            loop {
-                let n = sock.read(&mut buf).await.unwrap();
-                req.extend_from_slice(&buf[..n]);
-                let s = String::from_utf8_lossy(&req);
-                if let Some(idx) = s.find("\r\n\r\n") {
-                    let len = s[..idx]
-                        .lines()
-                        .find_map(|l| {
-                            l.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .map(|v| v.trim().parse::<usize>().unwrap())
-                        })
-                        .unwrap_or(0);
-                    if req.len() >= idx + 4 + len {
-                        break;
-                    }
-                }
-                if n == 0 {
-                    break;
-                }
-            }
-            let resp = format!(
-                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
-                payload.len()
-            );
-            sock.write_all(resp.as_bytes()).await.unwrap();
-            String::from_utf8_lossy(&req).to_string()
-        });
-        (format!("http://{addr}"), handle)
     }
 
     #[tokio::test]

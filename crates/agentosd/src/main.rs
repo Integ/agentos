@@ -14,6 +14,7 @@ use agentosd::butler::{grant_manifest, Butler};
 use agentosd::claude_planner::{ClaudeConfig, ClaudePlanner};
 use agentosd::devices::{ConsoleOutput, LineSensor};
 use agentosd::expression::ExpressionHub;
+use agentosd::openai_planner::{OpenAiConfig, OpenAiPlanner};
 use agentosd::perception::PerceptionHub;
 use agentosd::planner::{Planner, RulePlanner};
 use agentosd::registry::CapabilityRegistry;
@@ -35,28 +36,72 @@ fn audit_path() -> String {
         .unwrap_or_else(|| "agentos-audit.jsonl".into())
 }
 
-/// `--planner claude|rule`. Default: Claude when `ANTHROPIC_API_KEY` is set,
-/// otherwise the offline rule planner.
+fn rule() -> (Box<dyn Planner>, String) {
+    (Box::new(RulePlanner), "规则规划器".into())
+}
+
+fn claude(cfg: ClaudeConfig) -> (Box<dyn Planner>, String) {
+    match ClaudePlanner::new(cfg) {
+        Ok(p) => {
+            let label = format!("Claude 规划器（{}）", p.model());
+            (Box::new(p), label)
+        }
+        Err(e) => {
+            eprintln!("无法创建 HTTP 客户端：{e}，改用规则规划器");
+            rule()
+        }
+    }
+}
+
+fn openai(cfg: OpenAiConfig) -> (Box<dyn Planner>, String) {
+    match OpenAiPlanner::new(cfg) {
+        Ok(p) => {
+            let label = format!("OpenAI 兼容规划器（{} @ {}）", p.model(), p.base_url());
+            (Box::new(p), label)
+        }
+        Err(e) => {
+            eprintln!("无法创建 HTTP 客户端：{e}，改用规则规划器");
+            rule()
+        }
+    }
+}
+
+/// `--planner claude|openai|rule` (or `AGENTOS_PLANNER`). Without a choice:
+/// Claude if `ANTHROPIC_API_KEY` is set, else an OpenAI-compatible endpoint if
+/// configured, else the offline rule planner.
 fn make_planner() -> (Box<dyn Planner>, String) {
     let choice = arg("--planner").or_else(|| std::env::var("AGENTOS_PLANNER").ok());
-    let cfg = ClaudeConfig::from_env();
-    match (choice.as_deref(), cfg) {
-        (Some("rule"), _) => (Box::new(RulePlanner), "规则规划器".into()),
-        (_, Some(cfg)) => match ClaudePlanner::new(cfg) {
-            Ok(p) => {
-                let label = format!("Claude 规划器（{}）", p.model());
-                (Box::new(p), label)
-            }
-            Err(e) => {
-                eprintln!("无法创建 HTTP 客户端：{e}，改用规则规划器");
-                (Box::new(RulePlanner), "规则规划器".into())
+    match choice.as_deref() {
+        Some("rule") => rule(),
+        Some("claude") => match ClaudeConfig::from_env() {
+            Some(cfg) => claude(cfg),
+            None => {
+                eprintln!("未设置 ANTHROPIC_API_KEY，改用规则规划器");
+                rule()
             }
         },
-        (Some("claude"), None) => {
-            eprintln!("未设置 ANTHROPIC_API_KEY，改用规则规划器");
-            (Box::new(RulePlanner), "规则规划器".into())
+        Some("openai") => match OpenAiConfig::from_env() {
+            Some(cfg) => openai(cfg),
+            None => {
+                eprintln!(
+                    "OpenAI 兼容规划器需要 OPENAI_MODEL，以及 OPENAI_API_KEY 或 OPENAI_BASE_URL，改用规则规划器"
+                );
+                rule()
+            }
+        },
+        Some(other) => {
+            eprintln!("未知的规划器 {other}（可选 claude、openai、rule），改用规则规划器");
+            rule()
         }
-        (_, None) => (Box::new(RulePlanner), "规则规划器".into()),
+        None => {
+            if let Some(cfg) = ClaudeConfig::from_env() {
+                claude(cfg)
+            } else if let Some(cfg) = OpenAiConfig::from_env() {
+                openai(cfg)
+            } else {
+                rule()
+            }
+        }
     }
 }
 

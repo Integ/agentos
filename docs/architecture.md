@@ -6,7 +6,7 @@
 
 - **底座：** Linux 内核 + 自建用户态 OS 层（2026-10-31 确定）。不自研内核，复用 Linux 驱动。
 - **首个目标平台：** 桌面工作站，64 位 x86 PC。
-- **模型：** 以云端为主（Claude API）；本地模型只做唤醒词、语音转写等辅助。
+- **模型：** 以云端为主（Claude API），同时兼容 OpenAI 格式的大模型 API（可接其他云服务或本地 Ollama/vLLM）；本地小模型做唤醒词、语音转写等辅助。
 - **语言：** 核心 Rust；SDK 后续提供 Python / TypeScript。
 - **用户：** 暂时只支持单用户。
 
@@ -37,6 +37,7 @@
 - [x] 管家 Agent：计划 → 策略 → 执行 → 汇报，支持中途确认
 - [x] 文本输入 / 控制台输出
 - [x] LLM 规划器（Claude API，能力 spec 作为工具列表；单次调用生成计划，尚不支持依赖上一步结果的多轮规划）
+- [x] OpenAI 兼容规划器（Chat Completions + function calling）
 - [ ] 语音输入（openWakeWord + whisper.cpp）与 TTS 输出（Piper）
 - [ ] MCP server 注册为能力
 - [ ] 进程间通信（Unix socket + Cap'n Proto），把各中枢拆成独立服务

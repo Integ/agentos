@@ -9,6 +9,10 @@ pub mod butler;
 pub mod claude_planner;
 pub mod devices;
 pub mod expression;
+pub mod openai_planner;
 pub mod perception;
 pub mod planner;
 pub mod registry;
+
+#[cfg(test)]
+mod test_http;
