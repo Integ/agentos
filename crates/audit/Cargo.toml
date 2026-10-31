@@ -1,0 +1,11 @@
+[package]
+name = "agentos-audit"
+description = "AgentOS append-only audit log (JSON Lines)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+agentos-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
