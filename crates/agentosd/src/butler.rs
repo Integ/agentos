@@ -12,7 +12,8 @@ use agentos_policy::{CallContext, Decision, PolicyEngine};
 use serde_json::Value;
 
 use crate::expression::ExpressionHub;
-use crate::planner::{Plan, Planner};
+use crate::planner::{Plan, Planner, Step};
+use crate::plugin_store::PluginManager;
 use crate::registry::CapabilityRegistry;
 
 struct Pending {
@@ -29,6 +30,9 @@ pub struct Butler {
     audit: Arc<AuditLog>,
     expr: ExpressionHub,
     pending: Option<Pending>,
+    plugins: Option<Arc<PluginManager>>,
+    plugin_generation: u64,
+    plugin_names: Vec<CapabilityName>,
 }
 
 fn is_yes(text: &str) -> bool {
@@ -55,6 +59,43 @@ impl Butler {
             audit,
             expr,
             pending: None,
+            plugins: None,
+            plugin_generation: 0,
+            plugin_names: Vec::new(),
+        }
+    }
+
+    /// Let the butler use self-generated plugins. Installing a plugin is the
+    /// human's confirmed decision, so the butler is granted every active one.
+    pub fn with_plugins(mut self, pm: Arc<PluginManager>) -> Self {
+        self.plugins = Some(pm);
+        self.sync_plugins();
+        self
+    }
+
+    /// Bring the registry and grants in line with the active plugins.
+    fn sync_plugins(&mut self) {
+        let Some(pm) = self.plugins.clone() else {
+            return;
+        };
+        let generation = pm.generation();
+        if generation == self.plugin_generation {
+            return;
+        }
+        self.plugin_generation = generation;
+        for name in self.plugin_names.drain(..) {
+            self.registry.unregister(&name);
+            self.policy.revoke(&self.id, &name);
+        }
+        for cap in pm.active() {
+            let name = cap.spec().name.clone();
+            if self.registry.get(&name).is_some() {
+                // Never let a plugin shadow a built-in capability.
+                continue;
+            }
+            self.registry.register(cap);
+            self.policy.grant(&self.id, &name);
+            self.plugin_names.push(name);
         }
     }
 
@@ -116,6 +157,7 @@ impl Butler {
             return;
         }
 
+        self.sync_plugins();
         let specs = self.registry.specs();
         let plan = self.planner.plan(&intent, &specs).await;
         self.log(AuditEvent::PlanCreated {
@@ -154,11 +196,13 @@ impl Butler {
 
     /// Execute `plan` from step `start`. `first_approved` marks the first step
     /// as already confirmed by the human.
-    async fn run(&mut self, intent: Intent, plan: Plan, start: usize, first_approved: bool) {
+    async fn run(&mut self, intent: Intent, mut plan: Plan, start: usize, first_approved: bool) {
         let ctx = CallContext {
             tainted: plan.tainted,
         };
-        for i in start..plan.steps.len() {
+        let mut i = start;
+        while i < plan.steps.len() {
+            self.sync_plugins();
             let step = &plan.steps[i];
             let Some(cap) = self.registry.get(&step.capability).cloned() else {
                 self.say(
@@ -231,6 +275,12 @@ impl Butler {
             });
             match result {
                 Ok(v) => {
+                    // A trusted capability may ask for a next step (for example,
+                    // a proposal asks to be installed). It still goes through policy.
+                    // Plugins cannot do this: their output is stripped of `follow_up`.
+                    if let Some(next) = follow_up(&v) {
+                        plan.steps.insert(i + 1, next);
+                    }
                     let msg = v
                         .get("message")
                         .and_then(Value::as_str)
@@ -248,8 +298,20 @@ impl Butler {
                     return;
                 }
             }
+            i += 1;
         }
     }
+}
+
+fn follow_up(v: &Value) -> Option<Step> {
+    let f = v.get("follow_up")?;
+    Some(Step {
+        capability: CapabilityName::new(f.get("capability")?.as_str()?),
+        args: f
+            .get("args")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
+    })
 }
 
 /// Grant every capability in `names` to `agent` — what installing an agent

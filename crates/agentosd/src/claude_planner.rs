@@ -13,6 +13,7 @@ use agentos_core::{CapabilitySpec, Intent};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use crate::llm::TextModel;
 use crate::planner::{capability_name, tool_name, Plan, Planner, Step, SYSTEM_PROMPT};
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
@@ -168,6 +169,33 @@ impl ClaudePlanner {
             return Err(format!("Claude API 错误（HTTP {status}）：{msg}"));
         }
         Ok(value)
+    }
+}
+
+#[async_trait]
+impl TextModel for ClaudePlanner {
+    async fn complete(&self, system: &str, user: &str) -> Result<String, String> {
+        let body = json!({
+            "model": self.cfg.model,
+            "max_tokens": self.cfg.max_tokens,
+            "system": system,
+            "output_config": { "effort": self.cfg.effort },
+            "fallbacks": "default",
+            "messages": [{ "role": "user", "content": user }],
+        });
+        let resp = self.call(&body).await?;
+        if resp.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
+            return Err("模型拒绝了这个请求。".into());
+        }
+        let text: String = resp
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect();
+        Ok(text)
     }
 }
 

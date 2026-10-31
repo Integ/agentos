@@ -12,6 +12,7 @@ use agentos_core::{CapabilitySpec, Intent};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use crate::llm::TextModel;
 use crate::planner::{capability_name, tool_name, Plan, Planner, Step, SYSTEM_PROMPT};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -190,6 +191,31 @@ impl OpenAiPlanner {
             return Err(format!("模型服务错误（HTTP {status}）：{msg}"));
         }
         Ok(value)
+    }
+}
+
+#[async_trait]
+impl TextModel for OpenAiPlanner {
+    async fn complete(&self, system: &str, user: &str) -> Result<String, String> {
+        let body = json!({
+            "model": self.cfg.model,
+            "messages": [
+                { "role": "system", "content": system },
+                { "role": "user", "content": user },
+            ],
+        });
+        let resp = self.call(&body).await?;
+        let msg = resp
+            .pointer("/choices/0/message")
+            .ok_or("模型没有返回任何内容。")?;
+        if let Some(r) = msg.get("refusal").and_then(Value::as_str) {
+            return Err(format!("模型拒绝了这个请求：{r}"));
+        }
+        Ok(msg
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string())
     }
 }
 

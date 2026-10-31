@@ -20,6 +20,10 @@ impl CapabilityRegistry {
         self.caps.insert(cap.spec().name.clone(), cap)
     }
 
+    pub fn unregister(&mut self, name: &CapabilityName) -> Option<Arc<dyn Capability>> {
+        self.caps.remove(name)
+    }
+
     pub fn get(&self, name: &CapabilityName) -> Option<&Arc<dyn Capability>> {
         self.caps.get(name)
     }
