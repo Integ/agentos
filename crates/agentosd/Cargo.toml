@@ -1,0 +1,14 @@
+[package]
+name = "agentosd"
+description = "AgentOS P0 daemon: perception hub, butler agent, capability registry, expression hub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+agentos-core.workspace = true
+agentos-policy.workspace = true
+agentos-audit.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

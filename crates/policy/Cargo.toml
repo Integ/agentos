@@ -1,0 +1,12 @@
+[package]
+name = "agentos-policy"
+description = "AgentOS policy engine: capability grants and risk-tiered confirmation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+agentos-core.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
