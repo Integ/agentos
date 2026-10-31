@@ -1,0 +1,21 @@
+#!/bin/bash
+# tty1 autologin → full-screen terminal in a sway kiosk → agentos-shell.
+# Falls back to the plain text console if the graphical session can't start.
+if grep -qw 'agentos.safe=1' /proc/cmdline || ! command -v sway >/dev/null; then
+  exec /usr/local/bin/agentos-shell
+fi
+
+export XDG_CURRENT_DESKTOP=sway XDG_SESSION_TYPE=wayland
+export XMODIFIERS=@im=fcitx QT_IM_MODULE=fcitx GTK_IM_MODULE=fcitx
+# Allow llvmpipe on machines without a usable GPU driver; without any render
+# node at all (simple VM graphics) use wlroots' pure-CPU renderer.
+export WLR_RENDERER_ALLOW_SOFTWARE=1
+ls /dev/dri/renderD* >/dev/null 2>&1 || export WLR_RENDERER=pixman
+export WLR_NO_HARDWARE_CURSORS=1
+
+log=/tmp/agentos-sway.log
+if ! sway --config /usr/share/agentos/sway.conf >"$log" 2>&1; then
+  echo "图形界面启动失败（日志：$log），改用文本模式。"
+  sleep 3
+  exec /usr/local/bin/agentos-shell
+fi

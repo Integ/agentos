@@ -1,0 +1,120 @@
+#!/bin/bash
+# Install the running AgentOS system (usually booted from a USB stick) onto
+# another disk: GPT with an EFI system partition and an ext4 root, signed
+# shim + grub for Secure Boot, and the current settings carried over.
+#
+#   agentos-install              pick a disk interactively
+#   agentos-install /dev/nvme0n1
+#   agentos-install --yes /dev/sda   no confirmation (erases the disk!)
+set -euo pipefail
+
+usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+die() { echo "错误：$*" >&2; exit 1; }
+say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+
+YES=0 TARGET=""
+for a in "$@"; do
+  case "$a" in
+    -y|--yes) YES=1 ;;
+    -h|--help) usage ;;
+    -*) usage 1 ;;
+    *) TARGET="$a" ;;
+  esac
+done
+[ "$EUID" -eq 0 ] || exec sudo "$0" "$@"
+
+ESP_MB=512
+MIN_GB=8
+root_src=$(findmnt -no SOURCE /)
+boot_disk=/dev/$(lsblk -no PKNAME "$root_src")
+distro=$(cat /usr/share/agentos/distro 2>/dev/null || echo debian)
+
+# Candidate disks: whole, writable, at least MIN_GB, not the one we run from.
+candidates() {
+  lsblk -dpbno NAME,TYPE,RO,SIZE | while read -r name type ro size; do
+    [ "$type" = disk ] && [ "$ro" = 0 ] && [ "$name" != "$boot_disk" ] || continue
+    [ "$size" -ge $((MIN_GB * 1000 * 1000 * 1000)) ] || continue
+    echo "$name"
+  done
+}
+describe() { lsblk -dno SIZE,MODEL,TRAN "$1" | tr -s ' '; }
+
+if [ -z "$TARGET" ]; then
+  mapfile -t disks < <(candidates)
+  [ "${#disks[@]}" -gt 0 ] || die "没有找到可以安装的硬盘（至少 ${MIN_GB}GB，且不是当前启动盘 $boot_disk）"
+  items=()
+  for d in "${disks[@]}"; do items+=("$d" "$(describe "$d")"); done
+  TARGET=$(whiptail --title "安装 AgentOS" --menu "安装到哪块硬盘？该盘上的所有数据都会被清除。" 16 72 6 \
+    "${items[@]}" 3>&1 1>&2 2>&3) || { echo "已取消"; exit 1; }
+fi
+
+[ -b "$TARGET" ] || die "$TARGET 不是块设备"
+[ "$(lsblk -dno TYPE "$TARGET")" = disk ] || die "$TARGET 不是整块磁盘（请给出 /dev/sda 这样的磁盘，而不是分区）"
+[ "$TARGET" != "$boot_disk" ] || die "$TARGET 是当前正在运行的启动盘"
+
+if [ "$YES" != 1 ]; then
+  echo
+  echo "即将把 AgentOS 安装到：$TARGET  $(describe "$TARGET")"
+  lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS "$TARGET" 2>/dev/null || lsblk "$TARGET"
+  echo
+  echo "这块盘上的所有数据都会被永久清除！"
+  read -r -p "确认请输入 yes：" answer
+  [ "$answer" = yes ] || { echo "已取消"; exit 1; }
+fi
+
+mnt=$(mktemp -d /run/agentos-install.XXXXXX)
+cleanup() {
+  mountpoint -q "$mnt/boot/efi" && umount "$mnt/boot/efi"
+  mountpoint -q "$mnt" && umount "$mnt"
+  rmdir "$mnt" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+say "清除 $TARGET 并分区"
+for p in $(lsblk -lnpo NAME "$TARGET" | tail -n +2); do umount "$p" 2>/dev/null || true; done
+wipefs -qaf "$TARGET"
+sfdisk -q --wipe always "$TARGET" <<SFDISK
+label: gpt
+size=${ESP_MB}MiB, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="AgentOS ESP"
+type=4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709, name="agentos-root"
+SFDISK
+udevadm settle 2>/dev/null || sleep 2
+mapfile -t parts < <(lsblk -lnpo NAME,TYPE "$TARGET" | awk '$2 == "part" { print $1 }')
+[ "${#parts[@]}" -eq 2 ] || die "分区后没有找到两个分区"
+esp=${parts[0]} rootp=${parts[1]}
+
+say "格式化"
+root_uuid=$(cat /proc/sys/kernel/random/uuid)
+mkfs.vfat -F 32 -n AGENTOS "$esp" >/dev/null
+mkfs.ext4 -q -F -L agentos-root -U "$root_uuid" "$rootp"
+
+say "复制系统（需要几分钟）"
+mount "$rootp" "$mnt"
+rsync -aHAXx --numeric-ids --info=progress2 \
+  --exclude='/tmp/*' --exclude='/var/tmp/*' --exclude='/var/log/journal/*' \
+  --exclude='/var/cache/apt/archives/*.deb' --exclude='/var/lib/agentos/audit.jsonl' \
+  --exclude='/home/*/.cache/*' --exclude='/run/*' \
+  / "$mnt/"
+
+say "配置新系统"
+: > "$mnt/etc/machine-id"
+echo "UUID=$root_uuid  /  ext4  errors=remount-ro  0 1" > "$mnt/etc/fstab"
+mkdir -p "$mnt/etc/agentos" "$mnt/var/lib/agentos"
+touch "$mnt/etc/agentos/installed" "$mnt/var/lib/agentos/grown"
+
+say "安装引导程序（shim + grub，支持安全启动）"
+mkdir -p "$mnt/boot/efi"
+mount "$esp" "$mnt/boot/efi"
+cp -r /usr/share/agentos/efi/EFI "$mnt/boot/efi/"
+mkdir -p "$mnt/boot/efi/EFI/$distro"
+sed "s/@ROOT_UUID@/$root_uuid/g" /usr/share/agentos/grub.cfg.in > "$mnt/boot/efi/EFI/BOOT/grub.cfg"
+cp "$mnt/boot/efi/EFI/BOOT/grub.cfg" "$mnt/boot/efi/EFI/$distro/grub.cfg"
+umount "$mnt/boot/efi"
+
+if [ -d /sys/firmware/efi/efivars ] && command -v efibootmgr >/dev/null; then
+  efibootmgr -q -c -d "$TARGET" -p 1 -L AgentOS -l '\EFI\BOOT\BOOTX64.EFI' \
+    || echo "（未能写入 UEFI 启动项；固件仍会从该盘的默认路径启动）"
+fi
+
+sync
+say "安装完成。拔掉 U 盘后重启，就会从硬盘进入 AgentOS。"

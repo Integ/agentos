@@ -1,0 +1,13 @@
+[Unit]
+Description=AgentOS: grow the root partition to fill the disk (first boot)
+ConditionPathExists=!/var/lib/agentos/grown
+After=local-fs.target
+Before=agentos-selfcheck.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/agentos-growroot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

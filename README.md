@@ -8,6 +8,10 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 - 架构概要与 P0 进度：[docs/architecture.md](docs/architecture.md)
 - 自我进化：[docs/self-evolution.md](docs/self-evolution.md)
 
+## 安装到 PC
+
+下载镜像写进 U 盘，从 U 盘启动即可使用，首次设置里可以一键装到硬盘（UEFI，支持安全启动）。详见 [docs/install.md](docs/install.md)。
+
 ## 仓库结构
 
 ```
@@ -15,6 +19,7 @@ crates/
   core/      核心类型：Intent、Percept、Expression、Capability，Sensor/Output trait
   policy/    策略引擎：能力授权 + 风险分级确认 + 污点追踪
   audit/     只追加审计日志（JSON Lines），可回放
+  image/       可启动磁盘镜像：构建脚本、系统集成文件、QEMU 冒烟测试
   agentosd/  P0 守护进程：感知中枢 → 管家 Agent → 表达中枢；插件运行时与自我进化（evolve）
 ```
 
