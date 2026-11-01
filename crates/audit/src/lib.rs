@@ -78,6 +78,14 @@ pub enum AuditEvent {
         kind: String,
         text: String,
     },
+    /// Someone tried to prove who they are (for example a PIN for an L3
+    /// confirmation). Never contains the secret itself.
+    IdentityCheck {
+        method: String,
+        task: Option<u64>,
+        ok: bool,
+        detail: String,
+    },
     /// A privacy-relevant device was used, e.g. the microphone recorded
     /// speech. `detail` says how long and where the raw data went.
     DeviceUsed {

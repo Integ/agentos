@@ -7,7 +7,8 @@
 //! - `{"type":"intent","text":"记一下 买牛奶"}`: a new intent (or the answer to a
 //!   pending confirmation, exactly like a typed line).
 //! - `{"type":"confirm","approved":true,"task":3}`: answer a pending confirmation
-//!   (`task` optional: without it, the newest waiting task).
+//!   (`task` optional: without it, the newest waiting task). Add `"pin":"1234"`
+//!   when the `confirm` event said `pin_required`.
 //! - `{"type":"listen","action":"start|stop|cancel"}`: push-to-talk button.
 //! - `{"type":"speech","mode":"auto|always|off"}`: when replies are read aloud.
 //! - `{"type":"speech","action":"stop"}`: stop reading aloud.
@@ -18,6 +19,10 @@
 //! - `expression`: everything the butler says (`kind`: plan/report/ask_confirm/error).
 //! - `plan`, `step`, `confirm`, `done`: structured progress, so a shell can draw
 //!   the plan with risk levels instead of parsing text.
+//! - `tainted`: a task read untrusted outside content; its side effects now
+//!   need confirmation.
+//! - `pin`: a PIN sent with an approval was wrong or entry is locked
+//!   (`message` says which); the confirmation is still pending.
 //! - `voice`, `voice_level`, `transcript`, `voice_notice`: microphone and
 //!   speaker state, so the shell can show when the microphone is in use.
 //!
@@ -38,6 +43,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 
+use crate::identity::{PinCheck, PinVault};
 use crate::voice::{SpeakMode, Voice, VoiceControl};
 
 /// Fan-out of structured events to every connected shell.
@@ -157,6 +163,14 @@ pub fn recent_activity(audit: &Path, n: usize) -> Vec<Value> {
 pub enum Request {
     /// Text for the butler: a new intent or a confirmation answer.
     Intent(String),
+    /// Approve an L3 step with a PIN. The PIN is checked by the daemon and
+    /// never becomes intent text (so never reaches the audit log); on success
+    /// `text` goes to the butler like any answer.
+    PinApprove {
+        task: Option<u64>,
+        pin: String,
+        text: String,
+    },
     Voice(VoiceControl),
 }
 
@@ -172,12 +186,19 @@ pub fn parse_request(line: &str) -> Option<Request> {
             let approved = v.get("approved")?.as_bool()?;
             let word = if approved { "y" } else { "取消" };
             // Several tasks may be waiting; the sheet answers the one it shows.
-            Some(Request::Intent(
-                match v.get("task").and_then(Value::as_u64) {
-                    Some(t) => format!("{word} #{t}"),
-                    None => word.to_string(),
-                },
-            ))
+            let task = v.get("task").and_then(Value::as_u64);
+            let text = match task {
+                Some(t) => format!("{word} #{t}"),
+                None => word.to_string(),
+            };
+            match v.get("pin").and_then(Value::as_str) {
+                Some(pin) if approved => Some(Request::PinApprove {
+                    task,
+                    pin: pin.to_string(),
+                    text,
+                }),
+                _ => Some(Request::Intent(text)),
+            }
         }
         "listen" => Some(Request::Voice(match v.get("action")?.as_str()? {
             "start" => VoiceControl::ListenStart,
@@ -203,6 +224,8 @@ pub struct ShellServer {
     pub percepts: mpsc::Sender<Percept>,
     /// Microphone and speaker, if configured.
     pub voice: Option<Arc<Voice>>,
+    /// Checks PINs sent with L3 approvals.
+    pub pins: Option<Arc<PinVault>>,
 }
 
 /// Bind `path` (replacing a stale socket) with mode 0600.
@@ -268,6 +291,25 @@ impl ShellServer {
         while let Ok(Some(line)) = read_request_line(&mut reader).await {
             let text = match parse_request(&line) {
                 Some(Request::Intent(text)) => text,
+                Some(Request::PinApprove { task, pin, text }) => {
+                    let check = match &self.pins {
+                        Some(v) => v.verify_for(task, &pin),
+                        None => PinCheck::NotSet,
+                    };
+                    match check {
+                        // Not set: nothing to check, the answer stands as is.
+                        PinCheck::Ok | PinCheck::NotSet => text,
+                        failed => {
+                            let _ = self.bus.send(json!({
+                                "type": "pin",
+                                "task": task,
+                                "ok": false,
+                                "message": failed.message(),
+                            }));
+                            continue;
+                        }
+                    }
+                }
                 Some(Request::Voice(c)) => {
                     if let Some(voice) = &self.voice {
                         match c {
@@ -368,6 +410,19 @@ mod tests {
         assert_eq!(
             text(r#"{"type":"confirm","approved":true,"task":3}"#).as_deref(),
             Some("y #3")
+        );
+        assert_eq!(
+            parse_request(r#"{"type":"confirm","approved":true,"task":3,"pin":"2468"}"#),
+            Some(Request::PinApprove {
+                task: Some(3),
+                pin: "2468".into(),
+                text: "y #3".into()
+            })
+        );
+        // A PIN on a refusal is pointless; it is dropped.
+        assert_eq!(
+            text(r#"{"type":"confirm","approved":false,"pin":"2468"}"#).as_deref(),
+            Some("取消")
         );
         assert_eq!(parse_request(r#"{"type":"intent","text":"  "}"#), None);
         assert_eq!(parse_request("not json"), None);

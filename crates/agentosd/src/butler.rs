@@ -31,6 +31,7 @@ use serde_json::{json, Value};
 use crate::agents::{AgentDirectory, AgentManifest};
 use crate::blackboard::Blackboard;
 use crate::expression::ExpressionHub;
+use crate::identity::PinVault;
 use crate::judge::{Judge, Review, Verdict};
 use crate::planner::{Conversation, Planner, Round, Step, ToolResult, SYSTEM_PROMPT};
 use crate::plugin_store::PluginManager;
@@ -78,6 +79,8 @@ pub struct Butler {
     to_resume: Vec<Task>,
     board: Option<Blackboard>,
     judge: Option<Arc<dyn Judge>>,
+    /// With a PIN set, L3 approvals need a fresh PIN entry.
+    pins: Option<Arc<PinVault>>,
 }
 
 fn is_yes(text: &str) -> bool {
@@ -169,6 +172,7 @@ impl Butler {
             to_resume: Vec::new(),
             board: None,
             judge: None,
+            pins: None,
         }
     }
 
@@ -201,6 +205,16 @@ impl Butler {
     pub fn with_blackboard(mut self, board: Blackboard) -> Self {
         self.board = Some(board);
         self
+    }
+
+    /// Require a PIN for irreversible (L3) approvals once one is set.
+    pub fn with_pin_vault(mut self, pins: Arc<PinVault>) -> Self {
+        self.pins = Some(pins);
+        self
+    }
+
+    fn pin_required(&self) -> bool {
+        self.pins.as_ref().is_some_and(|p| p.is_set())
     }
 
     /// Second opinion before allowed steps that change something.
@@ -516,6 +530,31 @@ impl Butler {
             .await;
             return;
         }
+        let pin_ok = || {
+            self.pins
+                .as_ref()
+                .map_or(true, |p| !p.is_set() || p.take_grant(id))
+        };
+        if approved && task.verify_identity && !pin_ok() {
+            // A bare "y" is not enough for L3: show the sheet again for the PIN.
+            let intent = task.intent.clone();
+            let event = task.ask.as_ref().map(|(_, e)| e.clone());
+            self.waiting.insert(id, task);
+            if let Some(mut e) = event {
+                e["pin_required"] = json!(true);
+                e["pin_error"] = json!("需要输入 PIN");
+                self.emit(e);
+            }
+            self.say(
+                &intent,
+                ExpressionKind::AskConfirm,
+                format!(
+                    "{cap}：不可逆的操作需要 PIN。请在屏幕确认框里输入 PIN（控制台先输入“pin 你的PIN”再回复 y），或者说“取消”。"
+                ),
+            )
+            .await;
+            return;
+        }
         self.log(AuditEvent::HumanConfirmation {
             intent: task.intent.id,
             capability: cap.clone(),
@@ -739,10 +778,13 @@ impl Butler {
                 reason,
                 verify_identity,
             } => {
-                let id_note = if verify_identity {
-                    "（正式版本会在此要求身份核验）"
-                } else {
-                    ""
+                let pin_required = verify_identity && self.pin_required();
+                let id_note = match (verify_identity, pin_required) {
+                    (true, true) => "（需要输入 PIN）",
+                    (true, false) => {
+                        "（尚未设置 PIN，任何人都能确认；建议运行 agentosd --set-pin）"
+                    }
+                    _ => "",
                 };
                 let who = if f.is_butler() {
                     String::new()
@@ -766,6 +808,7 @@ impl Butler {
                     "risk": risk_label(spec.risk),
                     "reason": reason,
                     "verify_identity": verify_identity,
+                    "pin_required": pin_required,
                     "args": step.args,
                 });
                 self.emit_step(f, "confirm");
@@ -805,6 +848,7 @@ impl Butler {
         }
 
         self.emit_step(f, "running");
+        let mut untrusted = false;
         let result = if let Some(r) = self.syscall(task_id, &step) {
             r
         } else {
@@ -813,6 +857,7 @@ impl Butler {
                 .get(&step.capability)
                 .cloned()
                 .expect("spec_of found it");
+            untrusted = cap.untrusted_output();
             // Commit the intent to act before acting, so a crash mid-call is
             // recognised on recovery instead of silently re-run.
             f.started = Some(step.id.clone());
@@ -822,6 +867,18 @@ impl Butler {
         };
         let f = task.stack.last_mut().expect("non-empty stack");
         f.started = None;
+        // Whatever the agent does after reading outside content is suspect,
+        // for the rest of this task (taint never goes away within a frame,
+        // and a delegate's taint flows back to its parent).
+        if untrusted && result.is_ok() && !f.tainted {
+            f.tainted = true;
+            self.emit(json!({
+                "type": "tainted",
+                "task": task_id,
+                "intent": f.intent.id,
+                "capability": step.capability.to_string(),
+            }));
+        }
         let (ok, value) = match &result {
             Ok(v) => (true, v.clone()),
             Err(e) => (false, Value::String(e.clone())),

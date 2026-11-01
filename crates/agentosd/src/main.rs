@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use agentos_audit::AuditLog;
-use agentos_core::{AgentId, Sensor};
+use agentos_core::{AgentId, PerceptKind, Sensor};
 use agentos_policy::PolicyEngine;
 use agentosd::agents::AgentDirectory;
 use agentosd::blackboard::{self, Blackboard};
@@ -17,6 +17,7 @@ use agentosd::claude_planner::{ClaudeConfig, ClaudePlanner};
 use agentosd::devices::{ConsoleOutput, LineSensor};
 use agentosd::evolve::{self, LlmGenerator, NoGenerator, PluginGenerator};
 use agentosd::expression::ExpressionHub;
+use agentosd::identity::{self, PinCheck, PinVault};
 use agentosd::judge::LlmJudge;
 use agentosd::llm::TextModel;
 use agentosd::openai_planner::{OpenAiConfig, OpenAiPlanner};
@@ -154,11 +155,69 @@ fn make_planner() -> Models {
     }
 }
 
+/// `agentosd --set-pin`: read a new PIN (twice) from stdin and store it.
+/// `agentosd --clear-pin`: remove it, so L3 steps need only a confirmation.
+fn pin_command(home: &std::path::Path) -> Option<std::io::Result<()>> {
+    let all: Vec<String> = std::env::args().collect();
+    let path = home.join("pin.json");
+    if all.iter().any(|a| a == "--clear-pin") {
+        return Some(match std::fs::remove_file(&path) {
+            Ok(()) => {
+                println!("已删除 PIN（{}）。", path.display());
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                println!("没有设置过 PIN。");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        });
+    }
+    if !all.iter().any(|a| a == "--set-pin") {
+        return None;
+    }
+    Some((|| {
+        let mut lines = std::io::stdin().lines();
+        let mut ask = |prompt: &str| -> std::io::Result<String> {
+            eprint!("{prompt}");
+            Ok(lines
+                .next()
+                .transpose()?
+                .unwrap_or_default()
+                .trim()
+                .to_string())
+        };
+        let first = ask("新 PIN（4 到 12 位数字）：")?;
+        if !identity::valid_pin(&first) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "PIN 必须是 4 到 12 位数字",
+            ));
+        }
+        if ask("再输入一次：")? != first {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "两次输入的 PIN 不一致",
+            ));
+        }
+        PinVault::open(&path)?.set(&first)?;
+        println!(
+            "PIN 已设置（{}）。不可逆的操作现在需要输入它。",
+            path.display()
+        );
+        Ok(())
+    })())
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let home = home_dir();
     std::fs::create_dir_all(&home)?;
+    if let Some(r) = pin_command(&home) {
+        return r;
+    }
     let audit = Arc::new(AuditLog::open(audit_path(&home))?);
+    let pins = Arc::new(PinVault::open(home.join("pin.json"))?.with_audit(audit.clone()));
 
     let (planner, text_model, planner_label) = make_planner();
 
@@ -215,7 +274,8 @@ async fn main() -> std::io::Result<()> {
         .with_plugins(plugins.clone())
         .with_events(bus.clone())
         .with_agents(agents)
-        .with_blackboard(board);
+        .with_blackboard(board)
+        .with_pin_vault(pins.clone());
     // AGENTOS_JUDGE=1: a model reviews allowed L1+ steps before they run.
     let judge_on = std::env::var("AGENTOS_JUDGE").is_ok_and(|v| v == "1" || v == "on");
     let butler = match (&text_model, judge_on) {
@@ -245,12 +305,29 @@ async fn main() -> std::io::Result<()> {
             audit: audit.path().to_path_buf(),
             percepts: tx.clone(),
             voice: voice.clone(),
+            pins: Some(pins.clone()),
         };
         tokio::spawn(server.serve(listener));
     }
     let mut sensor = LineSensor::stdin();
+    let console_pins = pins.clone();
     tokio::spawn(async move {
         while let Some(p) = sensor.next().await {
+            // "pin 1234" on the console vouches for the next L3 answer. It is
+            // handled here so the PIN never becomes an intent (or audit text).
+            if let PerceptKind::Text { text, .. } = &p.kind {
+                if let Some(pin) = text.trim().strip_prefix("pin ") {
+                    let check = console_pins.verify_for(None, pin.trim());
+                    println!(
+                        "{}",
+                        match check {
+                            PinCheck::Ok => "PIN 正确，现在回复 y 确认（1 分钟内有效）。".into(),
+                            other => other.message(),
+                        }
+                    );
+                    continue;
+                }
+            }
             if tx.send(p).await.is_err() {
                 break;
             }

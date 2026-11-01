@@ -13,7 +13,7 @@ use agentos_core::{CapabilitySpec, Intent};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::llm::TextModel;
+use crate::llm::{send_with_retry, Retry, TextModel};
 use crate::planner::{
     capability_name, tool_name, Conversation, Plan, Planner, Step, SYSTEM_PROMPT,
 };
@@ -190,6 +190,7 @@ pub fn parse_response(body: &Value) -> Plan {
 pub struct OpenAiPlanner {
     cfg: OpenAiConfig,
     http: reqwest::Client,
+    retry: Retry,
 }
 
 impl OpenAiPlanner {
@@ -197,12 +198,22 @@ impl OpenAiPlanner {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(600))
             .build()?;
-        Ok(Self { cfg, http })
+        Ok(Self::with_client(cfg, http))
     }
 
     /// Use a caller-built HTTP client (custom proxy, TLS or timeout settings).
     pub fn with_client(cfg: OpenAiConfig, http: reqwest::Client) -> Self {
-        Self { cfg, http }
+        Self {
+            cfg,
+            http,
+            retry: Retry::default(),
+        }
+    }
+
+    /// How rate limits and overloaded or unreachable servers are retried.
+    pub fn with_retry(mut self, retry: Retry) -> Self {
+        self.retry = retry;
+        self
     }
 
     pub fn model(&self) -> &str {
@@ -218,14 +229,15 @@ impl OpenAiPlanner {
             "{}/chat/completions",
             self.cfg.base_url.trim_end_matches('/')
         );
-        let mut req = self.http.post(url).json(body);
-        if let Some(key) = &self.cfg.api_key {
-            req = req.bearer_auth(key);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| format!("无法连接 {}：{e}", self.cfg.base_url))?;
+        let resp = send_with_retry(self.retry, || {
+            let req = self.http.post(&url).json(body);
+            match &self.cfg.api_key {
+                Some(key) => req.bearer_auth(key),
+                None => req,
+            }
+        })
+        .await
+        .map_err(|e| format!("无法连接 {}：{e}", self.cfg.base_url))?;
         let status = resp.status();
         let value: Value = resp
             .json()
