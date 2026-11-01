@@ -11,6 +11,7 @@ pub mod devices;
 pub mod evolve;
 pub mod expression;
 pub mod llm;
+pub mod mic_led;
 pub mod openai_planner;
 pub mod perception;
 pub mod planner;

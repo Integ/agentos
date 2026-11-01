@@ -39,6 +39,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, Notify};
 
+use crate::mic_led::MicLed;
 use crate::shell_api::EventBus;
 
 /// Device id of the microphone; intents from it are voice intents.
@@ -709,6 +710,8 @@ pub struct Voice {
     audit: Arc<AuditLog>,
 
     mic: Mutex<MicState>,
+    /// Caps Lock LED, lit while recording.
+    led: MicLed,
     recording: tokio::sync::Mutex<Option<Recording>>,
     serial: AtomicU64,
 
@@ -738,6 +741,11 @@ impl Voice {
             percepts,
             audit,
             mic: Mutex::new(MicState::Idle),
+            led: if cfg!(test) {
+                MicLed::disabled()
+            } else {
+                MicLed::from_env()
+            },
             recording: tokio::sync::Mutex::new(None),
             serial: AtomicU64::new(0),
             speak: Mutex::new(cfg.speak),
@@ -813,6 +821,7 @@ impl Voice {
 
     fn set_mic(&self, s: MicState) {
         *self.mic.lock().unwrap() = s;
+        self.led.set(s == MicState::Listening);
         self.emit_state();
     }
 
