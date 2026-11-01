@@ -1,0 +1,26 @@
+#!/bin/bash
+# The AgentOS desktop inside sway: agentosd on a Unix socket plus the
+# full-screen agentos-shell. Falls back to the text console if the graphical
+# shell cannot run.
+export AGENTOS_SOCKET="$XDG_RUNTIME_DIR/agentos.sock"
+rm -f "$XDG_RUNTIME_DIR/agentos-shell.ready"
+
+/usr/local/bin/agentos-daemon &
+daemon=$!
+stop_daemon() { kill "$daemon" 2>/dev/null; pkill -x -u "$(id -u)" agentosd; }
+
+# First boot: the setup wizard opens in a window over the desktop.
+[ -f /etc/agentos/setup-done ] || /usr/local/bin/agentos-system setup &
+
+# Without a GPU render node (simple VM graphics) WebKit's DMA-BUF renderer
+# shows a blank window; use shared-memory buffers instead.
+ls /dev/dri/renderD* >/dev/null 2>&1 || export WEBKIT_DISABLE_DMABUF_RENDERER=1
+
+/usr/local/bin/agentos-shell 2>>"$XDG_RUNTIME_DIR/agentos-shell.log"
+status=$?
+stop_daemon
+if [ "$status" -ne 0 ]; then
+  echo "agentos-shell 退出（$status），改用文本模式" >>"$XDG_RUNTIME_DIR/agentos-shell.log"
+  exec foot --app-id agentos-console /usr/local/bin/agentos-console
+fi
+swaymsg exit

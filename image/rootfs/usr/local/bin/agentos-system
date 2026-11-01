@@ -1,0 +1,22 @@
+#!/bin/bash
+# System actions offered by the agentos-shell system menu. Only these fixed
+# actions exist; the shell refuses any other name.
+case "${1:-}" in
+  terminal)
+    exec foot ;;
+  setup)
+    # Re-run the setup wizard, then restart agentosd so it picks up the
+    # new planner and keys (agentos-daemon restarts it).
+    exec foot --app-id agentos-setup sh -c \
+      'sudo /usr/local/bin/agentos-setup; pkill -x -u "$(id -u)" agentosd' ;;
+  install)
+    exec foot --app-id agentos-setup sh -c \
+      'sudo /usr/local/bin/agentos-install; read -r -p "按回车关闭" _' ;;
+  reboot)
+    exec sudo systemctl reboot ;;
+  poweroff)
+    exec sudo systemctl poweroff ;;
+  *)
+    echo "用法：agentos-system terminal|setup|install|reboot|poweroff" >&2
+    exit 2 ;;
+esac
