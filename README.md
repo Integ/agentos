@@ -21,9 +21,9 @@ crates/
   core/      核心类型：Intent、Percept、Expression、Capability，Sensor/Output trait
   policy/    策略引擎：能力授权 + 风险分级确认 + 污点追踪
   audit/     只追加审计日志（JSON Lines），可回放
-  image/       可启动磁盘镜像：构建脚本、系统集成文件、QEMU 冒烟测试
   agentosd/  P0 守护进程：感知中枢 → 管家 Agent → 表达中枢；插件运行时与自我进化（evolve）
   shell/     图形界面 agentos-shell：玻璃风格桌面，通过 Unix socket 连接 agentosd
+image/       可启动磁盘镜像：构建脚本、系统集成文件、QEMU 冒烟测试
 ```
 
 ## 快速开始
