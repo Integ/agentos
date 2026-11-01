@@ -15,7 +15,7 @@ use agentos_core::{CapabilitySpec, Intent};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::llm::TextModel;
+use crate::llm::{send_with_retry, Retry, TextModel};
 use crate::planner::{
     capability_name, tool_name, Conversation, Plan, Planner, Step, SYSTEM_PROMPT,
 };
@@ -177,6 +177,7 @@ pub fn parse_response(body: &Value) -> Plan {
 pub struct ClaudePlanner {
     cfg: ClaudeConfig,
     http: reqwest::Client,
+    retry: Retry,
 }
 
 impl ClaudePlanner {
@@ -184,12 +185,22 @@ impl ClaudePlanner {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(600))
             .build()?;
-        Ok(Self { cfg, http })
+        Ok(Self::with_client(cfg, http))
     }
 
     /// Use a caller-built HTTP client (custom proxy, TLS or timeout settings).
     pub fn with_client(cfg: ClaudeConfig, http: reqwest::Client) -> Self {
-        Self { cfg, http }
+        Self {
+            cfg,
+            http,
+            retry: Retry::default(),
+        }
+    }
+
+    /// How rate limits and overloaded or unreachable servers are retried.
+    pub fn with_retry(mut self, retry: Retry) -> Self {
+        self.retry = retry;
+        self
     }
 
     pub fn model(&self) -> &str {
@@ -198,16 +209,16 @@ impl ClaudePlanner {
 
     async fn call(&self, body: &Value) -> Result<Value, String> {
         let url = format!("{}/v1/messages", self.cfg.base_url.trim_end_matches('/'));
-        let resp = self
-            .http
-            .post(url)
-            .header("x-api-key", &self.cfg.api_key)
-            .header("anthropic-version", API_VERSION)
-            .header("anthropic-beta", FALLBACK_BETA)
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| format!("无法连接 Claude API：{e}"))?;
+        let resp = send_with_retry(self.retry, || {
+            self.http
+                .post(&url)
+                .header("x-api-key", &self.cfg.api_key)
+                .header("anthropic-version", API_VERSION)
+                .header("anthropic-beta", FALLBACK_BETA)
+                .json(body)
+        })
+        .await
+        .map_err(|e| format!("无法连接 Claude API：{e}"))?;
         let status = resp.status();
         let value: Value = resp
             .json()
@@ -423,5 +434,31 @@ mod tests {
         let plan = planner.plan(&intent("hi"), &specs()).await;
         assert!(plan.steps.is_empty());
         assert!(plan.reply.unwrap().contains("invalid x-api-key"));
+    }
+
+    #[tokio::test]
+    async fn overloaded_api_is_retried() {
+        use crate::test_http::sequence_server;
+        let (url, server) = sequence_server(vec![
+            (
+                "529 Overloaded",
+                json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}),
+            ),
+            (
+                "200 OK",
+                json!({"stop_reason": "tool_use", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "notes__append", "input": {"text": "买牛奶"}}
+                ]}),
+            ),
+        ])
+        .await;
+        let planner = local_planner(&url).with_retry(Retry {
+            attempts: 3,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+        });
+        let plan = planner.plan(&intent("记一下买牛奶"), &specs()).await;
+        assert_eq!(plan.steps[0].capability.as_str(), "notes.append");
+        assert_eq!(server.await.unwrap().len(), 2);
     }
 }

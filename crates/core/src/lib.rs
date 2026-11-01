@@ -212,6 +212,14 @@ pub enum CapabilityError {
 pub trait Capability: Send + Sync {
     fn spec(&self) -> &CapabilitySpec;
     async fn invoke(&self, args: Value) -> Result<Value, CapabilityError>;
+
+    /// The result may carry content from outside the user's control (a web
+    /// page, an email, anything fetched from the network). Once an agent has
+    /// seen it, its later steps are *tainted*: the policy engine asks the human
+    /// before any side effect, so injected instructions cannot act silently.
+    fn untrusted_output(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

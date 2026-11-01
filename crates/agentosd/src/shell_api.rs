@@ -18,6 +18,8 @@
 //! - `expression`: everything the butler says (`kind`: plan/report/ask_confirm/error).
 //! - `plan`, `step`, `confirm`, `done`: structured progress, so a shell can draw
 //!   the plan with risk levels instead of parsing text.
+//! - `tainted`: a task read untrusted outside content; its side effects now
+//!   need confirmation.
 //! - `voice`, `voice_level`, `transcript`, `voice_notice`: microphone and
 //!   speaker state, so the shell can show when the microphone is in use.
 //!

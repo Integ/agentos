@@ -57,3 +57,58 @@ pub async fn one_shot_server_bytes(
     });
     (format!("http://{addr}"), handle)
 }
+
+/// Serve `responses` in order, one per connection, and capture each request.
+pub async fn sequence_server(
+    responses: Vec<(&str, Value)>,
+) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let responses: Vec<(String, Vec<u8>)> = responses
+        .into_iter()
+        .map(|(s, b)| (s.to_string(), b.to_string().into_bytes()))
+        .collect();
+    let handle = tokio::spawn(async move {
+        let mut seen = Vec::new();
+        for (status, payload) in responses {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let req = read_request(&mut sock).await;
+            let head = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                payload.len()
+            );
+            sock.write_all(head.as_bytes()).await.unwrap();
+            sock.write_all(&payload).await.unwrap();
+            seen.push(req);
+        }
+        seen
+    });
+    (format!("http://{addr}"), handle)
+}
+
+async fn read_request(sock: &mut tokio::net::TcpStream) -> String {
+    let mut buf = vec![0u8; 65536];
+    let mut req = Vec::new();
+    loop {
+        let n = sock.read(&mut buf).await.unwrap();
+        req.extend_from_slice(&buf[..n]);
+        let s = String::from_utf8_lossy(&req);
+        if let Some(idx) = s.find("\r\n\r\n") {
+            let len = s[..idx]
+                .lines()
+                .find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|v| v.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            if req.len() >= idx + 4 + len {
+                break;
+            }
+        }
+        if n == 0 {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&req).to_string()
+}

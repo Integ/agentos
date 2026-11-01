@@ -805,6 +805,7 @@ impl Butler {
         }
 
         self.emit_step(f, "running");
+        let mut untrusted = false;
         let result = if let Some(r) = self.syscall(task_id, &step) {
             r
         } else {
@@ -813,6 +814,7 @@ impl Butler {
                 .get(&step.capability)
                 .cloned()
                 .expect("spec_of found it");
+            untrusted = cap.untrusted_output();
             // Commit the intent to act before acting, so a crash mid-call is
             // recognised on recovery instead of silently re-run.
             f.started = Some(step.id.clone());
@@ -822,6 +824,18 @@ impl Butler {
         };
         let f = task.stack.last_mut().expect("non-empty stack");
         f.started = None;
+        // Whatever the agent does after reading outside content is suspect,
+        // for the rest of this task (taint never goes away within a frame,
+        // and a delegate's taint flows back to its parent).
+        if untrusted && result.is_ok() && !f.tainted {
+            f.tainted = true;
+            self.emit(json!({
+                "type": "tainted",
+                "task": task_id,
+                "intent": f.intent.id,
+                "capability": step.capability.to_string(),
+            }));
+        }
         let (ok, value) = match &result {
             Ok(v) => (true, v.clone()),
             Err(e) => (false, Value::String(e.clone())),

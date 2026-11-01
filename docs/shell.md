@@ -87,6 +87,7 @@ agentosd → shell：
 | `step` | 某一步的状态：`running` `done` `failed` `confirm` `denied` `cancelled` |
 | `confirm` | 需要人确认：能力、描述、风险、原因、参数、是否需要身份核验 |
 | `expression` | 管家说的话（`report` `error` 等） |
+| `tainted` | 这个任务读到了不可信的外部内容（例如联网插件的结果），之后有副作用的步骤都要人确认 |
 | `done` | 这个意图处理完了 |
 | `voice` | 麦克风状态 `mic`（`idle` `listening` `transcribing`）、是否在朗读 `speaking`、朗读模式 `speak` |
 | `voice_level` | 录音音量（0–1），约每 100 毫秒一次 |
