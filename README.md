@@ -2,6 +2,10 @@
 
 一个以 Agent 为一等公民的操作系统，目标是让人和 AI 更顺畅地协作：Agent 通过各种输入设备接收人的意图，通过输出设备与人沟通并展示自己的工作。
 
+[![AgentOS 介绍视频（1 分 42 秒，点击播放）](docs/media/agentos-intro-poster.jpg)](docs/media/agentos-intro.mp4)
+
+<sub>▶ 点击封面播放 [介绍视频](docs/media/agentos-intro.mp4)（1 分 42 秒，720p）：功能一览与安装方法。</sub>
+
 AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层：意图总线、Agent 运行时、统一的感知/表达设备抽象，以及基于能力令牌和风险分级的权限模型。
 
 - 设计草案：[AgentOS 架构设计草案](https://claude.ai/artifact/RzRDjHkBbJVbnyFDRSZ4BN)
