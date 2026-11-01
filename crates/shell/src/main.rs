@@ -82,10 +82,6 @@ fn daemon_loop(path: PathBuf, conn: Conn, proxy: EventLoopProxy<Value>) {
     }
 }
 
-/// What the UI may ask for. Only intents, confirmation answers and voice
-/// controls (talk button, read-aloud mode) reach the daemon, rebuilt from known
-/// fields; `launch` opens a fixed set of programs. The shell never touches the
-/// microphone itself: agentosd records, so it can audit and show every use.
 /// System actions the UI may ask for, run by the `agentos-system` helper that
 /// the AgentOS image installs.
 const SYSTEM_ACTIONS: [&str; 5] = ["terminal", "setup", "install", "reboot", "poweroff"];
@@ -136,8 +132,10 @@ fn mark_ready(hello: &Value) {
     }
 }
 
-/// What the UI may ask for. Only intents and confirmation answers reach the
-/// daemon, rebuilt from known fields; `system` runs a fixed set of actions.
+/// What the UI may ask for. Only intents, confirmation answers and voice
+/// controls (talk button, read-aloud mode) reach the daemon, rebuilt from known
+/// fields; `system` runs a fixed set of actions. The shell never touches the
+/// microphone itself: agentosd records, so it can audit and show every use.
 fn handle_ipc(body: &str, conn: &Conn, proxy: &EventLoopProxy<Value>) {
     let Ok(v) = serde_json::from_str::<Value>(body) else {
         return;

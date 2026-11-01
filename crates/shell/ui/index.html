@@ -314,7 +314,7 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
   <button role="menuitem" data-system="poweroff" class="managed">关机</button>
 </div>
 
-<section id="settings" class="glass" aria-label="外观设置">
+<section id="settings" class="glass" aria-label="设置">
   <h2>强调色</h2>
   <div class="swatches">
     <button class="swatch" style="background:#3b82f6" data-accent="#3b82f6" aria-label="蓝"></button>
@@ -711,7 +711,6 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
   let demoMic = null;
   function demoVoice(patch) { receive(Object.assign({ type: "voice", mic: state.voice.mic, speaking: false, speak: state.voice.speak }, patch)); }
   function demo(msg) {
-    if (msg.type === "launch") { bubble("note", "演示模式：这里会打开终端"); return; }
     if (msg.type === "speech") { if (msg.mode) demoVoice({ speak: msg.mode }); return; }
     if (msg.type === "listen") {
       if (msg.action === "start") {
