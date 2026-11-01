@@ -107,7 +107,15 @@ SHELL_BIN="${AGENTOS_SHELL_BIN:-$REPO/target/release/agentos-shell}"
 rm -rf "$WORK"
 mkdir -p "$ROOT" "$OUT"
 log "debootstrap $DISTRO $SUITE ← $MIRROR"
-debootstrap --variant=minbase --components="$COMPONENTS" "$SUITE" "$ROOT" "$MIRROR"
+# Mirrors occasionally drop single downloads (seen on the Azure Ubuntu mirror
+# in CI). Retry: debootstrap re-validates and reuses the .debs it already
+# fetched into $ROOT, so later attempts only download what was missing.
+for attempt in 1 2 3; do
+  debootstrap --variant=minbase --components="$COMPONENTS" "$SUITE" "$ROOT" "$MIRROR" && break
+  [[ $attempt -lt 3 ]] || die "debootstrap 失败（已重试 3 次）"
+  log "debootstrap 失败，第 $((attempt + 1)) 次重试"
+  sleep 10
+done
 
 mount -t proc proc "$ROOT/proc"
 mount -t sysfs sys "$ROOT/sys"
@@ -142,6 +150,13 @@ fi
 cat > "$ROOT/etc/kernel-img.conf" <<EOF
 do_symlinks = yes
 link_in_boot = yes
+EOF
+
+# Retry flaky downloads instead of failing the whole build (kept in the
+# image: also helps on shaky Wi-Fi later).
+cat > "$ROOT/etc/apt/apt.conf.d/80-retries" <<EOF
+Acquire::Retries "5";
+Acquire::http::Timeout "60";
 EOF
 
 log "安装软件包"
