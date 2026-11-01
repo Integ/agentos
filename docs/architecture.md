@@ -39,6 +39,7 @@
 - [x] LLM 规划器（Claude API，能力 spec 作为工具列表；单次调用生成计划，尚不支持依赖上一步结果的多轮规划）
 - [x] OpenAI 兼容规划器（Chat Completions + function calling）
 - [x] 自我进化 MVP：按用户需求生成能力插件，沙箱自测，审阅后 L3 确认安装，版本化回滚（见 [self-evolution.md](self-evolution.md)）
-- [ ] 语音输入（openWakeWord + whisper.cpp）与 TTS 输出（Piper）
+- [x] 语音输入输出：按住说话 + 朗读回复，云端（OpenAI 兼容）或本机命令（whisper.cpp / Piper）后端，麦克风使用全程可见并审计（见 [voice.md](voice.md)）
+- [ ] 本机唤醒词（openWakeWord）与连续对话
 - [ ] MCP server 注册为能力
 - [ ] 进程间通信（Unix socket + Cap'n Proto），把各中枢拆成独立服务

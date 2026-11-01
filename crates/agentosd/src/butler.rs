@@ -16,11 +16,14 @@ use crate::planner::{Plan, Planner, Step};
 use crate::plugin_store::PluginManager;
 use crate::registry::CapabilityRegistry;
 use crate::shell_api::{risk_label, EventBus};
+use crate::voice::MIC_DEVICE;
 
 struct Pending {
     intent: Intent,
     plan: Plan,
     step: usize,
+    /// The step needs identity verification (L3): a voice answer cannot approve it.
+    verify_identity: bool,
 }
 
 pub struct Butler {
@@ -38,10 +41,12 @@ pub struct Butler {
 }
 
 fn is_yes(text: &str) -> bool {
-    matches!(
-        text.trim().to_lowercase().as_str(),
-        "y" | "yes" | "是" | "确认" | "好" | "可以"
-    )
+    // Speech recognizers add punctuation: "确认。", "好的！".
+    let t = text
+        .trim()
+        .trim_matches(|c: char| c.is_ascii_punctuation() || "。！？，、～ ".contains(c))
+        .to_lowercase();
+    matches!(t.as_str(), "y" | "yes" | "是" | "确认" | "好" | "可以")
 }
 
 impl Butler {
@@ -186,6 +191,21 @@ impl Butler {
 
         if let Some(p) = self.pending.take() {
             let approved = is_yes(&intent.text);
+            if approved && p.verify_identity && intent.source.as_str() == MIC_DEVICE {
+                // Anyone in the room (or a TV) could say "确认"; L3 needs the screen.
+                let cap = p.plan.steps[p.step].capability.clone();
+                let intent_ref = p.intent.clone();
+                self.pending = Some(p);
+                self.say(
+                    &intent_ref,
+                    ExpressionKind::AskConfirm,
+                    format!(
+                        "{cap}：不可逆的操作不能用语音确认。请在屏幕上点“确认执行”，或者说“取消”。"
+                    ),
+                )
+                .await;
+                return;
+            }
             let cap = p.plan.steps[p.step].capability.clone();
             self.log(AuditEvent::HumanConfirmation {
                 intent: p.intent.id,
@@ -319,6 +339,7 @@ impl Butler {
                         intent,
                         plan,
                         step: i,
+                        verify_identity,
                     });
                     return;
                 }

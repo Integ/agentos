@@ -7,6 +7,9 @@
 //! - `{"type":"intent","text":"记一下 买牛奶"}`: a new intent (or the answer to a
 //!   pending confirmation, exactly like a typed line).
 //! - `{"type":"confirm","approved":true}`: answer the pending confirmation.
+//! - `{"type":"listen","action":"start|stop|cancel"}`: push-to-talk button.
+//! - `{"type":"speech","mode":"auto|always|off"}`: when replies are read aloud.
+//! - `{"type":"speech","action":"stop"}`: stop reading aloud.
 //!
 //! Daemon → client:
 //! - `hello`: sent once on connect (planner label, version).
@@ -14,11 +17,14 @@
 //! - `expression`: everything the butler says (`kind`: plan/report/ask_confirm/error).
 //! - `plan`, `step`, `confirm`, `done`: structured progress, so a shell can draw
 //!   the plan with risk levels instead of parsing text.
+//! - `voice`, `voice_level`, `transcript`, `voice_notice`: microphone and
+//!   speaker state, so the shell can show when the microphone is in use.
 //!
 //! The socket is created with mode 0600: only the session's user can talk to
 //! the butler, and every request still goes through the policy engine.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use agentos_audit::{AuditEvent, AuditLog};
 use agentos_core::{
@@ -30,6 +36,8 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
+
+use crate::voice::{SpeakMode, Voice, VoiceControl};
 
 /// Fan-out of structured events to every connected shell.
 pub type EventBus = broadcast::Sender<Value>;
@@ -126,6 +134,14 @@ pub fn recent_activity(audit: &Path, n: usize) -> Vec<Value> {
                 "capability": capability.to_string(),
                 "ok": approved,
             })),
+            AuditEvent::DeviceUsed { device, detail, .. } => Some(json!({
+                "seq": e.seq,
+                "at_ms": e.at_ms,
+                "kind": "device",
+                "device": device.to_string(),
+                "detail": detail,
+                "ok": true,
+            })),
             _ => None,
         })
         .collect();
@@ -134,17 +150,40 @@ pub fn recent_activity(audit: &Path, n: usize) -> Vec<Value> {
     items
 }
 
-/// Turn one request line into the text of an intent.
-pub fn parse_request(line: &str) -> Option<String> {
+/// A request from a shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Request {
+    /// Text for the butler: a new intent or a confirmation answer.
+    Intent(String),
+    Voice(VoiceControl),
+}
+
+/// Parse one request line.
+pub fn parse_request(line: &str) -> Option<Request> {
     let v: Value = serde_json::from_str(line).ok()?;
     match v.get("type")?.as_str()? {
         "intent" => {
             let t = v.get("text")?.as_str()?.trim();
-            (!t.is_empty()).then(|| t.to_string())
+            (!t.is_empty()).then(|| Request::Intent(t.to_string()))
         }
         "confirm" => {
             let approved = v.get("approved")?.as_bool()?;
-            Some(if approved { "y" } else { "取消" }.to_string())
+            Some(Request::Intent(
+                if approved { "y" } else { "取消" }.to_string(),
+            ))
+        }
+        "listen" => Some(Request::Voice(match v.get("action")?.as_str()? {
+            "start" => VoiceControl::ListenStart,
+            "stop" => VoiceControl::ListenStop,
+            "cancel" => VoiceControl::ListenCancel,
+            _ => return None,
+        })),
+        "speech" => {
+            if v.get("action").and_then(Value::as_str) == Some("stop") {
+                return Some(Request::Voice(VoiceControl::StopSpeaking));
+            }
+            let mode = SpeakMode::parse(v.get("mode")?.as_str()?)?;
+            Some(Request::Voice(VoiceControl::SetSpeakMode(mode)))
         }
         _ => None,
     }
@@ -155,6 +194,8 @@ pub struct ShellServer {
     pub bus: EventBus,
     pub audit: PathBuf,
     pub percepts: mpsc::Sender<Percept>,
+    /// Microphone and speaker, if configured.
+    pub voice: Option<Arc<Voice>>,
 }
 
 /// Bind `path` (replacing a stale socket) with mode 0600.
@@ -173,7 +214,7 @@ pub fn bind(path: &Path) -> std::io::Result<UnixListener> {
 
 impl ShellServer {
     pub async fn serve(self, listener: UnixListener) {
-        let this = std::sync::Arc::new(self);
+        let this = Arc::new(self);
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
@@ -216,9 +257,24 @@ impl ShellServer {
         });
 
         let mut lines = BufReader::new(read).lines();
+        let mut talking = false;
         while let Ok(Some(line)) = lines.next_line().await {
-            let Some(text) = parse_request(&line) else {
-                continue;
+            let text = match parse_request(&line) {
+                Some(Request::Intent(text)) => text,
+                Some(Request::Voice(c)) => {
+                    if let Some(voice) = &self.voice {
+                        match c {
+                            VoiceControl::ListenStart => talking = true,
+                            VoiceControl::ListenStop | VoiceControl::ListenCancel => {
+                                talking = false
+                            }
+                            _ => {}
+                        }
+                        voice.control(c).await;
+                    }
+                    continue;
+                }
+                None => continue,
             };
             let p = Percept {
                 device: DeviceId::new("shell"),
@@ -231,6 +287,10 @@ impl ShellServer {
             if self.percepts.send(p).await.is_err() {
                 break;
             }
+        }
+        // A shell that disappears mid-recording must not leave the mic open.
+        if let (true, Some(voice)) = (talking, &self.voice) {
+            voice.control(VoiceControl::ListenCancel).await;
         }
         writer.abort();
     }
@@ -248,20 +308,54 @@ mod tests {
 
     #[test]
     fn requests_become_intent_text() {
+        let text = |l: &str| match parse_request(l) {
+            Some(Request::Intent(t)) => Some(t),
+            _ => None,
+        };
         assert_eq!(
-            parse_request(r#"{"type":"intent","text":" 看看笔记 "}"#).as_deref(),
+            text(r#"{"type":"intent","text":" 看看笔记 "}"#).as_deref(),
             Some("看看笔记")
         );
         assert_eq!(
-            parse_request(r#"{"type":"confirm","approved":true}"#).as_deref(),
+            text(r#"{"type":"confirm","approved":true}"#).as_deref(),
             Some("y")
         );
         assert_eq!(
-            parse_request(r#"{"type":"confirm","approved":false}"#).as_deref(),
+            text(r#"{"type":"confirm","approved":false}"#).as_deref(),
             Some("取消")
         );
         assert_eq!(parse_request(r#"{"type":"intent","text":"  "}"#), None);
         assert_eq!(parse_request("not json"), None);
         assert_eq!(parse_request(r#"{"type":"shutdown"}"#), None);
+    }
+
+    #[test]
+    fn voice_requests() {
+        let v = |l: &str| match parse_request(l) {
+            Some(Request::Voice(c)) => Some(c),
+            _ => None,
+        };
+        assert_eq!(
+            v(r#"{"type":"listen","action":"start"}"#),
+            Some(VoiceControl::ListenStart)
+        );
+        assert_eq!(
+            v(r#"{"type":"listen","action":"stop"}"#),
+            Some(VoiceControl::ListenStop)
+        );
+        assert_eq!(
+            v(r#"{"type":"listen","action":"cancel"}"#),
+            Some(VoiceControl::ListenCancel)
+        );
+        assert_eq!(v(r#"{"type":"listen","action":"forever"}"#), None);
+        assert_eq!(
+            v(r#"{"type":"speech","mode":"always"}"#),
+            Some(VoiceControl::SetSpeakMode(SpeakMode::Always))
+        );
+        assert_eq!(
+            v(r#"{"type":"speech","action":"stop"}"#),
+            Some(VoiceControl::StopSpeaking)
+        );
+        assert_eq!(v(r#"{"type":"speech","mode":"loud"}"#), None);
     }
 }

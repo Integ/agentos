@@ -82,6 +82,10 @@ fn daemon_loop(path: PathBuf, conn: Conn, proxy: EventLoopProxy<Value>) {
     }
 }
 
+/// What the UI may ask for. Only intents, confirmation answers and voice
+/// controls (talk button, read-aloud mode) reach the daemon, rebuilt from known
+/// fields; `launch` opens a fixed set of programs. The shell never touches the
+/// microphone itself: agentosd records, so it can audit and show every use.
 /// System actions the UI may ask for, run by the `agentos-system` helper that
 /// the AgentOS image installs.
 const SYSTEM_ACTIONS: [&str; 5] = ["terminal", "setup", "install", "reboot", "poweroff"];
@@ -146,6 +150,18 @@ fn handle_ipc(body: &str, conn: &Conn, proxy: &EventLoopProxy<Value>) {
         Some("confirm") => match v.get("approved").and_then(Value::as_bool) {
             Some(a) => json!({"type": "confirm", "approved": a}),
             None => return,
+        },
+        Some("listen") => match v.get("action").and_then(Value::as_str) {
+            Some(a @ ("start" | "stop" | "cancel")) => json!({"type": "listen", "action": a}),
+            _ => return,
+        },
+        Some("speech") => match (
+            v.get("mode").and_then(Value::as_str),
+            v.get("action").and_then(Value::as_str),
+        ) {
+            (Some(m @ ("auto" | "always" | "off")), _) => json!({"type": "speech", "mode": m}),
+            (_, Some("stop")) => json!({"type": "speech", "action": "stop"}),
+            _ => return,
         },
         // The page finished loading: start delivering daemon events.
         Some("ready") => {

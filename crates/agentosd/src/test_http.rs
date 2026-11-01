@@ -9,9 +9,18 @@ pub async fn one_shot_server(
     status: &str,
     body: Value,
 ) -> (String, tokio::task::JoinHandle<String>) {
+    one_shot_server_bytes(status, "application/json", body.to_string().into_bytes()).await
+}
+
+/// Like [`one_shot_server`], with any content type and body.
+pub async fn one_shot_server_bytes(
+    status: &str,
+    content_type: &str,
+    payload: Vec<u8>,
+) -> (String, tokio::task::JoinHandle<String>) {
+    let content_type = content_type.to_string();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let payload = body.to_string();
     let status = status.to_string();
     let handle = tokio::spawn(async move {
         let (mut sock, _) = listener.accept().await.unwrap();
@@ -38,11 +47,12 @@ pub async fn one_shot_server(
                 break;
             }
         }
-        let resp = format!(
-            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+        let head = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
             payload.len()
         );
-        sock.write_all(resp.as_bytes()).await.unwrap();
+        sock.write_all(head.as_bytes()).await.unwrap();
+        sock.write_all(&payload).await.unwrap();
         String::from_utf8_lossy(&req).to_string()
     });
     (format!("http://{addr}"), handle)

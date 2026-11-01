@@ -77,6 +77,9 @@ PACKAGES=(
   sway foot fonts-noto-cjk fcitx5 fcitx5-chinese-addons
   libwebkit2gtk-4.1-0 fonts-inter
   libgl1-mesa-dri libpam-systemd dbus-user-session
+  # Voice: PipeWire session audio; agentosd records with arecord and plays
+  # with aplay, routed through pipewire-alsa.
+  pipewire pipewire-alsa pipewire-pulse wireplumber alsa-utils
 )
 
 IMAGE="$OUT/agentos-$DISTRO-x86_64.img"

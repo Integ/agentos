@@ -9,7 +9,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use agentos_core::{now_ms, AgentId, CapabilityName, Expression, Intent, IntentId};
+use agentos_core::{now_ms, AgentId, CapabilityName, DeviceId, Expression, Intent, IntentId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -48,6 +48,13 @@ pub enum AuditEvent {
         intent: Option<IntentId>,
         kind: String,
         text: String,
+    },
+    /// A privacy-relevant device was used, e.g. the microphone recorded
+    /// speech. `detail` says how long and where the raw data went.
+    DeviceUsed {
+        device: DeviceId,
+        action: String,
+        detail: Value,
     },
 }
 
