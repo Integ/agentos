@@ -72,7 +72,7 @@ shell → agentosd：
 | 消息 | 含义 |
 | --- | --- |
 | `{"type":"intent","text":"记一下 买牛奶"}` | 新意图 |
-| `{"type":"confirm","approved":true}` | 回答待确认的步骤 |
+| `{"type":"confirm","approved":true,"task":3}` | 回答待确认的步骤；`confirm` 事件带 `pin_required` 时加上 `"pin":"1234"`（PIN 由守护进程核对，不会写进意图或审计日志） |
 | `{"type":"listen","action":"start"}` | 按下说话键；`stop` 松开并识别，`cancel` 丢弃这次录音 |
 | `{"type":"speech","mode":"auto"}` | 朗读模式：`auto` `always` `off` |
 | `{"type":"speech","action":"stop"}` | 停止朗读 |
@@ -88,6 +88,7 @@ agentosd → shell：
 | `confirm` | 需要人确认：能力、描述、风险、原因、参数、是否需要身份核验 |
 | `expression` | 管家说的话（`report` `error` 等） |
 | `tainted` | 这个任务读到了不可信的外部内容（例如联网插件的结果），之后有副作用的步骤都要人确认 |
+| `pin` | 随批准发来的 PIN 不对或已锁定（`message` 说明原因），这一步仍在等待确认 |
 | `done` | 这个意图处理完了 |
 | `voice` | 麦克风状态 `mic`（`idle` `listening` `transcribing`）、是否在朗读 `speaking`、朗读模式 `speak` |
 | `voice_level` | 录音音量（0–1），约每 100 毫秒一次 |

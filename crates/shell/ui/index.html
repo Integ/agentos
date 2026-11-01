@@ -179,6 +179,11 @@ input { font-family: inherit; }
 #c-approve { background: var(--r3); box-shadow: inset 0 1px 0 rgba(255,255,255,.35); }
 #c-approve.mild { background: var(--accent); }
 #confirm .hint { text-align: center; font-size: 12px; color: var(--text-3); }
+#c-pinbox { display: flex; flex-direction: column; gap: 6px; }
+#c-pinbox[hidden] { display: none; }
+#c-pin { height: 46px; border: 0; border-radius: 16px; padding: 0 16px; font-size: 20px; letter-spacing: .4em; text-align: center; color: inherit; background: rgba(0,0,0,.28); box-shadow: inset 0 0 0 1px rgba(255,255,255,.14); outline: none; }
+#c-pin:focus { box-shadow: inset 0 0 0 2px var(--r3); }
+#c-pin-err { min-height: 16px; text-align: center; font-size: 12px; color: #ff9a8a; }
 @keyframes pop { from { opacity: 0; transform: scale(.96); } }
 @keyframes fade { from { opacity: 0; } }
 
@@ -338,6 +343,10 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
       <div><h2 id="c-title"></h2><p id="c-sub"></p></div>
     </div>
     <dl id="c-rows"></dl>
+    <div id="c-pinbox" hidden>
+      <input id="c-pin" type="password" inputmode="numeric" autocomplete="off" maxlength="12" placeholder="输入 PIN" aria-label="PIN">
+      <div id="c-pin-err" role="alert"></div>
+    </div>
     <div class="actions">
       <button id="c-cancel">取消</button>
       <button id="c-approve">确认执行</button>
@@ -355,7 +364,7 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
   const CONFIRM_SECONDS = 60;
 
   const state = {
-    connected: false, planner: "", busy: false, confirm: null, timer: null,
+    connected: false, planner: "", busy: false, confirm: null, lastConfirm: null, timer: null,
     plans: new Map(),       // intent id -> { steps, card }
     descriptions: new Map(), // capability -> description
     activity: [],
@@ -553,7 +562,7 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
     $("#c-sub").textContent = l3 ? "这一步不可撤销（风险等级 L3），只有你亲自确认后才会执行。" : `风险等级 ${c.risk}（${RISK_TEXT[c.risk] || ""}），需要你确认。`;
     const rows = [["能力", c.capability], ["原因", c.reason || "—"]];
     if (c.args && Object.keys(c.args).length) rows.push(["参数", JSON.stringify(c.args, null, 1)]);
-    if (c.verify_identity) rows.push(["身份核验", "正式版本会在此要求核验"]);
+    if (c.verify_identity) rows.push(["身份核验", c.pin_required ? "需要输入 PIN" : "未设置 PIN，任何人都能确认（运行 agentosd --set-pin 设置）"]);
     $("#c-rows").replaceChildren(...rows.map(([k, v]) => { const d = el("div"); const dd = el("dd", k === "能力" ? "mono" : null, v); d.append(el("dt", null, k), dd); return d; }));
     $("#c-approve").classList.toggle("mild", !l3);
     let left = CONFIRM_SECONDS;
@@ -562,7 +571,10 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
     clearInterval(state.timer);
     state.timer = setInterval(() => { left -= 1; if (left <= 0) answer(false); else hint(); }, 1000);
     $("#scrim").classList.add("open");
-    $("#c-cancel").focus();
+    $("#c-pinbox").hidden = !c.pin_required;
+    $("#c-pin").value = "";
+    $("#c-pin-err").textContent = c.pin_error || "";
+    if (c.pin_required) $("#c-pin").focus(); else $("#c-cancel").focus();
     renderStatus();
   }
   function closeConfirm() {
@@ -573,11 +585,18 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
   function answer(approved) {
     if (!state.confirm) return;
     const c = state.confirm;
+    let pin;
+    if (approved && c.pin_required) {
+      pin = $("#c-pin").value.trim();
+      if (!/^\d{4,12}$/.test(pin)) { $("#c-pin-err").textContent = "PIN 是 4 到 12 位数字"; $("#c-pin").focus(); return; }
+    }
+    state.lastConfirm = c;
+    $("#c-pin").value = "";
     clearInterval(state.timer);
     state.confirm = null;
     $("#scrim").classList.remove("open");
     bubble("note", approved ? "你批准了这一步" : "你取消了这一步");
-    send({ type: "confirm", approved, task: c.task });
+    send(pin ? { type: "confirm", approved, task: c.task, pin } : { type: "confirm", approved, task: c.task });
     renderStatus();
     $("#intent").focus();
   }
@@ -626,6 +645,13 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
         break;
       }
       case "confirm": openConfirm(msg); break;
+      case "pin": {
+        // Wrong PIN or locked: the step is still waiting, ask again.
+        const c = state.lastConfirm;
+        if (c && !msg.ok && (msg.task == null || msg.task === c.task)) openConfirm({ ...c, pin_error: msg.message });
+        else if (!msg.ok) bubble("note", msg.message);
+        break;
+      }
       case "expression":
         if (msg.kind === "report") bubble("agent", msg.text);
         else if (msg.kind === "error") bubble("error", msg.text);
@@ -677,6 +703,7 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
   });
   $("#c-cancel").addEventListener("click", () => answer(false));
   $("#c-approve").addEventListener("click", () => answer(true));
+  $("#c-pin").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); answer(true); } });
   document.addEventListener("keydown", (e) => {
     if (state.confirm && e.key === "Escape") { e.preventDefault(); answer(false); }
     else if (e.key === "Escape" && state.voice.speaking) send({ type: "speech", action: "stop" });

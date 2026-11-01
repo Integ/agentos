@@ -12,6 +12,7 @@ pub mod claude_planner;
 pub mod devices;
 pub mod evolve;
 pub mod expression;
+pub mod identity;
 pub mod judge;
 pub mod llm;
 pub mod openai_planner;
