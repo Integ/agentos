@@ -433,7 +433,8 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
       p.card.append(p.head, p.list);
       log.append(p.card);
     }
-    p.head.replaceChildren(el("span", null, `计划 · ${p.steps.length} 步`), el("span", null, ""));
+    const who = p.agent && p.agent !== "butler" ? `${p.agentName || p.agent} · ` : "";
+    p.head.replaceChildren(el("span", null, `${who}计划 · ${p.steps.length} 步`), el("span", null, ""));
     p.list.replaceChildren(...p.steps.map((s) => {
       const li = el("li", "step"); li.dataset.status = s.status;
       const body = el("div", "body");
@@ -547,7 +548,8 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
   function openConfirm(c) {
     state.confirm = c;
     const l3 = c.risk === "L3";
-    $("#c-title").textContent = `管家想要${c.description || "执行 " + c.capability}`;
+    const who = c.agent && c.agent !== "butler" ? c.agent_name || c.agent : "管家";
+    $("#c-title").textContent = `${who}想要${c.description || "执行 " + c.capability}`;
     $("#c-sub").textContent = l3 ? "这一步不可撤销（风险等级 L3），只有你亲自确认后才会执行。" : `风险等级 ${c.risk}（${RISK_TEXT[c.risk] || ""}），需要你确认。`;
     const rows = [["能力", c.capability], ["原因", c.reason || "—"]];
     if (c.args && Object.keys(c.args).length) rows.push(["参数", JSON.stringify(c.args, null, 1)]);
@@ -570,11 +572,12 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
   }
   function answer(approved) {
     if (!state.confirm) return;
+    const c = state.confirm;
     clearInterval(state.timer);
     state.confirm = null;
     $("#scrim").classList.remove("open");
     bubble("note", approved ? "你批准了这一步" : "你取消了这一步");
-    send({ type: "confirm", approved });
+    send({ type: "confirm", approved, task: c.task });
     renderStatus();
     $("#intent").focus();
   }
@@ -600,19 +603,22 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
       case "activity":
         state.activity = msg.items || []; renderActivity(); break;
       case "plan": {
-        const prev = state.plans.get(msg.intent);
+        // One card per round per agent; older daemons key plans by intent only.
+        const key = msg.plan ?? msg.intent;
+        const prev = state.plans.get(key);
         const steps = msg.steps.map((s, i) => ({ ...s, status: prev && prev.steps[i] ? prev.steps[i].status : "pending" }));
         steps.forEach((s) => s.description && state.descriptions.set(s.capability, s.description));
-        state.plans.set(msg.intent, Object.assign(prev || {}, { steps }));
-        state.busy = true; renderPlan(msg.intent); break;
+        state.plans.set(key, Object.assign(prev || {}, { steps, agent: msg.agent, agentName: msg.agent_name }));
+        state.busy = true; renderPlan(key); break;
       }
       case "step": {
-        const p = state.plans.get(msg.intent);
+        const key = msg.plan ?? msg.intent;
+        const p = state.plans.get(key);
         if (!p || !p.steps[msg.index]) break;
         const s = p.steps[msg.index];
-        s.status = msg.status; renderPlan(msg.intent);
+        s.status = msg.status; renderPlan(key);
         // Answered another way (spoken "取消", or another shell): close the sheet.
-        if (state.confirm && state.confirm.intent === msg.intent && state.confirm.index === msg.index && msg.status !== "confirm") closeConfirm();
+        if (state.confirm && (state.confirm.plan ?? state.confirm.intent) === key && state.confirm.index === msg.index && msg.status !== "confirm") closeConfirm();
         if (["done", "failed"].includes(msg.status)) {
           state.activity.push({ kind: "invoked", capability: s.capability, ok: msg.status === "done", at_ms: Date.now() });
           renderActivity();
