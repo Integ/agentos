@@ -234,7 +234,7 @@ async fn butler_delegates_and_gets_the_agents_answer() {
     assert!(sub
         .tools
         .iter()
-        .all(|t| t.starts_with("notes.") || t == "clock.now"));
+        .all(|t| t.starts_with("notes.") || t.starts_with("board.") || t == "clock.now"));
 
     let events = h.audit();
     assert!(events.iter().any(|e| matches!(e,

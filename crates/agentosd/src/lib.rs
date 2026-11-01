@@ -5,12 +5,14 @@
 //! [`expression::ExpressionHub`] → `Output`. Everything is audited.
 
 pub mod agents;
+pub mod blackboard;
 pub mod builtin;
 pub mod butler;
 pub mod claude_planner;
 pub mod devices;
 pub mod evolve;
 pub mod expression;
+pub mod judge;
 pub mod llm;
 pub mod openai_planner;
 pub mod perception;
@@ -19,6 +21,7 @@ pub mod plugin;
 pub mod plugin_store;
 pub mod registry;
 pub mod shell_api;
+pub mod tasks;
 pub mod voice;
 
 #[cfg(test)]

@@ -572,11 +572,12 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
   }
   function answer(approved) {
     if (!state.confirm) return;
+    const c = state.confirm;
     clearInterval(state.timer);
     state.confirm = null;
     $("#scrim").classList.remove("open");
     bubble("note", approved ? "你批准了这一步" : "你取消了这一步");
-    send({ type: "confirm", approved });
+    send({ type: "confirm", approved, task: c.task });
     renderStatus();
     $("#intent").focus();
   }

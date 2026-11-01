@@ -59,6 +59,19 @@ pub enum AuditEvent {
         ok: bool,
         summary: String,
     },
+    /// A task (one intent's work) changed state: running, waiting, done, cancelled.
+    TaskState {
+        task: u64,
+        intent: IntentId,
+        state: String,
+    },
+    /// The judge reviewed a step the policy engine allowed.
+    JudgeVerdict {
+        intent: IntentId,
+        agent: AgentId,
+        capability: CapabilityName,
+        verdict: String,
+    },
     Expressed {
         agent: AgentId,
         intent: Option<IntentId>,

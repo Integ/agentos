@@ -37,6 +37,7 @@
 - [x] 管家 Agent：计划 → 策略 → 执行 → 汇报，支持中途确认
 - [x] 多轮规划：每轮结果交还规划器再决定下一步
 - [x] 管家调度子 Agent：Agent 清单、委派（`agent.<id>`）、权限取交集、确认统一回到人（见 [agents.md](agents.md)）
+- [x] OS 概念映射：任务即进程（多任务并存）、检查点持久化与重启恢复、共享黑板、跨会话上下文、裁判
 - [x] 文本输入 / 控制台输出
 - [x] LLM 规划器（Claude API，能力 spec 作为工具列表，多轮回放工具结果）
 - [x] OpenAI 兼容规划器（Chat Completions + function calling）

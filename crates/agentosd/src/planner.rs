@@ -11,6 +11,7 @@
 
 use agentos_core::{CapabilityName, CapabilitySpec, Intent};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// System prompt shared by the LLM-backed planners.
@@ -24,6 +25,7 @@ need 写清楚要做什么、输入和输出；用户要求改进已安装的插
 \n- 名字以 agent__ 开头的工具是其他专门的 Agent。属于它们领域的多步任务，交给它们去做：task 里写清目标和你需要拿回的结果。\
 它们只能用自己被授权的工具，做完会把结果交还给你。\
 \n- 每轮工具调用的结果会交还给你，你可以根据结果继续调用工具。事情做完后用一两句话总结，不要重复每一步已经汇报过的内容。\
+\n- 需要长期记住、或者要交给以后的任务和其他 Agent 的事实，写到共享黑板（board__write）；系统提示里会附上最近的任务和黑板内容，供你参考。\
 \n- 闲聊、知识问答等不需要工具的，用一两句话直接回答，不要编造工具。\
 \n- 用用户使用的语言回复，简洁。";
 
@@ -53,7 +55,7 @@ pub fn capability_name(tool: &str) -> CapabilityName {
     CapabilityName::new(tool.replace("__", "."))
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Step {
     /// The model's id for this tool call, echoed back with its result.
     /// Empty for steps a planner made up itself; the agent assigns one.
@@ -73,7 +75,7 @@ impl Step {
 }
 
 /// The outcome of one tool call, as handed back to the planner.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
     pub id: String,
     pub ok: bool,
@@ -82,7 +84,7 @@ pub struct ToolResult {
 }
 
 /// One finished round of an agent's work.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Round {
     /// What the model said alongside its calls.
     pub text: Option<String>,
@@ -101,7 +103,7 @@ pub struct Conversation<'a> {
     pub available: &'a [CapabilitySpec],
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
     pub steps: Vec<Step>,
     /// Text to show when there is nothing to execute.
@@ -146,6 +148,18 @@ impl Planner for RulePlanner {
         let t = intent.text.trim();
         let lower = t.to_lowercase();
         let has = |keys: &[&str]| keys.iter().any(|k| lower.contains(k));
+
+        if matches!(lower.as_str(), "任务" | "看看任务" | "ps" | "tasks") {
+            return step("tasks.list", json!({}));
+        }
+        if let Some(rest) = strip_any(t, &["取消任务", "kill "]) {
+            if let Ok(n) = rest.trim().trim_start_matches('#').parse::<u64>() {
+                return step("tasks.cancel", json!({ "task": n }));
+            }
+        }
+        if has(&["黑板", "board"]) {
+            return step("board.read", json!({}));
+        }
 
         // "@notes 记一下 买牛奶": hand the rest to that agent, if it exists.
         if let Some(rest) = t.strip_prefix('@') {

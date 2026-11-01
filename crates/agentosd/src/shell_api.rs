@@ -6,7 +6,8 @@
 //! Client → daemon:
 //! - `{"type":"intent","text":"记一下 买牛奶"}`: a new intent (or the answer to a
 //!   pending confirmation, exactly like a typed line).
-//! - `{"type":"confirm","approved":true}`: answer the pending confirmation.
+//! - `{"type":"confirm","approved":true,"task":3}`: answer a pending confirmation
+//!   (`task` optional: without it, the newest waiting task).
 //! - `{"type":"listen","action":"start|stop|cancel"}`: push-to-talk button.
 //! - `{"type":"speech","mode":"auto|always|off"}`: when replies are read aloud.
 //! - `{"type":"speech","action":"stop"}`: stop reading aloud.
@@ -168,8 +169,13 @@ pub fn parse_request(line: &str) -> Option<Request> {
         }
         "confirm" => {
             let approved = v.get("approved")?.as_bool()?;
+            let word = if approved { "y" } else { "取消" };
+            // Several tasks may be waiting; the sheet answers the one it shows.
             Some(Request::Intent(
-                if approved { "y" } else { "取消" }.to_string(),
+                match v.get("task").and_then(Value::as_u64) {
+                    Some(t) => format!("{word} #{t}"),
+                    None => word.to_string(),
+                },
             ))
         }
         "listen" => Some(Request::Voice(match v.get("action")?.as_str()? {
@@ -323,6 +329,10 @@ mod tests {
         assert_eq!(
             text(r#"{"type":"confirm","approved":false}"#).as_deref(),
             Some("取消")
+        );
+        assert_eq!(
+            text(r#"{"type":"confirm","approved":true,"task":3}"#).as_deref(),
+            Some("y #3")
         );
         assert_eq!(parse_request(r#"{"type":"intent","text":"  "}"#), None);
         assert_eq!(parse_request("not json"), None);

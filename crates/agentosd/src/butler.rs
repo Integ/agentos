@@ -1,121 +1,56 @@
-//! The butler agent: the system's default entry point for human intents, and
-//! the dispatcher for every other agent.
+//! The butler agent: the system's default entry point for human intents, the
+//! dispatcher for every other agent, and the scheduler of its tasks.
 //!
-//! For each intent the butler runs a planning loop: the planner proposes a
-//! round of tool calls, each call goes through the policy engine, and the
-//! results go back to the planner, which either plans another round or
-//! answers. A tool named `agent.<id>` hands a task to another agent (see
-//! [`crate::agents`]); that agent runs the same loop with its own, narrower
-//! set of capabilities, and its answer becomes the result of the call.
+//! OS concepts mapped onto agents (see `docs/agents.md`):
 //!
-//! Work in progress is an explicit stack of frames (butler at the bottom, at
-//! most one delegate above it). A step that needs the human's confirmation
-//! pauses the whole stack; the human's next intent is read as the answer,
-//! whichever agent asked.
+//! - every intent is a **task** (a process) with its own id, state and call
+//!   stack; a task waiting for the human does not block the next one;
+//! - tasks are **checkpointed** to disk after every step and resume after a
+//!   restart (see [`crate::tasks`]);
+//! - capabilities are **system calls**, gated by the policy engine, and a
+//!   **judge** may tighten (never loosen) what policy allowed;
+//! - `agent.<id>` hands work to another agent, whose frame runs on the same
+//!   task's stack with narrower grants (see [`crate::agents`]);
+//! - the **blackboard** is shared memory across tasks and agents, and recent
+//!   tasks are fed back to the planner, so context carries across sessions.
+//!
+//! For each task the butler runs a planning loop: the planner proposes a
+//! round of tool calls, each goes through policy, and the results go back to
+//! the planner, which plans another round or answers.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use agentos_audit::{AuditEvent, AuditLog, IntentRecord};
 use agentos_core::{
-    AgentId, CapabilityName, CapabilitySpec, Expression, ExpressionKind, Intent, Urgency,
+    AgentId, CapabilityName, CapabilitySpec, Expression, ExpressionKind, Intent, RiskLevel, Urgency,
 };
 use agentos_policy::{CallContext, Decision, PolicyEngine};
 use serde_json::{json, Value};
 
 use crate::agents::{AgentDirectory, AgentManifest};
+use crate::blackboard::Blackboard;
 use crate::expression::ExpressionHub;
-use crate::planner::{Conversation, Plan, Planner, Round, Step, ToolResult, SYSTEM_PROMPT};
+use crate::judge::{Judge, Review, Verdict};
+use crate::planner::{Conversation, Planner, Round, Step, ToolResult, SYSTEM_PROMPT};
 use crate::plugin_store::PluginManager;
 use crate::registry::CapabilityRegistry;
 use crate::shell_api::{risk_label, EventBus};
+use crate::tasks::{Frame, Task, TaskState, TaskStore, KEEP_FINISHED};
 use crate::voice::MIC_DEVICE;
 
-/// Planning rounds the butler gets per intent.
+/// Planning rounds the butler gets per task.
 pub const BUTLER_MAX_ROUNDS: u32 = 8;
 
-/// One agent's work on one request.
-struct Frame {
-    agent: AgentId,
-    /// Display name: "管家" or the delegate's name.
-    name: String,
-    system: String,
-    /// The human's intent for the butler; the task (same intent id) for a delegate.
-    intent: Intent,
-    specs: Vec<CapabilitySpec>,
-    history: Vec<Round>,
-    /// The round being executed.
-    plan: Option<Plan>,
-    next: usize,
-    results: Vec<ToolResult>,
-    rounds: u32,
-    max_rounds: u32,
-    tainted: bool,
-}
-
-impl Frame {
-    fn is_butler(&self) -> bool {
-        self.agent.as_str() == "butler"
-    }
-
-    /// Key that identifies the current round's plan for shells.
-    fn plan_key(&self) -> String {
-        format!("{}:{}:{}", self.intent.id.0, self.agent, self.rounds)
-    }
-
-    fn current(&self) -> Option<&Step> {
-        self.plan.as_ref().and_then(|p| p.steps.get(self.next))
-    }
-
-    /// Record `msg` as the current step's failure, skip the rest of the round
-    /// (later steps may depend on it) and let the planner decide what next.
-    fn fail_rest(&mut self, msg: &str) {
-        let Some(plan) = &self.plan else { return };
-        for (i, s) in plan.steps.iter().enumerate().skip(self.next) {
-            self.results.push(ToolResult {
-                id: s.id.clone(),
-                ok: false,
-                content: if i == self.next {
-                    msg.to_string()
-                } else {
-                    "未执行：前面的步骤没有成功".into()
-                },
-            });
-        }
-        self.next = plan.steps.len();
-    }
-
-    /// What a delegate hands back when its planner gave no closing words.
-    fn summary(&self) -> String {
-        let done: Vec<String> = self
-            .history
-            .iter()
-            .flat_map(|r| r.calls.iter().zip(&r.results))
-            .filter(|(_, res)| res.ok)
-            .map(|(c, _)| c.capability.to_string())
-            .collect();
-        if done.is_empty() {
-            "没有完成任何步骤".into()
-        } else {
-            format!("已完成：{}", done.join("、"))
-        }
-    }
-}
-
-struct Pending {
-    intent: Intent,
-    stack: Vec<Frame>,
-    /// The step needs identity verification (L3): a voice answer cannot approve it.
-    verify_identity: bool,
-}
+/// Finished tasks the planner is reminded of.
+const MEMORY_TASKS: usize = 8;
 
 enum Flow {
     Continue,
     /// The top frame is done; its answer, if any.
     Finished(Option<String>),
     /// Waiting for the human.
-    Paused {
-        verify_identity: bool,
-    },
+    Paused,
     /// The top frame handed its current call to a new agent.
     Delegate(Box<Frame>),
 }
@@ -127,33 +62,93 @@ pub struct Butler {
     planner: Box<dyn Planner>,
     audit: Arc<AuditLog>,
     expr: ExpressionHub,
-    pending: Option<Pending>,
     plugins: Option<Arc<PluginManager>>,
     plugin_generation: u64,
     plugin_names: Vec<CapabilityName>,
     events: Option<EventBus>,
     agents: AgentDirectory,
     calls: u64,
+    /// Unfinished tasks waiting for the human (the running one is on the stack).
+    waiting: BTreeMap<u64, Task>,
+    /// Finished tasks, oldest first (the agent's task memory).
+    recent: Vec<Task>,
+    next_task: u64,
+    store: Option<TaskStore>,
+    /// Unfinished tasks loaded from the store, to be resumed.
+    to_resume: Vec<Task>,
+    board: Option<Blackboard>,
+    judge: Option<Arc<dyn Judge>>,
 }
 
 fn is_yes(text: &str) -> bool {
+    matches!(
+        norm(text).as_str(),
+        "y" | "yes" | "是" | "确认" | "好" | "可以"
+    )
+}
+
+fn is_no(text: &str) -> bool {
+    matches!(
+        norm(text).as_str(),
+        "n" | "no" | "否" | "取消" | "算了" | "不" | "不要" | "不用"
+    )
+}
+
+fn norm(text: &str) -> String {
     // Speech recognizers add punctuation: "确认。", "好的！".
-    let t = text
-        .trim()
+    text.trim()
         .trim_matches(|c: char| c.is_ascii_punctuation() || "。！？，、～ ".contains(c))
-        .to_lowercase();
-    matches!(t.as_str(), "y" | "yes" | "是" | "确认" | "好" | "可以")
+        .to_lowercase()
+}
+
+/// "y #3" → (Some(3), "y").
+fn split_task_ref(text: &str) -> (Option<u64>, String) {
+    if let Some(pos) = text.find('#') {
+        let digits: String = text[pos + 1..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if let Ok(n) = digits.parse() {
+            let rest = format!("{}{}", &text[..pos], &text[pos + 1 + digits.len()..]);
+            return (Some(n), rest);
+        }
+    }
+    (None, text.to_string())
+}
+
+fn syscall_specs() -> Vec<CapabilitySpec> {
+    vec![
+        CapabilitySpec {
+            name: CapabilityName::new("tasks.list"),
+            description: "列出进行中、等待确认和最近完成的任务".into(),
+            risk: RiskLevel::ReadOnly,
+            input_schema: json!({"type": "object", "properties": {}}),
+        },
+        CapabilitySpec {
+            name: CapabilityName::new("tasks.cancel"),
+            description: "取消一个等待确认的任务".into(),
+            risk: RiskLevel::Reversible,
+            input_schema: json!({
+                "type": "object",
+                "properties": {"task": {"type": "integer", "description": "任务编号"}},
+                "required": ["task"]
+            }),
+        },
+    ]
 }
 
 impl Butler {
     pub fn new(
         id: AgentId,
         registry: CapabilityRegistry,
-        policy: PolicyEngine,
+        mut policy: PolicyEngine,
         planner: Box<dyn Planner>,
         audit: Arc<AuditLog>,
         expr: ExpressionHub,
     ) -> Self {
+        for s in syscall_specs() {
+            policy.grant(&id, &s.name);
+        }
         Self {
             id,
             registry,
@@ -161,13 +156,19 @@ impl Butler {
             planner,
             audit,
             expr,
-            pending: None,
             plugins: None,
             plugin_generation: 0,
             plugin_names: Vec::new(),
             events: None,
             agents: AgentDirectory::new(),
             calls: 0,
+            waiting: BTreeMap::new(),
+            recent: Vec::new(),
+            next_task: 0,
+            store: None,
+            to_resume: Vec::new(),
+            board: None,
+            judge: None,
         }
     }
 
@@ -195,8 +196,43 @@ impl Butler {
         self
     }
 
+    /// Shared memory shown to the planner. Register its capabilities with
+    /// [`crate::blackboard::register_all`] so agents can read and write it.
+    pub fn with_blackboard(mut self, board: Blackboard) -> Self {
+        self.board = Some(board);
+        self
+    }
+
+    /// Second opinion before allowed steps that change something.
+    pub fn with_judge(mut self, judge: Arc<dyn Judge>) -> Self {
+        self.judge = Some(judge);
+        self
+    }
+
+    /// Keep tasks on disk. Loads finished tasks as memory and queues
+    /// unfinished ones for [`Butler::resume`]. Returns a note per bad file.
+    pub fn with_task_store(mut self, store: TaskStore) -> (Self, Vec<String>) {
+        store.prune(KEEP_FINISHED);
+        let (tasks, notes) = store.load();
+        for t in tasks {
+            self.next_task = self.next_task.max(t.id);
+            if t.state.is_active() {
+                self.to_resume.push(t);
+            } else {
+                self.recent.push(t);
+            }
+        }
+        self.store = Some(store);
+        (self, notes)
+    }
+
     pub fn agents(&self) -> &AgentDirectory {
         &self.agents
+    }
+
+    /// Unfinished tasks waiting to be resumed after a restart.
+    pub fn pending_resume(&self) -> usize {
+        self.to_resume.len()
     }
 
     fn emit(&self, v: Value) {
@@ -210,6 +246,7 @@ impl Butler {
             .get(name)
             .map(|c| c.spec().clone())
             .or_else(|| self.agents.by_capability(name).map(|m| m.delegate_spec()))
+            .or_else(|| syscall_specs().into_iter().find(|s| &s.name == name))
     }
 
     fn emit_plan(&self, f: &Frame) {
@@ -232,6 +269,7 @@ impl Butler {
         self.emit(json!({
             "type": "plan",
             "intent": f.intent.id,
+            "task": f.task,
             "plan": f.plan_key(),
             "agent": f.agent,
             "agent_name": f.name,
@@ -244,6 +282,7 @@ impl Butler {
         self.emit(json!({
             "type": "step",
             "intent": f.intent.id,
+            "task": f.task,
             "plan": f.plan_key(),
             "agent": f.agent,
             "index": f.next,
@@ -281,14 +320,28 @@ impl Butler {
         &self.id
     }
 
-    /// Whether a step is waiting for the human's confirmation.
+    /// Whether any task is waiting for the human's confirmation.
     pub fn awaiting_confirmation(&self) -> bool {
-        self.pending.is_some()
+        !self.waiting.is_empty()
+    }
+
+    /// Ids of the tasks waiting for the human, oldest first.
+    pub fn waiting_tasks(&self) -> Vec<u64> {
+        self.waiting.keys().copied().collect()
     }
 
     fn log(&self, ev: AuditEvent) {
         if let Err(e) = self.audit.append(ev) {
             eprintln!("audit write failed: {e}");
+        }
+    }
+
+    fn save(&self, task: &mut Task) {
+        task.updated_ms = agentos_core::now_ms();
+        if let Some(store) = &self.store {
+            if let Err(e) = store.save(task) {
+                eprintln!("任务 #{} 保存失败：{e}", task.id);
+            }
         }
     }
 
@@ -331,69 +384,95 @@ impl Butler {
         self.say_as(&f.agent, &f.intent, kind, text).await;
     }
 
-    pub async fn handle(&mut self, intent: Intent) {
-        let id = intent.id;
-        self.handle_inner(intent).await;
-        if self.pending.is_none() {
-            self.emit(json!({"type": "done", "intent": id}));
+    /// What the planner should know beyond the request: recent tasks, tasks
+    /// still waiting, and the blackboard.
+    fn context(&self) -> String {
+        let mut s = SYSTEM_PROMPT.to_string();
+        if !self.recent.is_empty() {
+            s.push_str("\n\n最近完成的任务（旧的在前，供参考，不需要重做）：");
+            let skip = self.recent.len().saturating_sub(MEMORY_TASKS);
+            for t in &self.recent[skip..] {
+                s.push_str("\n- ");
+                s.push_str(&t.line());
+            }
         }
+        if !self.waiting.is_empty() {
+            s.push_str("\n\n正在等待用户确认的任务：");
+            for t in self.waiting.values() {
+                s.push_str("\n- ");
+                s.push_str(&t.line());
+            }
+        }
+        if let Some(b) = self.board.as_ref().and_then(|b| b.summary(1500)) {
+            s.push_str("\n\n共享黑板（");
+            s.push_str(&b);
+            s.push('）');
+        }
+        s
     }
 
-    async fn handle_inner(&mut self, intent: Intent) {
+    pub async fn handle(&mut self, intent: Intent) {
         self.log(AuditEvent::IntentReceived {
             intent: Box::new(IntentRecord::from(&intent)),
         });
-
-        if let Some(p) = self.pending.take() {
-            let approved = is_yes(&intent.text);
-            let top = p.stack.last().expect("a paused stack has frames");
-            let cap = top
-                .current()
-                .map(|s| s.capability.clone())
-                .expect("a paused frame has a current step");
-            if approved && p.verify_identity && intent.source.as_str() == MIC_DEVICE {
-                // Anyone in the room (or a TV) could say "确认"; L3 needs the screen.
-                let intent_ref = p.intent.clone();
-                self.pending = Some(p);
-                self.say(
-                    &intent_ref,
-                    ExpressionKind::AskConfirm,
-                    format!(
-                        "{cap}：不可逆的操作不能用语音确认。请在屏幕上点“确认执行”，或者说“取消”。"
-                    ),
-                )
-                .await;
-                return;
-            }
-            self.log(AuditEvent::HumanConfirmation {
-                intent: p.intent.id,
-                capability: cap.clone(),
-                approved,
-            });
-            if approved {
-                self.drive(p.intent, p.stack, true).await;
-            } else {
-                self.emit_step(top, "cancelled");
-                for f in p.stack.iter().rev().skip(1) {
-                    self.emit_step(f, "cancelled");
+        if !self.waiting.is_empty() {
+            let (target, rest) = split_task_ref(&intent.text);
+            let (yes, no) = (is_yes(&rest), is_no(&rest));
+            if yes || no {
+                let newest = self.waiting.keys().next_back().copied();
+                let id = target.filter(|t| self.waiting.contains_key(t)).or(newest);
+                if let Some(id) = id {
+                    self.answer(id, yes, &intent).await;
+                    return;
                 }
-                self.say(
-                    &p.intent,
-                    ExpressionKind::Report,
-                    format!("已取消 {cap}，计划中止"),
-                )
-                .await;
             }
-            return;
         }
+        self.start(intent).await;
+    }
 
+    /// Resume tasks that were unfinished when agentosd last stopped.
+    pub async fn resume(&mut self) {
+        for mut task in std::mem::take(&mut self.to_resume) {
+            match task.state {
+                TaskState::Waiting => {
+                    if let Some((text, event)) = task.ask.clone() {
+                        self.emit(event);
+                        self.say(
+                            &task.intent,
+                            ExpressionKind::AskConfirm,
+                            format!("（重启前未完成的任务 #{}）{text}", task.id),
+                        )
+                        .await;
+                    }
+                    self.waiting.insert(task.id, task);
+                }
+                _ => {
+                    let registry = &self.registry;
+                    task.recover(|s| registry.get(&s.capability).map(|c| c.spec().risk));
+                    self.say(
+                        &task.intent,
+                        ExpressionKind::Report,
+                        format!("继续重启前未完成的任务 #{}：{}", task.id, task.intent.text),
+                    )
+                    .await;
+                    self.run(task, false).await;
+                }
+            }
+        }
+    }
+
+    async fn start(&mut self, intent: Intent) {
         self.sync_plugins();
+        self.next_task += 1;
+        let id = self.next_task;
         let mut specs = self.registry.specs();
         specs.extend(self.agents.all().map(AgentManifest::delegate_spec));
+        specs.extend(syscall_specs());
         let frame = Frame {
+            task: id,
             agent: self.id.clone(),
             name: "管家".into(),
-            system: SYSTEM_PROMPT.into(),
+            system: self.context(),
             intent: intent.clone(),
             specs,
             history: Vec::new(),
@@ -403,31 +482,104 @@ impl Butler {
             rounds: 0,
             max_rounds: BUTLER_MAX_ROUNDS,
             tainted: false,
+            started: None,
         };
-        self.drive(intent, vec![frame], false).await;
+        self.log(AuditEvent::TaskState {
+            task: id,
+            intent: intent.id,
+            state: "running".into(),
+        });
+        self.run(Task::new(id, intent, frame), false).await;
     }
 
-    /// Run the stack until the butler answers or a step waits for the human.
-    /// `approved` marks the top frame's current step as confirmed.
-    async fn drive(&mut self, human: Intent, mut stack: Vec<Frame>, mut approved: bool) {
+    async fn answer(&mut self, id: u64, approved: bool, reply: &Intent) {
+        let Some(mut task) = self.waiting.remove(&id) else {
+            return;
+        };
+        let cap = task
+            .stack
+            .last()
+            .and_then(Frame::current)
+            .map(|s| s.capability.clone())
+            .unwrap_or_else(|| CapabilityName::new("?"));
+        if approved && task.verify_identity && reply.source.as_str() == MIC_DEVICE {
+            // Anyone in the room (or a TV) could say "确认"; L3 needs the screen.
+            let intent = task.intent.clone();
+            self.waiting.insert(id, task);
+            self.say(
+                &intent,
+                ExpressionKind::AskConfirm,
+                format!(
+                    "{cap}：不可逆的操作不能用语音确认。请在屏幕上点“确认执行”，或者说“取消”。"
+                ),
+            )
+            .await;
+            return;
+        }
+        self.log(AuditEvent::HumanConfirmation {
+            intent: task.intent.id,
+            capability: cap.clone(),
+            approved,
+        });
+        task.ask = None;
+        if approved {
+            task.state = TaskState::Running;
+            self.run(task, true).await;
+        } else {
+            for f in task.stack.iter().rev() {
+                self.emit_step(f, "cancelled");
+            }
+            let msg = format!("已取消 {cap}，任务 #{id} 的计划中止");
+            self.say(&task.intent, ExpressionKind::Report, msg.clone())
+                .await;
+            task.answer = Some(msg);
+            self.finish(task, TaskState::Cancelled);
+        }
+    }
+
+    fn finish(&mut self, mut task: Task, state: TaskState) {
+        task.state = state;
+        self.save(&mut task);
+        self.log(AuditEvent::TaskState {
+            task: task.id,
+            intent: task.intent.id,
+            state: format!("{state:?}").to_lowercase(),
+        });
+        self.emit(json!({"type": "done", "intent": task.intent.id, "task": task.id}));
+        self.recent.push(task);
+        if self.recent.len() > KEEP_FINISHED {
+            self.recent.remove(0);
+        }
+    }
+
+    /// Run a task until it finishes or waits for the human. `approved` marks
+    /// the top frame's current step as confirmed.
+    async fn run(&mut self, mut task: Task, mut approved: bool) {
         loop {
-            match self.advance(&mut stack, &mut approved).await {
+            self.save(&mut task);
+            match self.advance(&mut task, &mut approved).await {
                 Flow::Continue => {}
-                Flow::Delegate(child) => stack.push(*child),
-                Flow::Paused { verify_identity } => {
-                    self.pending = Some(Pending {
-                        intent: human,
-                        stack,
-                        verify_identity,
+                Flow::Delegate(child) => task.stack.push(*child),
+                Flow::Paused => {
+                    task.state = TaskState::Waiting;
+                    self.save(&mut task);
+                    self.log(AuditEvent::TaskState {
+                        task: task.id,
+                        intent: task.intent.id,
+                        state: "waiting".into(),
                     });
+                    self.waiting.insert(task.id, task);
                     return;
                 }
                 Flow::Finished(answer) => {
-                    let done = stack.pop().expect("a finished frame");
-                    let Some(parent) = stack.last_mut() else {
-                        if let Some(a) = answer {
-                            self.say(&human, ExpressionKind::Report, a).await;
+                    let done = task.stack.pop().expect("a finished frame");
+                    let Some(parent) = task.stack.last_mut() else {
+                        if let Some(a) = &answer {
+                            self.say(&task.intent, ExpressionKind::Report, a.clone())
+                                .await;
                         }
+                        task.answer = answer.or_else(|| Some(done.summary()));
+                        self.finish(task, TaskState::Done);
                         return;
                     };
                     // A delegate's answer is the result of the parent's call.
@@ -435,7 +587,7 @@ impl Butler {
                         || answer.is_some();
                     let content = answer.unwrap_or_else(|| done.summary());
                     self.log(AuditEvent::AgentFinished {
-                        intent: human.id,
+                        intent: task.intent.id,
                         agent: done.agent.clone(),
                         ok,
                         summary: content.clone(),
@@ -443,19 +595,20 @@ impl Butler {
                     parent.tainted |= done.tainted;
                     let id = parent.current().map(|s| s.id.clone()).unwrap_or_default();
                     parent.results.push(ToolResult { id, ok, content });
-                    let parent = stack.last().expect("parent");
+                    let parent = task.stack.last().expect("parent");
                     self.emit_step(parent, if ok { "done" } else { "failed" });
-                    stack.last_mut().expect("parent").next += 1;
+                    task.stack.last_mut().expect("parent").next += 1;
                 }
             }
         }
     }
 
     /// One step of the top frame: plan a round, close a round, or run a call.
-    async fn advance(&mut self, stack: &mut [Frame], approved: &mut bool) -> Flow {
+    async fn advance(&mut self, task: &mut Task, approved: &mut bool) -> Flow {
         self.sync_plugins();
-        let depth = stack.len();
-        let f = stack.last_mut().expect("non-empty stack");
+        let depth = task.stack.len();
+        let task_id = task.id;
+        let f = task.stack.last_mut().expect("non-empty stack");
 
         // Plan the next round.
         if f.plan.is_none() {
@@ -491,7 +644,7 @@ impl Butler {
             }
             for s in plan.steps.iter_mut().filter(|s| s.id.is_empty()) {
                 self.calls += 1;
-                s.id = format!("call_{}", self.calls);
+                s.id = format!("t{task_id}_call_{}", self.calls);
             }
             f.tainted |= plan.tainted;
             if let Some(reply) = &plan.reply {
@@ -524,61 +677,54 @@ impl Butler {
             });
             return Flow::Continue;
         };
-        let ctx = CallContext { tainted: f.tainted };
 
-        // Delegation: start the agent on its task.
-        if let Some(m) = self.agents.by_capability(&step.capability).cloned() {
-            let decision = if depth > 1 {
-                Decision::Deny {
-                    reason: "子 Agent 不能再委派任务".into(),
-                }
-            } else {
-                self.policy.check(&f.agent, &m.delegate_spec(), ctx)
-            };
-            self.log(AuditEvent::PolicyDecision {
-                intent: f.intent.id,
-                agent: f.agent.clone(),
-                capability: step.capability.clone(),
-                decision: format!("{decision:?}"),
-            });
-            if let Decision::Deny { reason } = decision {
-                return self.deny(f, &reason).await;
-            }
-            let task = step
-                .args
-                .get("task")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .unwrap_or_default()
-                .to_string();
-            if task.is_empty() {
-                self.emit_step(f, "failed");
-                f.fail_rest("缺少 task：要交给它做什么？");
-                return Flow::Continue;
-            }
-            let child = self.start_delegate(f, &m, task);
-            self.emit_step(f, "running");
-            self.say_for(
-                f,
-                ExpressionKind::Plan,
-                format!("交给{}：{}", m.name, child.intent.text),
-            )
-            .await;
-            return Flow::Delegate(Box::new(child));
-        }
-
-        let Some(cap) = self.registry.get(&step.capability).cloned() else {
+        let Some(spec) = self.spec_of(&step.capability) else {
             self.emit_step(f, "failed");
             let msg = format!("没有这个能力：{}", step.capability);
             self.say_for(f, ExpressionKind::Error, msg.clone()).await;
             f.fail_rest(&msg);
             return Flow::Continue;
         };
-        let decision = if std::mem::take(approved) {
+        let delegate = self.agents.by_capability(&step.capability).cloned();
+        let ctx = CallContext { tainted: f.tainted };
+        let human_approved = std::mem::take(approved);
+        let mut decision = if delegate.is_some() && depth > 1 {
+            Decision::Deny {
+                reason: "子 Agent 不能再委派任务".into(),
+            }
+        } else if human_approved {
             Decision::Allow
         } else {
-            self.policy.check(&f.agent, cap.spec(), ctx)
+            self.policy.check(&f.agent, &spec, ctx)
         };
+        if decision == Decision::Allow && !human_approved && spec.risk > RiskLevel::ReadOnly {
+            if let Some(judge) = &self.judge {
+                let review = Review {
+                    agent: f.agent.as_str(),
+                    task: &f.intent.text,
+                    spec: &spec,
+                    args: &step.args,
+                    tainted: f.tainted,
+                };
+                let verdict = judge.review(&review).await;
+                self.log(AuditEvent::JudgeVerdict {
+                    intent: f.intent.id,
+                    agent: f.agent.clone(),
+                    capability: step.capability.clone(),
+                    verdict: match &verdict {
+                        Ok(Verdict::Allow) => "allow".into(),
+                        Ok(Verdict::Flag(r)) => format!("flag: {r}"),
+                        Err(e) => format!("unavailable: {e}"),
+                    },
+                });
+                if let Ok(Verdict::Flag(reason)) = verdict {
+                    decision = Decision::NeedsConfirmation {
+                        reason: format!("裁判提醒：{reason}"),
+                        verify_identity: false,
+                    };
+                }
+            }
+        }
         self.log(AuditEvent::PolicyDecision {
             intent: f.intent.id,
             agent: f.agent.clone(),
@@ -604,36 +750,81 @@ impl Butler {
                     format!("{}请求执行 ", f.name)
                 };
                 let text = format!(
-                    "{who}{}：{}。原因：{reason}{id_note}。回复 y 确认，其他任意内容取消。",
-                    step.capability,
-                    cap.spec().description
+                    "任务 #{task_id}：{who}{}：{}。原因：{reason}{id_note}。回复 y 确认，n 取消。",
+                    step.capability, spec.description
                 );
-                self.emit_step(f, "confirm");
-                self.emit(json!({
+                let event = json!({
                     "type": "confirm",
                     "intent": f.intent.id,
+                    "task": task_id,
                     "plan": f.plan_key(),
                     "agent": f.agent,
                     "agent_name": f.name,
                     "index": f.next,
                     "capability": step.capability.to_string(),
-                    "description": cap.spec().description,
-                    "risk": risk_label(cap.spec().risk),
+                    "description": spec.description,
+                    "risk": risk_label(spec.risk),
                     "reason": reason,
                     "verify_identity": verify_identity,
                     "args": step.args,
-                }));
+                });
+                self.emit_step(f, "confirm");
+                self.emit(event.clone());
                 // Asked by the butler for everyone: the human only talks to it.
-                self.say(&f.intent, ExpressionKind::AskConfirm, text).await;
-                return Flow::Paused { verify_identity };
+                self.say(&f.intent, ExpressionKind::AskConfirm, text.clone())
+                    .await;
+                task.ask = Some((text, event));
+                task.verify_identity = verify_identity;
+                return Flow::Paused;
             }
         }
 
+        // Delegation: start the agent on its task.
+        if let Some(m) = delegate {
+            let task_text = step
+                .args
+                .get("task")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_string();
+            if task_text.is_empty() {
+                self.emit_step(f, "failed");
+                f.fail_rest("缺少 task：要交给它做什么？");
+                return Flow::Continue;
+            }
+            let child = self.start_delegate(f, &m, task_text);
+            self.emit_step(f, "running");
+            self.say_for(
+                f,
+                ExpressionKind::Plan,
+                format!("交给{}：{}", m.name, child.intent.text),
+            )
+            .await;
+            return Flow::Delegate(Box::new(child));
+        }
+
         self.emit_step(f, "running");
-        let result = cap.invoke(step.args.clone()).await;
+        let result = if let Some(r) = self.syscall(task_id, &step) {
+            r
+        } else {
+            let cap = self
+                .registry
+                .get(&step.capability)
+                .cloned()
+                .expect("spec_of found it");
+            // Commit the intent to act before acting, so a crash mid-call is
+            // recognised on recovery instead of silently re-run.
+            f.started = Some(step.id.clone());
+            self.save(task);
+            let r = cap.invoke(step.args.clone()).await;
+            r.map_err(|e| e.to_string())
+        };
+        let f = task.stack.last_mut().expect("non-empty stack");
+        f.started = None;
         let (ok, value) = match &result {
             Ok(v) => (true, v.clone()),
-            Err(e) => (false, Value::String(e.to_string())),
+            Err(e) => (false, Value::String(e.clone())),
         };
         self.log(AuditEvent::CapabilityInvoked {
             intent: f.intent.id,
@@ -661,7 +852,7 @@ impl Butler {
                 });
                 if let Some(mut next) = follow_up(&v) {
                     self.calls += 1;
-                    next.id = format!("call_{}", self.calls);
+                    next.id = format!("t{task_id}_call_{}", self.calls);
                     let at = f.next + 1;
                     f.plan
                         .as_mut()
@@ -681,6 +872,41 @@ impl Butler {
             }
         }
         Flow::Continue
+    }
+
+    /// Calls handled by the butler itself: the task table.
+    fn syscall(&mut self, current: u64, step: &Step) -> Option<Result<Value, String>> {
+        match step.capability.as_str() {
+            "tasks.list" => {
+                let mut lines = vec![format!("#{current} 进行中（就是这个任务）")];
+                lines.extend(self.waiting.values().map(Task::line));
+                let skip = self.recent.len().saturating_sub(5);
+                lines.extend(self.recent[skip..].iter().rev().map(Task::line));
+                Some(Ok(json!({
+                    "waiting": self.waiting_tasks(),
+                    "message": format!("任务：\n{}", lines.join("\n")),
+                })))
+            }
+            "tasks.cancel" => {
+                let Some(id) = step.args.get("task").and_then(Value::as_u64) else {
+                    return Some(Err("缺少任务编号 task".into()));
+                };
+                if id == current {
+                    return Some(Err("不能取消正在执行的这个任务".into()));
+                }
+                let Some(mut t) = self.waiting.remove(&id) else {
+                    return Some(Err(format!("没有等待中的任务 #{id}")));
+                };
+                for f in t.stack.iter().rev() {
+                    self.emit_step(f, "cancelled");
+                }
+                t.ask = None;
+                t.answer = Some("被另一个任务取消".into());
+                self.finish(t, TaskState::Cancelled);
+                Some(Ok(json!({"message": format!("已取消任务 #{id}")})))
+            }
+            _ => None,
+        }
     }
 
     async fn deny(&self, f: &mut Frame, reason: &str) -> Flow {
@@ -707,14 +933,18 @@ impl Butler {
             task: task.clone(),
             capabilities: names,
         });
+        let mut system =
+            crate::planner::sub_agent_prompt(&m.name, &m.description, m.instructions.as_deref());
+        if let Some(b) = self.board.as_ref().and_then(|b| b.summary(1000)) {
+            system.push_str("\n\n共享黑板（");
+            system.push_str(&b);
+            system.push('）');
+        }
         Frame {
+            task: parent.task,
             agent,
             name: m.name.clone(),
-            system: crate::planner::sub_agent_prompt(
-                &m.name,
-                &m.description,
-                m.instructions.as_deref(),
-            ),
+            system,
             intent: Intent {
                 speaker: None,
                 text: task,
@@ -728,6 +958,7 @@ impl Butler {
             rounds: 0,
             max_rounds: m.max_rounds,
             tainted: parent.tainted,
+            started: None,
         }
     }
 }
@@ -747,5 +978,19 @@ fn follow_up(v: &Value) -> Option<Step> {
 pub fn grant_manifest(policy: &mut PolicyEngine, agent: &AgentId, names: &[CapabilityName]) {
     for n in names {
         policy.grant(agent, n);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn answers_may_name_a_task() {
+        assert_eq!(split_task_ref("y #12"), (Some(12), "y ".into()));
+        assert_eq!(split_task_ref("确认"), (None, "确认".into()));
+        assert!(is_yes("确认！"));
+        assert!(is_no("算了。"));
+        assert!(!is_no("算了吧，记一下牛奶"));
     }
 }

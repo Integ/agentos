@@ -158,7 +158,7 @@ pub fn builtin() -> Vec<AgentManifest> {
             id: "notes".into(),
             name: "笔记 Agent".into(),
             description: "管理用户的笔记：记录、查找、整理和清理".into(),
-            capabilities: vec!["notes.*".into(), "clock.now".into()],
+            capabilities: vec!["notes.*".into(), "board.*".into(), "clock.now".into()],
             max_risk: RiskLevel::Irreversible,
             instructions: Some(
                 "整理笔记时先列出现有笔记，再决定怎么做。清空笔记不可撤销，只在任务明确要求时才做。"
@@ -170,7 +170,7 @@ pub fn builtin() -> Vec<AgentManifest> {
             id: "craftsman".into(),
             name: "能力工匠 Agent".into(),
             description: "为系统编写、改进和维护新能力插件（自我进化），也能查看、停用或回滚已安装的插件".into(),
-            capabilities: vec!["evolve.*".into()],
+            capabilities: vec!["evolve.*".into(), "board.*".into()],
             max_risk: RiskLevel::Irreversible,
             instructions: Some(
                 "要写新能力时调用 evolve__propose，need 写清楚输入、输出和边界情况。\

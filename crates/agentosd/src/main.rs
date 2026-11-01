@@ -10,12 +10,14 @@ use agentos_audit::AuditLog;
 use agentos_core::{AgentId, Sensor};
 use agentos_policy::PolicyEngine;
 use agentosd::agents::AgentDirectory;
+use agentosd::blackboard::{self, Blackboard};
 use agentosd::builtin;
 use agentosd::butler::{grant_manifest, Butler};
 use agentosd::claude_planner::{ClaudeConfig, ClaudePlanner};
 use agentosd::devices::{ConsoleOutput, LineSensor};
 use agentosd::evolve::{self, LlmGenerator, NoGenerator, PluginGenerator};
 use agentosd::expression::ExpressionHub;
+use agentosd::judge::LlmJudge;
 use agentosd::llm::TextModel;
 use agentosd::openai_planner::{OpenAiConfig, OpenAiPlanner};
 use agentosd::perception::PerceptionHub;
@@ -24,6 +26,7 @@ use agentosd::plugin::SandboxMode;
 use agentosd::plugin_store::PluginManager;
 use agentosd::registry::CapabilityRegistry;
 use agentosd::shell_api::{self, ShellServer, SocketOutput};
+use agentosd::tasks::TaskStore;
 use agentosd::voice::{SpeechOutput, Voice, VoiceConfig, MIC_DEVICE};
 use tokio::sync::mpsc;
 
@@ -160,11 +163,15 @@ async fn main() -> std::io::Result<()> {
     let home = home_dir();
     let sandbox = SandboxMode::detect();
     let plugins = Arc::new(PluginManager::open(home.join("evolve"), sandbox)?);
-    let generator: Arc<dyn PluginGenerator> = match text_model.or_else(fallback_text_model) {
+    let text_model = text_model.or_else(fallback_text_model);
+    let generator: Arc<dyn PluginGenerator> = match text_model.clone() {
         Some(m) => Arc::new(LlmGenerator::new(m)),
         None => Arc::new(NoGenerator),
     };
     evolve::register_all(&mut registry, plugins.clone(), generator);
+
+    let board = Blackboard::open(home.join("blackboard.json"))?;
+    blackboard::register_all(&mut registry, board.clone());
 
     let butler_id = AgentId::new("butler");
     let mut policy = PolicyEngine::new();
@@ -200,10 +207,25 @@ async fn main() -> std::io::Result<()> {
         .map(|m| format!("{}（@{}）", m.name, m.id))
         .collect();
 
-    let mut butler = Butler::new(butler_id, registry, policy, planner, audit.clone(), expr)
+    let butler = Butler::new(butler_id, registry, policy, planner, audit.clone(), expr)
         .with_plugins(plugins.clone())
         .with_events(bus.clone())
-        .with_agents(agents);
+        .with_agents(agents)
+        .with_blackboard(board);
+    // AGENTOS_JUDGE=1: a model reviews allowed L1+ steps before they run.
+    let judge_on = std::env::var("AGENTOS_JUDGE").is_ok_and(|v| v == "1" || v == "on");
+    let butler = match (&text_model, judge_on) {
+        (Some(m), true) => butler.with_judge(Arc::new(LlmJudge::new(m.clone()))),
+        (None, true) => {
+            eprintln!("AGENTOS_JUDGE 需要配置一个模型，裁判未启用");
+            butler
+        }
+        _ => butler,
+    };
+    let (mut butler, task_notes) = butler.with_task_store(TaskStore::open(home.join("tasks"))?);
+    for n in task_notes {
+        eprintln!("{n}");
+    }
 
     if let Some(path) = socket_path() {
         let listener = shell_api::bind(&path)?;
@@ -241,9 +263,10 @@ async fn main() -> std::io::Result<()> {
         sandbox.label()
     );
     println!(
-        "可调度的子 Agent：{}；自定义 Agent 放在 {}。",
+        "可调度的子 Agent：{}；自定义 Agent 放在 {}。任务和黑板保存在 {}，重启后接着做。",
         agent_names.join("、"),
-        home.join("agents").display()
+        home.join("agents").display(),
+        home.display()
     );
     if let Some(v) = &voice {
         let d = v.describe();
@@ -259,6 +282,13 @@ async fn main() -> std::io::Result<()> {
             }
         );
     }
+    if butler.pending_resume() > 0 {
+        println!(
+            "有 {} 个重启前未完成的任务，继续执行。",
+            butler.pending_resume()
+        );
+    }
+    butler.resume().await;
     let mut perception = PerceptionHub::new();
     while let Some(p) = rx.recv().await {
         if let Some(intent) = perception.to_intent(p) {
