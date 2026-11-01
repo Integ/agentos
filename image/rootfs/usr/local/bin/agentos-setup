@@ -5,11 +5,16 @@ set -u
 [ "$EUID" -eq 0 ] || exec sudo "$0" "$@"
 
 ENV_FILE=/etc/agentos/agentos.env
-# Calm dark palette instead of newt's default blue/magenta.
-export NEWT_COLORS='root=white,black window=black,lightgray border=black,lightgray title=black,lightgray
-  textbox=black,lightgray button=white,blue actbutton=white,blue compactbutton=black,lightgray
-  listbox=black,lightgray actlistbox=white,blue actsellistbox=white,blue sellistbox=black,lightgray
-  entry=black,white checkbox=black,lightgray actcheckbox=white,blue emptyscale=,gray fullscale=,blue'
+# Glass palette: the colour names below are slots in /etc/xdg/foot/foot.ini
+# (default = the translucent window, black = inset field, gray = dialog
+# panel, brightblue = accent), so the dialogs match the agentos-shell desktop.
+export NEWT_COLORS='root=lightgray,default roottext=brightcyan,default helpline=lightgray,default
+  shadow=black,default border=black,gray window=white,gray title=brightcyan,gray
+  textbox=white,gray label=lightgray,gray
+  button=lightgray,gray actbutton=white,brightblue compactbutton=lightgray,gray
+  listbox=lightgray,gray actlistbox=white,brightblue sellistbox=white,blue actsellistbox=white,brightblue
+  entry=white,black disentry=lightgray,black checkbox=lightgray,gray actcheckbox=white,brightblue
+  emptyscale=,black fullscale=,brightblue'
 W() { whiptail --backtitle "AgentOS 设置" "$@" 3>&1 1>&2 2>&3; }
 
 W --title "欢迎" --msgbox "欢迎使用 AgentOS！\n\n接下来只需要几步：\n  1. 连接网络\n  2. 选择管家 Agent 使用的 AI 模型\n  3. 选择要不要用语音\n\n用方向键和回车操作，Tab 切换按钮。" 15 60
