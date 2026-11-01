@@ -24,6 +24,14 @@ else
   console "AGENTOS-SANDBOX: FAIL"
 fi
 
+# Admin: the desktop user can sudo without a password (the setup wizard needs it).
+if runuser -u agent -- sudo -n true 2>/dev/null; then
+  console "AGENTOS-SUDO: OK"
+else
+  console "AGENTOS-SUDO: FAIL"
+  runuser -u agent -- sudo -n true 2>&1 | head -3
+fi
+
 # Network: NetworkManager brought a connection up and DNS resolves.
 if nm-online -q -t 60 && { getent hosts archive.ubuntu.com || getent hosts deb.debian.org; } >/dev/null; then
   console "AGENTOS-NETWORK: OK"

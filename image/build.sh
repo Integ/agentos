@@ -198,7 +198,12 @@ cp "$GRUB" "$EFI_SRC/EFI/BOOT/grubx64.efi"
 
 # --- 4. AgentOS layer --------------------------------------------------------
 log "安装 AgentOS 用户态"
-cp -a "$HERE/rootfs/." "$ROOT/"
+# --no-preserve=ownership: the checkout belongs to the CI user (uid 1001);
+# keeping that owner made /, /etc, /etc/sudoers.d, /usr/local/bin … owned by a
+# non-existent user, and sudo then ignores sudoers.d (no NOPASSWD → password
+# prompt for an account that has none).
+cp -a --no-preserve=ownership "$HERE/rootfs/." "$ROOT/"
+chown root:root "$ROOT"
 install -m 0755 "$BIN" "$ROOT/usr/local/bin/agentosd"
 install -m 0755 "$SHELL_BIN" "$ROOT/usr/local/bin/agentos-shell"
 chmod 0755 "$ROOT"/usr/local/bin/agentos-*
@@ -229,6 +234,12 @@ in_root passwd -l root >/dev/null
 install -d -m 0750 -o root -g "$(in_root id -g agent)" "$ROOT/etc/agentos"
 install -d -m 0755 "$ROOT/var/lib/agentos"
 in_root chown agent:agent /var/lib/agentos
+
+# Fail the build rather than ship an image where sudo asks for a password.
+stray=$(in_root find / -xdev \( -nouser -o -nogroup \) -print -quit)
+[[ -z $stray ]] || die "镜像里有属主不存在的文件：$stray"
+in_root visudo -c -q || die "sudoers 配置无效"
+in_root runuser -u agent -- sudo -n true || die "agent 不能免密 sudo"
 
 in_root systemctl enable NetworkManager.service agentos-growroot.service agentos-selfcheck.service
 in_root systemctl set-default multi-user.target
