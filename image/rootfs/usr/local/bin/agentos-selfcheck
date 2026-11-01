@@ -32,6 +32,16 @@ else
   runuser -u agent -- sudo -n true 2>&1 | head -3
 fi
 
+# Recording light: the desktop user can switch the Caps Lock LED (udev rule).
+led=$(ls -d /sys/class/leds/*::capslock 2>/dev/null | head -1)
+if [ -z "$led" ]; then
+  console "AGENTOS-MICLED: NONE"
+elif runuser -u agent -- sh -c "echo 1 > '$led/brightness' && echo 0 > '$led/brightness'" 2>/dev/null; then
+  console "AGENTOS-MICLED: OK"
+else
+  console "AGENTOS-MICLED: FAIL"
+fi
+
 # Network: NetworkManager brought a connection up and DNS resolves.
 if nm-online -q -t 60 && { getent hosts archive.ubuntu.com || getent hosts deb.debian.org; } >/dev/null; then
   console "AGENTOS-NETWORK: OK"
