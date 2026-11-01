@@ -1,0 +1,18 @@
+#!/bin/bash
+# Keep agentosd running for the graphical session, serving agentos-shell on
+# $AGENTOS_SOCKET. Re-reads /etc/agentos/agentos.env on every start, so
+# `pkill -x agentosd` applies new settings.
+ENV_FILE=/etc/agentos/agentos.env
+AUDIT=/var/lib/agentos/audit.jsonl
+SOCKET="${AGENTOS_SOCKET:-${XDG_RUNTIME_DIR:-/tmp}/agentos.sock}"
+
+while true; do
+  (
+    set -a
+    # shellcheck disable=SC1090
+    [ -r "$ENV_FILE" ] && . "$ENV_FILE"
+    set +a
+    exec /usr/local/bin/agentosd --listen "$SOCKET" --audit "$AUDIT" </dev/null
+  )
+  sleep 1
+done

@@ -18,7 +18,7 @@ AgentOS 以一个**可启动的磁盘镜像**发布：写进 U 盘，从 U 盘�
 | 文件 | 说明 |
 | --- | --- |
 | `agentos-debian-x86_64.img.xz` | 默认，基于 Debian 13 |
-| `agentos-ubuntu-x86_64.img.xz` | 基于 Ubuntu 24.04，内核对很新的硬件支持更好 |
+| `agentos-ubuntu-x86_64.img.xz` | 基于 Ubuntu 24.04，内核对很新的硬件支持更好。CI 不自动构建，需要时在 Actions → Image → Run workflow 里选 `ubuntu` 手动触发 |
 
 用 [balenaEtcher](https://etcher.balena.io/) 直接选 `.img.xz` 写入 U 盘即可（它能直接读 xz 压缩的镜像，Windows 上也可以用 Rufus）。命令行方式：
 
@@ -33,17 +33,17 @@ xz -dc agentos-debian-x86_64.img.xz | sudo dd of=/dev/rdisk4 bs=4m
 
 ### 2. 从 U 盘启动
 
-插上 U 盘开机，按启动菜单键（常见的是 F12、F11、F8 或 Esc），选择 U 盘。几秒后会自动登录并进入 AgentOS：
+插上 U 盘开机，按启动菜单键（常见的是 F12、F11、F8 或 Esc），选择 U 盘。几秒后会自动登录并进入 AgentOS 桌面，桌面上会弹出设置窗口：
 
 1. **欢迎页**
 2. **网络**：插网线会自动连接；要连 Wi-Fi 就选「连接 Wi-Fi」
 3. **AI 规划器**：选 Claude / OpenAI 兼容接口 / 离线规则规划器，再填 API key 和模型
 
-设置完就进入管家 Agent，可以直接输入意图（拼音输入法用 **Ctrl+空格** 切换）。第一次从 U 盘启动时，系统会自动把分区扩展到占满整个 U 盘。
+设置完关掉窗口，就可以在桌面中间的意图栏直接输入意图（拼音输入法用 **Ctrl+空格** 切换）。第一次从 U 盘启动时，系统会自动把分区扩展到占满整个 U 盘。
 
 ### 3. 安装到硬盘
 
-首次设置最后会问「要把它安装到这台电脑的硬盘上吗？」，选「安装到硬盘」，再选一块硬盘、输入 `yes` 确认。以后也可以在管家 Agent 退出后的菜单里按 `i`，或者在命令行运行：
+首次设置最后会问「要把它安装到这台电脑的硬盘上吗？」，选「安装到硬盘」，再选一块硬盘、输入 `yes` 确认。以后也可以点左上角的 AgentOS 图标，选「安装到这台电脑的硬盘」，或者在终端里运行：
 
 ```sh
 sudo agentos-install                 # 交互式选择硬盘
@@ -54,10 +54,11 @@ sudo agentos-install /dev/nvme0n1    # 直接指定
 
 ## 使用小贴士
 
-- 管家 Agent 里按 **Ctrl-D** 退出，会出现菜单：回车重新启动管家、`s` 打开命令行、`c` 重新设置、`r` 重启、`p` 关机。
-- **Win+回车** 再开一个终端。
+- 左上角的 AgentOS 图标是系统菜单：打开终端、网络和 AI 设置、安装到硬盘、重启、关机。
+- **Win+回车** 打开终端；终端和设置窗口浮在桌面上。
+- 高风险操作（比如清空笔记、安装插件）会弹出确认窗口，默认焦点在「取消」，Esc 也是取消。
 - 设置保存在 `/etc/agentos/agentos.env`（可以手动编辑），审计日志在 `/var/lib/agentos/audit.jsonl`。
-- 图形界面起不来时，在开机菜单选「排障模式」，会直接在文本控制台运行管家 Agent。
+- 图形桌面起不来时会自动退回文本菜单（`agentos-console`）；也可以在开机菜单选「排障模式」，直接在文本控制台运行管家 Agent。
 - 系统更新：`sudo apt update && sudo apt full-upgrade`，内核升级后无需额外操作。
 
 ## 自己构建镜像
@@ -89,10 +90,10 @@ sudo image/test/qemu-smoke.sh out/agentos-debian-x86_64.img
 | --- | --- |
 | 底层 | Debian 13 或 Ubuntu 24.04 最小系统，发行版内核和固件，NetworkManager |
 | 引导 | 发行版签名的 shim + grub（支持安全启动），根分区按 UUID 挂载 |
-| 会话 | tty1 自动登录用户 `agent` → sway（kiosk 模式）→ foot 全屏终端 → `agentos-shell` |
+| 会话 | tty1 自动登录用户 `agent` → sway → `agentos-desktop`：后台 `agentosd --listen`，前台全屏图形桌面 `agentos-shell`（见 [shell.md](shell.md)）；首次启动时设置向导以窗口形式出现在桌面上；图形界面起不来时退回文本菜单 `agentos-console` |
 | 中文 | Noto CJK 字体，fcitx5 拼音输入法，`zh_CN.UTF-8`，时区 Asia/Shanghai |
 | 插件运行时 | bubblewrap 沙箱，Python 3 |
-| AgentOS | `/usr/local/bin/agentosd`，以及 `agentos-setup`、`agentos-install`、`agentos-session`、`agentos-shell` |
+| AgentOS | `/usr/local/bin/agentosd`、`agentos-shell`，以及 `agentos-session`、`agentos-desktop`、`agentos-daemon`、`agentos-system`、`agentos-setup`、`agentos-install`、`agentos-console` |
 | 开机服务 | `agentos-growroot`（首次启动扩展分区）、`agentos-selfcheck`（用离线规划器跑一遍 agentosd，检查插件沙箱和网络） |
 
 ## 目前的限制

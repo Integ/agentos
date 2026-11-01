@@ -15,16 +15,22 @@ case "$DISTRO" in
   *) echo "不支持的 DISTRO=$DISTRO" >&2; exit 1 ;;
 esac
 
-if [[ -z "${AGENTOSD_BIN:-}" ]]; then
-  # Built against Debian 12's glibc, so the binary runs on both bases.
+if [[ -z "${AGENTOSD_BIN:-}" || -z "${AGENTOS_SHELL_BIN:-}" ]]; then
+  # Built against Debian 12's glibc and WebKitGTK, so the binaries run on both
+  # bases (newer sonames-compatible libraries there).
   docker run --rm --platform linux/amd64 -v "$REPO:/src" -w /src \
     -e CARGO_TARGET_DIR=/src/target/image \
-    rust:1-bookworm cargo build --release --locked -p agentosd
+    rust:1-bookworm bash -euc '
+      apt-get update -qq
+      apt-get install -y -qq --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev >/dev/null
+      cargo build --release --locked -p agentosd -p agentos-shell'
   AGENTOSD_BIN=target/image/release/agentosd
+  AGENTOS_SHELL_BIN=target/image/release/agentos-shell
 fi
 
 docker run --rm --privileged --platform linux/amd64 -v "$REPO:/src" -w /src \
   -e DISTRO -e MIRROR -e EXTRA_MB -e COMPRESS -e AGENTOSD_BIN="/src/${AGENTOSD_BIN#"$REPO"/}" \
+  -e AGENTOS_SHELL_BIN="/src/${AGENTOS_SHELL_BIN#"$REPO"/}" \
   "$BASE" bash -euc '
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq

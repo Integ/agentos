@@ -61,6 +61,8 @@ exec agentos-shell
 
 终端程序可用 `AGENTOS_TERMINAL` 指定（默认 `foot`）。
 
+安装镜像里已经这样配置好了：`agentos-desktop` 启动 `agentos-daemon`（循环运行 `agentosd --listen`）和 `agentos-shell`；左上角系统菜单通过 `agentos-system` 执行固定的几项操作（终端、设置、安装、重启、关机），shell 拒绝其他任何名字。shell 连上 agentosd 后会写 `$XDG_RUNTIME_DIR/agentos-shell.ready`，开机自检和 QEMU 冒烟测试用它确认桌面已就绪。
+
 ## socket 协议
 
 每行一个 JSON 对象。
@@ -96,3 +98,4 @@ agentosd → shell：
 - 插件审阅窗口（设计稿第 3 张）：现在插件安装走通用确认弹窗。
 - 全局快捷键唤出意图栏（右 Ctrl 说话目前只在 shell 有焦点时有效）。
 - 接进安装镜像：等镜像 PR 合并后，把 sway 会话里的全屏 foot 换成 agentos-shell。
+- 语音输入、全局快捷键唤出意图栏。

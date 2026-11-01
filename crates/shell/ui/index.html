@@ -182,6 +182,14 @@ input { font-family: inherit; }
 @keyframes pop { from { opacity: 0; transform: scale(.96); } }
 @keyframes fade { from { opacity: 0; } }
 
+/* System menu */
+#sysmenu { position: fixed; top: 40px; left: 10px; min-width: 230px; border-radius: 14px; padding: 6px; z-index: 30; display: none; flex-direction: column; }
+#sysmenu.open { display: flex; animation: pop .2s var(--spring); }
+#sysmenu button { text-align: left; border: 0; background: none; font-size: 13px; padding: 7px 12px; border-radius: 8px; }
+#sysmenu button:hover, #sysmenu button:focus-visible { background: var(--accent); outline: none; }
+#sysmenu hr { border: 0; height: 1px; background: rgba(255,255,255,.14); margin: 5px 8px; width: auto; }
+body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { display: none; }
+
 /* Settings popover */
 #settings { position: fixed; bottom: 104px; left: 50%; transform: translateX(-50%); width: 300px; border-radius: 22px; padding: 16px 18px; z-index: 6; display: none; }
 #settings.open { display: block; animation: pop .3s var(--spring); }
@@ -228,7 +236,7 @@ input { font-family: inherit; }
 <body>
 <header id="menubar" class="glass">
   <nav aria-label="系统菜单">
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" role="img" aria-label="AgentOS"><circle cx="12" cy="12" r="9"/><path d="M12 6v3M12 15v3M6 12h3M15 12h3"/><circle cx="12" cy="12" r="1.6" fill="#fff"/></svg>
+    <button id="sysbtn" class="item" aria-label="AgentOS 系统菜单" aria-haspopup="menu" aria-expanded="false" aria-controls="sysmenu" style="display:flex;padding:2px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v3M12 15v3M6 12h3M15 12h3"/><circle cx="12" cy="12" r="1.6" fill="#fff"/></svg></button>
     <strong>管家</strong>
     <button class="item" data-intent="看看笔记">笔记</button>
     <button class="item" data-intent="看看插件">能力</button>
@@ -297,7 +305,16 @@ input { font-family: inherit; }
   <button class="app g-settings" data-action="settings" aria-label="设置" aria-expanded="false" aria-controls="settings"><span class="tip">设置</span><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg></button>
 </nav>
 
-<section id="settings" class="glass" aria-label="设置">
+<div id="sysmenu" class="glass" role="menu" aria-label="系统">
+  <button role="menuitem" data-system="terminal">打开终端</button>
+  <button role="menuitem" data-system="setup" class="managed">网络和 AI 设置…</button>
+  <button role="menuitem" data-system="install" class="managed not-installed">安装到这台电脑的硬盘…</button>
+  <hr class="managed">
+  <button role="menuitem" data-system="reboot" class="managed">重新启动</button>
+  <button role="menuitem" data-system="poweroff" class="managed">关机</button>
+</div>
+
+<section id="settings" class="glass" aria-label="外观设置">
   <h2>强调色</h2>
   <div class="swatches">
     <button class="swatch" style="background:#3b82f6" data-accent="#3b82f6" aria-label="蓝"></button>
@@ -570,6 +587,10 @@ input { font-family: inherit; }
         if (!state.connected) { talking = false; Object.assign(state.voice, { mic: "idle", speaking: false }); renderVoice(); }
         if (!state.connected) { state.busy = false; if (state.confirm) { clearInterval(state.timer); state.confirm = null; $("#scrim").classList.remove("open"); } }
         break;
+      case "host":
+        document.body.classList.toggle("managed", !!msg.managed);
+        document.body.classList.toggle("installed", !!msg.installed);
+        break;
       case "hello":
         state.connected = true; state.planner = msg.planner || "";
         $("#planner").textContent = (state.planner ? state.planner + " · " : "") + "所有步骤都经过策略引擎";
@@ -640,7 +661,9 @@ input { font-family: inherit; }
     if (b.dataset.intent) submit(b.dataset.intent);
     const a = b.dataset.action;
     if (a === "focus") $("#intent").focus();
-    if (a === "terminal") send({ type: "launch", app: "terminal" });
+    if (a === "terminal") send({ type: "system", action: "terminal" });
+    if (b.dataset.system) { closeSysmenu(); send({ type: "system", action: b.dataset.system }); }
+    if (b.id === "sysbtn") { const m = $("#sysmenu"); const open = !m.classList.contains("open"); m.classList.toggle("open", open); b.setAttribute("aria-expanded", open); if (open) m.querySelector("button").focus(); }
     if (a === "activity") { $("#activity").scrollIntoView({ behavior: "smooth" }); $("#activity").animate([{ transform: "scale(1)" }, { transform: "scale(1.02)" }, { transform: "scale(1)" }], { duration: 350 }); }
     if (a === "settings") { const s = $("#settings"); s.classList.toggle("open"); b.setAttribute("aria-expanded", s.classList.contains("open")); }
     if (b.dataset.accent) setAccent(b.dataset.accent);
@@ -651,8 +674,11 @@ input { font-family: inherit; }
   document.addEventListener("keydown", (e) => {
     if (state.confirm && e.key === "Escape") { e.preventDefault(); answer(false); }
     else if (e.key === "Escape" && state.voice.speaking) send({ type: "speech", action: "stop" });
-    else if (e.key === "Escape") $("#settings").classList.remove("open");
+    else if (e.key === "Escape") { $("#settings").classList.remove("open"); closeSysmenu(); }
   });
+
+  function closeSysmenu() { $("#sysmenu").classList.remove("open"); $("#sysbtn").setAttribute("aria-expanded", "false"); }
+  document.addEventListener("pointerdown", (e) => { if (!e.target.closest("#sysmenu, #sysbtn")) closeSysmenu(); });
 
   function setAccent(c) {
     document.documentElement.style.setProperty("--accent", c);
@@ -699,6 +725,7 @@ input { font-family: inherit; }
       later(600, () => { demoVoice({ mic: "idle" }); receive({ type: "transcript", text: "看看笔记" }); demo({ type: "intent", text: "看看笔记" }); });
       return;
     }
+    if (msg.type === "system") { bubble("note", `演示模式：这里会执行系统操作 ${msg.action}`); return; }
     if (msg.type === "confirm") {
       const p = demoPending; if (!p) return;
       if (!msg.approved) { receive({ type: "step", intent: p.id, index: p.i, status: "cancelled" }); receive({ type: "expression", kind: "report", intent: p.id, text: "已取消 notes.clear，计划中止" }); receive({ type: "done", intent: p.id }); demoPending = null; return; }
