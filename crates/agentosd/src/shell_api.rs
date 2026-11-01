@@ -111,7 +111,8 @@ impl Output for SocketOutput {
 
 /// The last `n` capability calls and confirmations, oldest first.
 pub fn recent_activity(audit: &Path, n: usize) -> Vec<Value> {
-    let Ok(entries) = AuditLog::replay(audit) else {
+    // A damaged line (crash mid-write) must not blank the activity panel.
+    let Ok((entries, _skipped)) = AuditLog::replay_lenient(audit) else {
         return Vec::new();
     };
     let mut items: Vec<Value> = entries
@@ -262,9 +263,9 @@ impl ShellServer {
             }
         });
 
-        let mut lines = BufReader::new(read).lines();
+        let mut reader = BufReader::new(read);
         let mut talking = false;
-        while let Ok(Some(line)) = lines.next_line().await {
+        while let Ok(Some(line)) = read_request_line(&mut reader).await {
             let text = match parse_request(&line) {
                 Some(Request::Intent(text)) => text,
                 Some(Request::Voice(c)) => {
@@ -302,6 +303,40 @@ impl ShellServer {
     }
 }
 
+/// Longest request line a shell may send. Intents are short; this only stops
+/// a broken client from making the daemon buffer without limit.
+pub const MAX_REQUEST_LINE: usize = 64 * 1024;
+
+/// Read one request line. `Ok(None)` at end of stream; an error for a line
+/// over [`MAX_REQUEST_LINE`] or invalid UTF-8, which ends the connection.
+pub async fn read_request_line<R: tokio::io::AsyncBufRead + Unpin>(
+    r: &mut R,
+) -> std::io::Result<Option<String>> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    let n = (&mut *r)
+        .take(MAX_REQUEST_LINE as u64 + 1)
+        .read_until(b'\n', &mut buf)
+        .await?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    } else if buf.len() > MAX_REQUEST_LINE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "request line too long",
+        ));
+    }
+    if buf.last() == Some(&b'\r') {
+        buf.pop();
+    }
+    String::from_utf8(buf)
+        .map(Some)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
 async fn write_line(w: &mut tokio::net::unix::OwnedWriteHalf, v: &Value) -> std::io::Result<()> {
     let mut s = v.to_string();
     s.push('\n');
@@ -337,6 +372,31 @@ mod tests {
         assert_eq!(parse_request(r#"{"type":"intent","text":"  "}"#), None);
         assert_eq!(parse_request("not json"), None);
         assert_eq!(parse_request(r#"{"type":"shutdown"}"#), None);
+    }
+
+    #[tokio::test]
+    async fn request_lines_are_capped() {
+        let mut ok = BufReader::new(&b"{\"a\":1}\r\nlast"[..]);
+        assert_eq!(
+            read_request_line(&mut ok).await.unwrap().as_deref(),
+            Some("{\"a\":1}")
+        );
+        assert_eq!(
+            read_request_line(&mut ok).await.unwrap().as_deref(),
+            Some("last")
+        );
+        assert_eq!(read_request_line(&mut ok).await.unwrap(), None);
+
+        let exact = format!("{}\n", "x".repeat(MAX_REQUEST_LINE));
+        let mut r = BufReader::new(exact.as_bytes());
+        assert_eq!(
+            read_request_line(&mut r).await.unwrap().map(|l| l.len()),
+            Some(MAX_REQUEST_LINE)
+        );
+
+        let huge = "x".repeat(MAX_REQUEST_LINE + 10);
+        let mut r = BufReader::new(huge.as_bytes());
+        assert!(read_request_line(&mut r).await.is_err());
     }
 
     #[test]

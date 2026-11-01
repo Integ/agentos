@@ -40,13 +40,16 @@ fn arg(name: &str) -> Option<String> {
     None
 }
 
-fn audit_path() -> String {
+/// `--audit`, `AGENTOS_AUDIT`, or `audit.jsonl` in the data directory.
+fn audit_path(home: &std::path::Path) -> std::path::PathBuf {
     arg("--audit")
         .or_else(|| std::env::var("AGENTOS_AUDIT").ok())
-        .unwrap_or_else(|| "agentos-audit.jsonl".into())
+        .filter(|p| !p.is_empty())
+        .map(Into::into)
+        .unwrap_or_else(|| home.join("audit.jsonl"))
 }
 
-/// Where AgentOS keeps its state (plugins, ...): `--home`, `AGENTOS_HOME`,
+/// Where AgentOS keeps its state (notes, plugins, audit log, ...): `--home`, `AGENTOS_HOME`,
 /// `$XDG_DATA_HOME/agentos`, or `~/.local/share/agentos`.
 fn home_dir() -> std::path::PathBuf {
     if let Some(h) = arg("--home").or_else(|| std::env::var("AGENTOS_HOME").ok()) {
@@ -153,14 +156,15 @@ fn make_planner() -> Models {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let audit = Arc::new(AuditLog::open(audit_path())?);
+    let home = home_dir();
+    std::fs::create_dir_all(&home)?;
+    let audit = Arc::new(AuditLog::open(audit_path(&home))?);
 
     let (planner, text_model, planner_label) = make_planner();
 
     let mut registry = CapabilityRegistry::new();
-    builtin::register_all(&mut registry);
+    builtin::register_with_notes_file(&mut registry, home.join("notes.json"))?;
 
-    let home = home_dir();
     let sandbox = SandboxMode::detect();
     let plugins = Arc::new(PluginManager::open(home.join("evolve"), sandbox)?);
     let text_model = text_model.or_else(fallback_text_model);
