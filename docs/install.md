@@ -13,12 +13,12 @@ AgentOS 以一个**可启动的磁盘镜像**发布：写进 U 盘，从 U 盘�
 
 ### 1. 下载镜像并写入 U 盘
 
-从 GitHub Releases（打了 `v*` 标签的版本），或者 Actions 里 **Image** 工作流的产物下载：
+从 GitHub Releases 下载：每次发布 release 时，CI 会构建两种镜像并附加到这个 release 上。也可以在 Actions → **Image** → Run workflow 里手动构建，再从这次运行的产物里下载。
 
 | 文件 | 说明 |
 | --- | --- |
 | `agentos-debian-x86_64.img.xz` | 默认，基于 Debian 13 |
-| `agentos-ubuntu-x86_64.img.xz` | 基于 Ubuntu 24.04，内核对很新的硬件支持更好。CI 不自动构建，需要时在 Actions → Image → Run workflow 里选 `ubuntu` 手动触发 |
+| `agentos-ubuntu-x86_64.img.xz` | 基于 Ubuntu 24.04，内核对很新的硬件支持更好 |
 
 用 [balenaEtcher](https://etcher.balena.io/) 直接选 `.img.xz` 写入 U 盘即可（它能直接读 xz 压缩的镜像，Windows 上也可以用 Rufus）。命令行方式：
 
