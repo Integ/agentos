@@ -9,6 +9,7 @@ use std::sync::Arc;
 use agentos_audit::AuditLog;
 use agentos_core::{AgentId, Sensor};
 use agentos_policy::PolicyEngine;
+use agentosd::agents::AgentDirectory;
 use agentosd::builtin;
 use agentosd::butler::{grant_manifest, Butler};
 use agentosd::claude_planner::{ClaudeConfig, ClaudePlanner};
@@ -190,9 +191,19 @@ async fn main() -> std::io::Result<()> {
         expr.add_output(Arc::new(SpeechOutput::new(v.clone())));
     }
 
+    let mut agents = AgentDirectory::with_builtin();
+    for note in agents.load_dir(&home.join("agents")) {
+        eprintln!("{note}");
+    }
+    let agent_names: Vec<String> = agents
+        .all()
+        .map(|m| format!("{}（@{}）", m.name, m.id))
+        .collect();
+
     let mut butler = Butler::new(butler_id, registry, policy, planner, audit.clone(), expr)
         .with_plugins(plugins.clone())
-        .with_events(bus.clone());
+        .with_events(bus.clone())
+        .with_agents(agents);
 
     if let Some(path) = socket_path() {
         let listener = shell_api::bind(&path)?;
@@ -228,6 +239,11 @@ async fn main() -> std::io::Result<()> {
         "自我进化：插件目录 {}，{}。",
         plugins.root().display(),
         sandbox.label()
+    );
+    println!(
+        "可调度的子 Agent：{}；自定义 Agent 放在 {}。",
+        agent_names.join("、"),
+        home.join("agents").display()
     );
     if let Some(v) = &voice {
         let d = v.describe();

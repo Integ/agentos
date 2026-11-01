@@ -53,10 +53,7 @@ impl Planner for TestPlanner {
     async fn plan(&self, intent: &Intent, available: &[CapabilitySpec]) -> Plan {
         if let Some(name) = intent.text.strip_prefix("call ") {
             return Plan {
-                steps: vec![Step {
-                    capability: CapabilityName::new(name.trim()),
-                    args: json!({}),
-                }],
+                steps: vec![Step::new(CapabilityName::new(name.trim()), json!({}))],
                 ..Plan::default()
             };
         }

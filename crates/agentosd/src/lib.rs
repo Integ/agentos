@@ -4,6 +4,7 @@
 //! [`butler::Butler`] (plan → policy → capability) → `Expression` →
 //! [`expression::ExpressionHub`] → `Output`. Everything is audited.
 
+pub mod agents;
 pub mod builtin;
 pub mod butler;
 pub mod claude_planner;

@@ -43,6 +43,22 @@ pub enum AuditEvent {
         ok: bool,
         result: Value,
     },
+    /// An agent handed part of an intent to another agent.
+    Delegated {
+        intent: IntentId,
+        from: AgentId,
+        to: AgentId,
+        task: String,
+        /// Capabilities the delegate may use for this task.
+        capabilities: Vec<CapabilityName>,
+    },
+    /// A delegated agent finished its task (or gave up).
+    AgentFinished {
+        intent: IntentId,
+        agent: AgentId,
+        ok: bool,
+        summary: String,
+    },
     Expressed {
         agent: AgentId,
         intent: Option<IntentId>,

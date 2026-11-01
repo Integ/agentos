@@ -1,9 +1,11 @@
 //! Planner backed by the Claude Messages API.
 //!
-//! Each intent becomes one `POST /v1/messages` call. Every registered
-//! capability is offered as a tool; the `tool_use` blocks in the response
-//! become plan steps (the planner never executes anything itself — the butler
+//! Each planning round is one `POST /v1/messages` call. Every capability the
+//! agent may use is offered as a tool; the `tool_use` blocks in the response
+//! become plan steps (the planner never executes anything itself — the agent
 //! runs each step through the policy engine). Text blocks become the reply.
+//! Earlier rounds are replayed as `tool_use` / `tool_result` pairs so the model
+//! can act on what its calls returned.
 //!
 //! Rust has no official Anthropic SDK, so this speaks raw HTTP.
 
@@ -14,7 +16,9 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::llm::TextModel;
-use crate::planner::{capability_name, tool_name, Plan, Planner, Step, SYSTEM_PROMPT};
+use crate::planner::{
+    capability_name, tool_name, Conversation, Plan, Planner, Step, SYSTEM_PROMPT,
+};
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -48,9 +52,23 @@ impl ClaudeConfig {
     }
 }
 
-/// Request body for one intent.
+/// Request body for one intent (first round, butler prompt).
 pub fn build_request(cfg: &ClaudeConfig, intent: &Intent, available: &[CapabilitySpec]) -> Value {
-    let tools: Vec<Value> = available
+    build_turn_request(
+        cfg,
+        &Conversation {
+            system: SYSTEM_PROMPT,
+            intent,
+            history: &[],
+            available,
+        },
+    )
+}
+
+/// Request body for the next round of a conversation.
+pub fn build_turn_request(cfg: &ClaudeConfig, conv: &Conversation<'_>) -> Value {
+    let tools: Vec<Value> = conv
+        .available
         .iter()
         .map(|s| {
             json!({
@@ -60,18 +78,47 @@ pub fn build_request(cfg: &ClaudeConfig, intent: &Intent, available: &[Capabilit
             })
         })
         .collect();
-    let mut user = intent.text.clone();
-    if let Some(speaker) = &intent.speaker {
+    let mut user = conv.intent.text.clone();
+    if let Some(speaker) = &conv.intent.speaker {
         user = format!("[{speaker}] {user}");
+    }
+    let mut messages = vec![json!({ "role": "user", "content": user })];
+    for round in conv.history {
+        let mut content = Vec::new();
+        if let Some(t) = &round.text {
+            content.push(json!({ "type": "text", "text": t }));
+        }
+        for c in &round.calls {
+            content.push(json!({
+                "type": "tool_use",
+                "id": c.id,
+                "name": tool_name(&c.capability),
+                "input": c.args,
+            }));
+        }
+        messages.push(json!({ "role": "assistant", "content": content }));
+        let results: Vec<Value> = round
+            .results
+            .iter()
+            .map(|r| {
+                json!({
+                    "type": "tool_result",
+                    "tool_use_id": r.id,
+                    "content": r.content,
+                    "is_error": !r.ok,
+                })
+            })
+            .collect();
+        messages.push(json!({ "role": "user", "content": results }));
     }
     json!({
         "model": cfg.model,
         "max_tokens": cfg.max_tokens,
-        "system": SYSTEM_PROMPT,
+        "system": conv.system,
         "output_config": { "effort": cfg.effort },
         "fallbacks": "default",
         "tools": tools,
-        "messages": [{ "role": "user", "content": user }],
+        "messages": messages,
     })
 }
 
@@ -95,6 +142,11 @@ pub fn parse_response(body: &Value) -> Plan {
             Some("tool_use") => {
                 if let Some(name) = block.get("name").and_then(Value::as_str) {
                     steps.push(Step {
+                        id: block
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
                         capability: capability_name(name),
                         args: block.get("input").cloned().unwrap_or_else(|| json!({})),
                     });
@@ -202,7 +254,17 @@ impl TextModel for ClaudePlanner {
 #[async_trait]
 impl Planner for ClaudePlanner {
     async fn plan(&self, intent: &Intent, available: &[CapabilitySpec]) -> Plan {
-        let body = build_request(&self.cfg, intent, available);
+        self.plan_turn(&Conversation {
+            system: SYSTEM_PROMPT,
+            intent,
+            history: &[],
+            available,
+        })
+        .await
+    }
+
+    async fn plan_turn(&self, conv: &Conversation<'_>) -> Plan {
+        let body = build_turn_request(&self.cfg, conv);
         match self.call(&body).await {
             Ok(resp) => parse_response(&resp),
             Err(e) => Plan {
@@ -260,6 +322,46 @@ mod tests {
     }
 
     #[test]
+    fn history_is_replayed_as_tool_use_and_tool_result() {
+        use crate::planner::{Round, ToolResult};
+        let i = intent("记一下买牛奶");
+        let history = vec![Round {
+            text: Some("好的".into()),
+            calls: vec![Step {
+                id: "t1".into(),
+                capability: CapabilityName::new("notes.append"),
+                args: json!({"text": "买牛奶"}),
+            }],
+            results: vec![ToolResult {
+                id: "t1".into(),
+                ok: false,
+                content: "磁盘满了".into(),
+            }],
+        }];
+        let body = build_turn_request(
+            &cfg("x"),
+            &Conversation {
+                system: "sys",
+                intent: &i,
+                history: &history,
+                available: &specs(),
+            },
+        );
+        assert_eq!(body["system"], "sys");
+        let m = &body["messages"];
+        assert_eq!(m.as_array().unwrap().len(), 3);
+        assert_eq!(m[1]["role"], "assistant");
+        assert_eq!(m[1]["content"][0]["text"], "好的");
+        assert_eq!(m[1]["content"][1]["type"], "tool_use");
+        assert_eq!(m[1]["content"][1]["id"], "t1");
+        assert_eq!(m[1]["content"][1]["name"], "notes__append");
+        assert_eq!(m[2]["role"], "user");
+        assert_eq!(m[2]["content"][0]["type"], "tool_result");
+        assert_eq!(m[2]["content"][0]["tool_use_id"], "t1");
+        assert_eq!(m[2]["content"][0]["is_error"], true);
+    }
+
+    #[test]
     fn tool_use_blocks_become_steps_in_order() {
         let resp = json!({
             "stop_reason": "tool_use",
@@ -272,6 +374,7 @@ mod tests {
         let plan = parse_response(&resp);
         assert_eq!(plan.steps.len(), 2);
         assert_eq!(plan.steps[0].capability.as_str(), "notes.append");
+        assert_eq!(plan.steps[0].id, "t1");
         assert_eq!(plan.steps[0].args, json!({"text": "买牛奶"}));
         assert_eq!(plan.steps[1].capability.as_str(), "notes.list");
         assert_eq!(plan.reply.as_deref(), Some("好的，我来记下。"));
