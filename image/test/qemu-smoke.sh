@@ -130,7 +130,7 @@ wait_for "$WORK/serial-disk.log" 'AGENTOS-SELFCHECK: OK' "$TIMEOUT" || fail disk
 log "硬盘启动自检通过"
 wait_for "$WORK/serial-disk.log" 'AGENTOS-DESKTOP: OK' 240 || fail disk "硬盘启动后图形桌面没有就绪"
 log "硬盘启动后图形桌面就绪"
-sleep "${SCREENSHOT_DELAY:-20}"   # let the setup wizard window settle over the desktop
+sleep "${SCREENSHOT_DELAY:-20}"   # let the setup assistant settle over the desktop
 # Wiggle the pointer so the compositor repaints the whole output first.
 for xy in "40 40" "-40 -40" "40 40"; do monitor disk "mouse_move $xy"; done
 sleep 5

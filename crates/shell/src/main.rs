@@ -25,6 +25,8 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use tao::window::{Fullscreen, WindowBuilder};
 use wry::WebViewBuilder;
 
+mod setup;
+
 const UI: &str = include_str!("../ui/index.html");
 
 /// Internal event: the page can receive events now.
@@ -122,6 +124,9 @@ fn host_info() -> Value {
         "type": "host",
         "managed": system_helper().is_some(),
         "installed": std::path::Path::new("/etc/agentos/installed").exists(),
+        // The graphical setup assistant opens by itself until setup is done.
+        "setup": setup::helper().is_some(),
+        "setup_done": std::path::Path::new("/etc/agentos/setup-done").exists(),
     })
 }
 
@@ -136,7 +141,8 @@ fn mark_ready(hello: &Value) {
 
 /// What the UI may ask for. Only intents, confirmation answers and voice
 /// controls (talk button, read-aloud mode) reach the daemon, rebuilt from known
-/// fields; `system` runs a fixed set of actions. The shell never touches the
+/// fields; `system` runs a fixed set of actions and `setup` the setup
+/// assistant's checked operations (see `setup.rs`). The shell never touches the
 /// microphone itself: agentosd records, so it can audit and show every use.
 fn handle_ipc(body: &str, conn: &Conn, proxy: &EventLoopProxy<Value>) {
     let Ok(v) = serde_json::from_str::<Value>(body) else {
@@ -172,6 +178,23 @@ fn handle_ipc(body: &str, conn: &Conn, proxy: &EventLoopProxy<Value>) {
             if let Some(action) = system_action(&v) {
                 run_system(action);
             }
+            return;
+        }
+        // Setup assistant: checked here, run off the UI thread (Wi-Fi scans
+        // and connection tests take seconds), answered as a `setup` event.
+        Some("setup") => {
+            let id = v.get("id").cloned().unwrap_or(Value::Null);
+            let answer = match setup::job(&v) {
+                Ok(job) => {
+                    let proxy = proxy.clone();
+                    std::thread::spawn(move || {
+                        let _ = proxy.send_event(setup::run(&id, job));
+                    });
+                    return;
+                }
+                Err(e) => json!({"type": "setup", "id": id, "ok": false, "error": e}),
+            };
+            let _ = proxy.send_event(answer);
             return;
         }
         _ => return,

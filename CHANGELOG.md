@@ -1,5 +1,11 @@
 # 更新日志
 
+## 未发布
+
+### 改进
+
+- **全新的设置助理**：首次进入桌面时不再弹出终端里的对话框，而是一个 Liquid Glass 风格的图形设置助理：一页一件事，用鼠标点选；Wi‑Fi 列表点一下就能加入；OpenAI 兼容接口带 DeepSeek、通义千问、Ollama 预设；Home Assistant 可以当场测试连接；输入错误就地提示；已保存的密钥留空即保持不变，手动加在 env 文件里的设置会保留。系统菜单「网络和 AI 设置…」打开同一个界面。文本模式仍用原来的向导。见 [docs/shell.md](docs/shell.md#设置助理)。
+
 ## v0.2.0（2026-11-02）
 
 **从 v0.1.0 升级：请重新写入镜像。** v0.1.0 镜像里 `sudo` 会要密码（账户没有密码），无法以 root 运行 `agentos-update`。从 v0.2.0 开始可以用 `sudo agentos-update` 在线升级。详见 [docs/update.md](docs/update.md)。
