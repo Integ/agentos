@@ -53,7 +53,12 @@ case "$DISTRO" in
     SUITE=trixie
     DEFAULT_MIRROR=http://deb.debian.org/debian
     COMPONENTS=main,contrib,non-free,non-free-firmware
-    KERNEL_PKGS="linux-image-amd64 firmware-linux firmware-iwlwifi firmware-realtek firmware-atheros"
+    # firmware-linux only pulls AMD and misc firmware; since trixie Intel and
+    # NVIDIA GPU firmware are separate packages, and without them i915/xe or
+    # nouveau can fail on real hardware and leave no display for sway.
+    KERNEL_PKGS="linux-image-amd64 firmware-linux firmware-iwlwifi firmware-realtek firmware-atheros
+      firmware-intel-graphics firmware-intel-misc firmware-nvidia-graphics firmware-mediatek
+      firmware-sof-signed intel-microcode amd64-microcode"
     ;;
   ubuntu)
     SUITE=noble
@@ -74,8 +79,10 @@ PACKAGES=(
   # Runtime for agent plugins: bubblewrap sandbox, Python plugins.
   bubblewrap python3
   # Graphical session: sway + the agentos-shell desktop (WebKitGTK), foot
-  # terminal, CJK and Latin fonts, pinyin IME.
-  sway foot fonts-noto-cjk fcitx5 fcitx5-chinese-addons
+  # terminal, CJK and Latin fonts, pinyin IME. fcitx5-frontend-gtk3 is only
+  # a Recommends of fcitx5, but without it GTK/WebKit apps get preedit text
+  # and no candidate window.
+  sway foot fonts-noto-cjk fcitx5 fcitx5-chinese-addons fcitx5-frontend-gtk3
   libwebkit2gtk-4.1-0 fonts-inter
   libgl1-mesa-dri libpam-systemd dbus-user-session
   # Voice: PipeWire session audio; agentosd records with arecord and plays
@@ -164,6 +171,10 @@ log "安装软件包"
 in_root apt-get update
 # shellcheck disable=SC2086
 in_root apt-get install -y --no-install-recommends "${PACKAGES[@]}" $KERNEL_PKGS
+# Text-mode fallback: the Linux console has no CJK glyphs, so the Chinese
+# console UI runs inside fbterm when it is available (optional: not every
+# release ships it).
+in_root apt-get install -y --no-install-recommends fbterm || log "没有 fbterm，文本模式将无法显示中文"
 
 [[ -e $ROOT/boot/vmlinuz && -e $ROOT/boot/initrd.img ]] || {
   # Fall back to linking the newest kernel ourselves.
