@@ -4,6 +4,7 @@ description = "AgentOS append-only audit log (JSON Lines)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 
 [dependencies]
 agentos-core.workspace = true

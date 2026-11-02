@@ -4,6 +4,7 @@ description = "AgentOS graphical shell: a full-screen glass desktop that talks t
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 
 [[bin]]
 name = "agentos-shell"

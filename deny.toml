@@ -1,0 +1,50 @@
+# cargo-deny: dependency vulnerabilities, licenses and sources.
+# Run locally with `cargo deny check` (cargo install --locked cargo-deny).
+# CI runs it on every push and pull request, and weekly so new advisories
+# against unchanged dependencies show up too.
+
+[graph]
+# AgentOS only ships for x86-64 Linux; ignore Windows/macOS/Android-only crates.
+targets = ["x86_64-unknown-linux-gnu"]
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+  # Unmaintained, not a vulnerability: a build-time proc macro pulled in by
+  # gtk-rs 0.18 (gtk3-macros, glib-macros) through wry/webkit2gtk. There is no
+  # maintained GTK 3 binding to move to; drop this once the shell moves on.
+  { id = "RUSTSEC-2024-0370", reason = "build-time only, via gtk-rs 0.18 (wry/webkit2gtk)" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unlicense",
+  "CC0-1.0",
+  "Unicode-3.0",
+  "MPL-2.0",
+]
+
+[licenses.private]
+# Our own crates are not published.
+ignore = true
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+# Path dependencies between our own (unpublished) crates.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

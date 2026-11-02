@@ -4,6 +4,7 @@ description = "AgentOS P0 daemon: perception hub, butler agent, capability regis
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 
 [dependencies]
 agentos-core.workspace = true

@@ -132,4 +132,7 @@ agentosd --clear-pin    # 取消
 cargo fmt --all
 cargo clippy --all-targets -- -D warnings
 cargo test --all
+cargo deny check     # 依赖漏洞（RustSec）、许可证、来源；cargo install --locked cargo-deny
 ```
+
+CI 每次提交和每周一都会跑 `cargo deny check`（配置见 [deny.toml](deny.toml)），新披露的依赖漏洞会让 CI 变红。
