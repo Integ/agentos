@@ -211,12 +211,49 @@ fn pin_command(home: &std::path::Path) -> Option<std::io::Result<()>> {
     })())
 }
 
+/// `agentosd --verify-audit`: check the audit log's hash chain. Exits 1 if
+/// an entry was changed, removed or inserted.
+fn verify_audit(path: &std::path::Path) -> std::io::Result<()> {
+    let r = AuditLog::verify(path)?;
+    println!("审计日志：{}", path.display());
+    println!(
+        "  {} 条记录，{} 条带哈希链{}",
+        r.lines,
+        r.chained,
+        if r.legacy > 0 {
+            format!("，{} 条是启用哈希链之前写的", r.legacy)
+        } else {
+            String::new()
+        }
+    );
+    if !r.damaged.is_empty() {
+        println!(
+            "  第 {:?} 行写到一半（多半是断电或崩溃），已跳过",
+            r.damaged
+        );
+    }
+    println!("  链头：{}", r.head);
+    if r.ok() {
+        println!("  哈希链完整。");
+        Ok(())
+    } else {
+        println!(
+            "  哈希链在第 {:?} 行断开：它之前的记录被修改、删除或插入过。",
+            r.breaks
+        );
+        std::process::exit(1);
+    }
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let home = home_dir();
     std::fs::create_dir_all(&home)?;
     if let Some(r) = pin_command(&home) {
         return r;
+    }
+    if std::env::args().any(|a| a == "--verify-audit") {
+        return verify_audit(&audit_path(&home));
     }
     let audit = Arc::new(AuditLog::open(audit_path(&home))?);
     let pins = Arc::new(PinVault::open(home.join("pin.json"))?.with_audit(audit.clone()));
