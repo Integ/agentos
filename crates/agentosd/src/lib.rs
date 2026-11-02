@@ -16,6 +16,7 @@ pub mod homeassistant;
 pub mod identity;
 pub mod judge;
 pub mod llm;
+pub mod mcp;
 pub mod mic_led;
 pub mod openai_planner;
 pub mod perception;

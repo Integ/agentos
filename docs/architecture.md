@@ -45,5 +45,5 @@
 - [x] 语音输入输出：按住说话 + 朗读回复，云端（OpenAI 兼容）或本机命令（whisper.cpp / Piper）后端，麦克风使用全程可见并审计（见 [voice.md](voice.md)）
 - [x] 智能家居：通过 Home Assistant 控制设备，按设备类型分 L0–L3（见 [smart-home.md](smart-home.md)）
 - [ ] 本机唤醒词（openWakeWord）与连续对话
-- [ ] MCP server 注册为能力
+- [x] MCP server 注册为能力：stdio server 的工具成为 `mcp.<server>.<工具>`，风险和信任由用户在 `mcp.json` 里设定（见 [mcp.md](mcp.md)）
 - [ ] 进程间通信（Unix socket + Cap'n Proto），把各中枢拆成独立服务
