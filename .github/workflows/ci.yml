@@ -4,9 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Weekly: new advisories can hit dependencies that did not change.
+    - cron: "17 3 * * 1"
 
 jobs:
   rust:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,3 +29,12 @@ jobs:
       - run: cargo test --all
       # agentos-update against a fake release API (uses target/debug/agentosd).
       - run: image/test/update-test.sh
+
+  # Known vulnerabilities (RustSec), licenses and dependency sources; see deny.toml.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources

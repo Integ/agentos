@@ -4,6 +4,7 @@ description = "AgentOS core types: intents, percepts, expressions, capabilities 
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 
 [dependencies]
 async-trait.workspace = true

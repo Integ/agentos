@@ -4,6 +4,7 @@ description = "AgentOS policy engine: capability grants and risk-tiered confirma
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 
 [dependencies]
 agentos-core.workspace = true
