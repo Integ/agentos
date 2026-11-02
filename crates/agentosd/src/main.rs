@@ -21,6 +21,7 @@ use agentosd::homeassistant::{self, Hass, HassConfig};
 use agentosd::identity::{self, PinCheck, PinVault};
 use agentosd::judge::LlmJudge;
 use agentosd::llm::TextModel;
+use agentosd::mcp::{self, McpConfig};
 use agentosd::openai_planner::{OpenAiConfig, OpenAiPlanner};
 use agentosd::perception::PerceptionHub;
 use agentosd::planner::{Planner, RulePlanner};
@@ -236,6 +237,15 @@ async fn main() -> std::io::Result<()> {
 
     let board = Blackboard::open(home.join("blackboard.json"))?;
     blackboard::register_all(&mut registry, board.clone());
+    // <home>/mcp.json: tools from MCP servers.
+    match McpConfig::load(&home.join("mcp.json")) {
+        Ok(cfg) => {
+            for n in mcp::register_all(&mut registry, &cfg).await {
+                eprintln!("{n}");
+            }
+        }
+        Err(e) => eprintln!("{e}"),
+    }
     // HASS_URL + HASS_TOKEN: the smart home, through Home Assistant.
     let home_label = match HassConfig::from_env().map(Hass::new) {
         Some(Ok(h)) => {
