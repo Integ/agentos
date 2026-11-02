@@ -79,8 +79,10 @@ PACKAGES=(
   # Runtime for agent plugins: bubblewrap sandbox, Python plugins.
   bubblewrap python3
   # Graphical session: sway + the agentos-shell desktop (WebKitGTK), foot
-  # terminal, CJK and Latin fonts, pinyin IME.
-  sway foot fonts-noto-cjk fcitx5 fcitx5-chinese-addons
+  # terminal, CJK and Latin fonts, pinyin IME. fcitx5-frontend-gtk3 is only
+  # a Recommends of fcitx5, but without it GTK/WebKit apps get preedit text
+  # and no candidate window.
+  sway foot fonts-noto-cjk fcitx5 fcitx5-chinese-addons fcitx5-frontend-gtk3
   libwebkit2gtk-4.1-0 fonts-inter
   libgl1-mesa-dri libpam-systemd dbus-user-session
   # Voice: PipeWire session audio; agentosd records with arecord and plays

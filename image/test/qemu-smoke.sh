@@ -113,6 +113,7 @@ wait_for "$WORK/serial-usb.log" 'AGENTOS-SUDO: OK' 60 || fail usb "agent 不能�
 wait_for "$WORK/serial-usb.log" 'AGENTOS-MICLED: OK' 60 || fail usb "桌面用户不能控制 Caps Lock 指示灯（udev 规则）"
 wait_for "$WORK/serial-usb.log" 'AGENTOS-CJK: OK' 60 || fail usb "没有中文字体"
 log "中文：$(grep -ao 'AGENTOS-CJK: OK[^\r]*' "$WORK/serial-usb.log" | tail -1)"
+wait_for "$WORK/serial-usb.log" 'AGENTOS-IME: OK' 60 || fail usb "fcitx5 的 GTK 输入法模块没装（候选框不显示）"
 wait_for "$WORK/serial-usb.log" 'AGENTOS-NETWORK: OK' 120 || fail usb "网络没有自动连上（NetworkManager + DNS）"
 log "有线网络自动连接、DNS 正常"
 wait_for "$WORK/serial-usb.log" 'AGENTOS-DESKTOP: OK' 240 || fail usb "图形桌面（agentos-shell）没有就绪"
