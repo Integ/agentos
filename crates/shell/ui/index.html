@@ -229,9 +229,143 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
 #voice-info { font-size: 11px; line-height: 1.6; color: var(--text-3); }
 #settings h2 + .swatches { margin-bottom: 16px; }
 
+/* ---------- Setup assistant (first boot, and 网络和 AI 设置…) ----------
+   One question per page in a large Liquid Glass window: clear rim light,
+   strong blur, concentric radii, capsule buttons. */
+/* Opaque backdrop (its own soft wallpaper), so the window reads the same
+   whether or not WebKit can blur what is behind it (software rendering). */
+#setup { position: fixed; inset: 0; z-index: 60; display: none; align-items: center; justify-content: center; padding: 28px;
+  background:
+    radial-gradient(900px 640px at 22% 18%, rgba(47,108,240,.85) 0%, transparent 62%),
+    radial-gradient(820px 640px at 84% 82%, rgba(18,160,145,.75) 0%, transparent 62%),
+    radial-gradient(700px 520px at 62% 28%, rgba(96,64,180,.65) 0%, transparent 70%),
+    radial-gradient(600px 420px at 12% 88%, rgba(40,60,140,.55) 0%, transparent 70%),
+    #0b0f1c; }
+#setup.open { display: flex; animation: fade .35s ease-out; }
+.lg { position: relative; isolation: isolate;
+  background: linear-gradient(155deg, rgba(255,255,255,.20) 0%, rgba(255,255,255,.08) 38%, rgba(255,255,255,.05) 62%, rgba(255,255,255,.11) 100%), rgba(22,28,46,.38);
+  -webkit-backdrop-filter: blur(44px) saturate(210%); backdrop-filter: blur(44px) saturate(210%);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.55), inset 0 -1px 1px rgba(255,255,255,.10), 0 40px 120px rgba(0,0,0,.50), 0 2px 8px rgba(0,0,0,.18); }
+/* Rim light: bright on the top-left and bottom-right edges, like a lens. */
+.lg::before { content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1.2px; pointer-events: none; z-index: 1;
+  background: linear-gradient(135deg, rgba(255,255,255,.75), rgba(255,255,255,.12) 28%, rgba(255,255,255,.04) 55%, rgba(255,255,255,.45));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor;
+          mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); }
+#sa-win { width: min(880px, 100%); height: min(740px, 100%); border-radius: 40px; display: flex; flex-direction: column; overflow: hidden; animation: sa-in .55s var(--spring); }
+@keyframes sa-in { from { opacity: 0; transform: translateY(18px) scale(.97); } }
+#sa-top { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 20px 24px 0; min-height: 56px; }
+#sa-close { justify-self: start; }
+#sa-dots { display: flex; gap: 7px; align-items: center; }
+#sa-dots span { width: 7px; height: 7px; border-radius: 4px; background: rgba(255,255,255,.28); transition: width .4s var(--spring), background .3s; }
+#sa-dots span.done { background: rgba(255,255,255,.7); }
+#sa-dots span.cur { width: 24px; background: #fff; }
+#sa-count { justify-self: end; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+#sa-page::-webkit-scrollbar { width: 6px; }
+#sa-page::-webkit-scrollbar-thumb { border-radius: 3px; background: rgba(255,255,255,.22); }
+#sa-page { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 28px 24px; scrollbar-width: thin;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 32px), transparent); }
+.sa-inner { max-width: 560px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; padding-bottom: 8px; }
+.sa-inner.fwd { animation: sa-fwd .45s var(--spring); }
+.sa-inner.back { animation: sa-back .45s var(--spring); }
+@keyframes sa-fwd { from { opacity: 0; transform: translateX(36px); } }
+@keyframes sa-back { from { opacity: 0; transform: translateX(-36px); } }
+.sa-hero { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; padding-top: 10px; }
+.sa-tile { width: 68px; height: 68px; border-radius: 20px; display: flex; align-items: center; justify-content: center; position: relative;
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.65), inset 0 -2px 6px rgba(0,0,0,.18), 0 14px 30px rgba(0,0,0,.30); }
+.sa-tile::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: linear-gradient(180deg, rgba(255,255,255,.35), rgba(255,255,255,0) 48%); pointer-events: none; }
+.sa-hero h1 { margin: 6px 0 0; font-size: 28px; font-weight: 700; letter-spacing: -.4px; line-height: 1.25; }
+.sa-hero p { margin: 0; max-width: 520px; font-size: 15px; line-height: 1.6; color: var(--text-2); }
+.sa-welcome .sa-hero { padding-top: 36px; gap: 14px; }
+.sa-welcome { gap: 40px; min-height: 100%; justify-content: center; padding-bottom: 40px; }
+.sa-welcome .sa-hero { padding-top: 0; }
+.sa-steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+.sa-steps > div { display: flex; flex-direction: column; align-items: center; gap: 9px; text-align: center; font-size: 13px; font-weight: 600; }
+.sa-steps .ic { width: 46px; height: 46px; border-radius: 14px; display: flex; align-items: center; justify-content: center; color: #fff; box-shadow: inset 0 1px 1px rgba(255,255,255,.55), 0 8px 18px rgba(0,0,0,.25); }
+.sa-steps small { display: block; font-weight: 400; font-size: 12px; color: var(--text-3); margin-top: 3px; }
+.sa-welcome .sa-hero h1 { font-size: 44px; letter-spacing: -1px; background: linear-gradient(100deg, #fff 20%, #bfe0ff 55%, #c9b8ff 85%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.sa-welcome .sa-tile { width: 96px; height: 96px; border-radius: 28px; }
+
+/* Grouped list (like System Settings), options are rows with a radio. */
+.sa-group { border-radius: 22px; background: rgba(0,0,0,.20); box-shadow: inset 0 0 0 1px rgba(255,255,255,.09); overflow: hidden; }
+.sa-group-title { font-size: 12px; font-weight: 600; color: var(--text-3); margin: 0 0 -12px 16px; letter-spacing: .3px; }
+.sa-row { width: 100%; display: flex; align-items: center; gap: 14px; padding: 13px 16px; border: 0; background: none; text-align: left; font-size: 15px; position: relative; color: inherit; }
+button.sa-row:hover { background: rgba(255,255,255,.06); }
+.sa-row + .sa-row, .sa-row + .sa-more, .sa-more + .sa-row { box-shadow: inset 0 1px 0 rgba(255,255,255,.08); }
+.sa-row .ic { width: 34px; height: 34px; border-radius: 10px; flex: none; display: flex; align-items: center; justify-content: center; box-shadow: inset 0 1px 0 rgba(255,255,255,.45); }
+.sa-row .txt { flex: 1; min-width: 0; }
+.sa-row .t { font-weight: 600; }
+.sa-row .d { font-size: 13px; color: var(--text-3); margin-top: 2px; line-height: 1.45; }
+.sa-row .end { flex: none; color: var(--text-3); font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.sa-radio { width: 22px; height: 22px; border-radius: 50%; flex: none; box-shadow: inset 0 0 0 1.5px rgba(255,255,255,.35); display: flex; align-items: center; justify-content: center; transition: background .2s, box-shadow .2s; }
+.sa-row[aria-checked="true"] .sa-radio { background: var(--accent); box-shadow: inset 0 1px 0 rgba(255,255,255,.4); }
+.sa-row[aria-checked="true"] .sa-radio::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #fff; }
+.sa-row[aria-checked="true"] { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.sa-more { padding: 4px 16px 16px 64px; display: flex; flex-direction: column; gap: 12px; background: color-mix(in srgb, var(--accent) 8%, transparent); animation: rise .35s var(--spring); }
+
+/* Fields */
+.sa-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sa-field > span { font-size: 12px; font-weight: 600; color: var(--text-2); }
+.sa-field small { font-size: 12px; color: var(--text-3); line-height: 1.5; }
+.sa-input { position: relative; display: flex; }
+.sa-input input { flex: 1; min-width: 0; height: 40px; border: 0; border-radius: 12px; padding: 0 14px; font-size: 14px; color: #fff; background: rgba(0,0,0,.28); box-shadow: inset 0 0 0 1px rgba(255,255,255,.13); outline: none; transition: box-shadow .2s; user-select: text; }
+.sa-input input::placeholder { color: rgba(255,255,255,.42); }
+.sa-input input:focus { box-shadow: inset 0 0 0 1px rgba(255,255,255,.2), 0 0 0 3px color-mix(in srgb, var(--accent) 55%, transparent); }
+.sa-input input[aria-invalid="true"] { box-shadow: inset 0 0 0 1.5px #ff8a8a; }
+.sa-input .eye { position: absolute; right: 6px; top: 6px; width: 28px; height: 28px; border: 0; border-radius: 8px; background: none; color: var(--text-3); display: flex; align-items: center; justify-content: center; }
+.sa-input .eye:hover { background: rgba(255,255,255,.1); color: #fff; }
+.sa-input.has-eye input { padding-right: 40px; }
+.sa-err { font-size: 13px; color: #ffa3a3; min-height: 0; }
+.sa-err:empty { display: none; }
+.sa-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.sa-chip { height: 30px; padding: 0 13px; border: 0; border-radius: 15px; font-size: 13px; background: rgba(255,255,255,.10); box-shadow: inset 0 1px 0 rgba(255,255,255,.18); }
+.sa-chip:hover { background: rgba(255,255,255,.18); }
+.sa-chip[aria-pressed="true"] { background: rgba(255,255,255,.9); color: #0b1220; font-weight: 600; }
+.sa-seg { display: flex; padding: 3px; gap: 3px; border-radius: 14px; background: rgba(0,0,0,.28); box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
+.sa-seg button { flex: 1; height: 34px; border: 0; border-radius: 11px; background: none; font-size: 13px; color: var(--text-2); transition: background .25s var(--spring); }
+.sa-seg button[aria-pressed="true"] { background: rgba(255,255,255,.2); color: #fff; font-weight: 600; box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 2px 8px rgba(0,0,0,.2); }
+.sa-switch { display: flex; align-items: center; gap: 12px; font-size: 14px; border: 0; background: none; padding: 0; text-align: left; }
+.sa-switch .knob { width: 44px; height: 26px; border-radius: 13px; background: rgba(255,255,255,.18); position: relative; flex: none; transition: background .25s; }
+.sa-switch .knob::after { content: ""; position: absolute; top: 2px; left: 2px; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.3); transition: transform .3s var(--spring); }
+.sa-switch[aria-checked="true"] .knob { background: #34c759; }
+.sa-switch[aria-checked="true"] .knob::after { transform: translateX(18px); }
+.sa-note { display: flex; gap: 12px; align-items: flex-start; padding: 12px 16px; border-radius: 16px; font-size: 13px; line-height: 1.55; color: var(--text-2); background: rgba(255,255,255,.06); box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
+.sa-note svg { flex: none; margin-top: 1px; }
+.sa-status { display: flex; align-items: center; gap: 12px; padding: 14px 16px; }
+.sa-ok { color: #7ee2a8; }
+.sa-bad { color: #ffa3a3; }
+.sa-spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255,255,255,.25); border-top-color: #fff; animation: spin .8s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.sa-pin { display: flex; gap: 14px; }
+.sa-pin .sa-field { flex: 1; }
+.sa-pin input { height: 52px; font-size: 24px; letter-spacing: .5em; text-align: center; border-radius: 16px; }
+.sa-summary .sa-row { padding: 11px 16px; }
+
+/* Footer */
+#sa-foot { display: flex; align-items: center; gap: 10px; padding: 16px 24px 24px; }
+#sa-foot .grow { flex: 1; }
+.sa-btn { height: 44px; min-width: 96px; padding: 0 22px; border: 0; border-radius: 22px; font-size: 15px; font-weight: 600; position: relative;
+  background: rgba(255,255,255,.13); box-shadow: inset 0 1px 1px rgba(255,255,255,.35), inset 0 0 0 1px rgba(255,255,255,.08); transition: transform .25s var(--spring), background .2s, opacity .2s; }
+.sa-btn:hover { background: rgba(255,255,255,.2); }
+.sa-btn:active { transform: scale(.96); }
+.sa-btn.primary { min-width: 132px; background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 80%, #fff), var(--accent) 55%); box-shadow: inset 0 1px 1px rgba(255,255,255,.55), 0 8px 22px color-mix(in srgb, var(--accent) 45%, transparent); }
+.sa-btn.primary:hover { filter: brightness(1.08); }
+.sa-btn.plain { background: none; box-shadow: none; color: var(--text-2); min-width: 0; padding: 0 14px; font-weight: 500; }
+.sa-btn.plain:hover { color: #fff; background: rgba(255,255,255,.08); }
+.sa-btn.small { height: 32px; min-width: 0; padding: 0 14px; font-size: 13px; border-radius: 16px; }
+.sa-btn:disabled { opacity: .4; cursor: default; transform: none; filter: none; }
+.sa-btn[hidden] { display: none; }
+#sa-close[hidden] { display: inline-block; visibility: hidden; }
+.sa-btn:focus-visible { outline: 2px solid rgba(255,255,255,.7); outline-offset: 3px; }
+.sa-btn .sa-spin { position: absolute; left: 14px; top: 14px; }
+
 @media (max-width: 1180px) {
   #desktop { grid-template-columns: minmax(0, 1fr) 380px; }
   #widgets { display: none; }
+}
+@media (max-width: 720px), (max-height: 620px) {
+  #setup { padding: 0; }
+  #sa-win { border-radius: 0; height: 100%; }
+  #sa-page { padding: 6px 18px 12px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .15s !important; animation-iteration-count: 1 !important; transition-duration: .15s !important; }
@@ -353,6 +487,23 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
       <button id="c-approve">确认执行</button>
     </div>
     <div class="hint" id="c-hint"></div>
+  </section>
+</div>
+
+<div id="setup" role="dialog" aria-modal="true" aria-labelledby="sa-title">
+  <section id="sa-win" class="lg">
+    <div id="sa-top">
+      <button id="sa-close" class="sa-btn plain small" type="button">稍后设置</button>
+      <div id="sa-dots" aria-hidden="true"></div>
+      <div id="sa-count"></div>
+    </div>
+    <div id="sa-page"></div>
+    <div id="sa-foot">
+      <button id="sa-back" class="sa-btn" type="button">返回</button>
+      <div class="grow"><div id="sa-ferr" class="sa-err" role="alert"></div></div>
+      <button id="sa-skip" class="sa-btn plain" type="button">跳过</button>
+      <button id="sa-next" class="sa-btn primary" type="button">继续</button>
+    </div>
   </section>
 </div>
 
@@ -559,10 +710,11 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
   // dropped.
   const isTalkKey = (e) => e.code === "CapsLock" || e.key === "CapsLock";
   document.addEventListener("keydown", (e) => {
+    if (SA.open) return; // typing keys and passwords in the setup assistant
     if (isTalkKey(e)) { e.preventDefault(); if (!e.repeat && !capsHeld) { capsHeld = true; talkStart(); } return; }
     if (capsHeld) { capsHeld = false; talkEnd(true); }
   }, true);
-  document.addEventListener("keyup", (e) => { if (isTalkKey(e)) { e.preventDefault(); if (capsHeld) { capsHeld = false; talkEnd(false); } } }, true);
+  document.addEventListener("keyup", (e) => { if (!SA.open && isTalkKey(e)) { e.preventDefault(); if (capsHeld) { capsHeld = false; talkEnd(false); } } }, true);
   window.addEventListener("blur", () => { capsHeld = false; talkEnd(true); });
   $("#spk-ind").addEventListener("click", () => send({ type: "speech", action: "stop" }));
 
@@ -625,7 +777,15 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
       case "host":
         document.body.classList.toggle("managed", !!msg.managed);
         document.body.classList.toggle("installed", !!msg.installed);
+        SA.available = !!msg.setup;
+        // First boot: open the setup assistant (once per session).
+        if (SA.available && !msg.setup_done && !SA.shown) { SA.shown = true; openSetup(true); }
         break;
+      case "setup": {
+        const done = SA.reqs.get(msg.id);
+        if (done) { SA.reqs.delete(msg.id); done(msg); }
+        break;
+      }
       case "hello":
         state.connected = true; state.planner = msg.planner || "";
         $("#planner").textContent = (state.planner ? state.planner + " · " : "") + "所有步骤都经过策略引擎";
@@ -707,7 +867,8 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
     const a = b.dataset.action;
     if (a === "focus") $("#intent").focus();
     if (a === "terminal") send({ type: "system", action: "terminal" });
-    if (b.dataset.system) { closeSysmenu(); send({ type: "system", action: b.dataset.system }); }
+    if (b.dataset.system === "setup" && SA.available) { closeSysmenu(); openSetup(false); }
+    else if (b.dataset.system) { closeSysmenu(); send({ type: "system", action: b.dataset.system }); }
     if (b.id === "sysbtn") { const m = $("#sysmenu"); const open = !m.classList.contains("open"); m.classList.toggle("open", open); b.setAttribute("aria-expanded", open); if (open) m.querySelector("button").focus(); }
     if (a === "activity") { $("#activity").scrollIntoView({ behavior: "smooth" }); $("#activity").animate([{ transform: "scale(1)" }, { transform: "scale(1.02)" }, { transform: "scale(1)" }], { duration: 350 }); }
     if (a === "settings") { const s = $("#settings"); s.classList.toggle("open"); b.setAttribute("aria-expanded", s.classList.contains("open")); }
@@ -718,6 +879,7 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
   $("#c-approve").addEventListener("click", () => answer(true));
   $("#c-pin").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); answer(true); } });
   document.addEventListener("keydown", (e) => {
+    if (SA.open) return;
     if (state.confirm && e.key === "Escape") { e.preventDefault(); answer(false); }
     else if (e.key === "Escape" && state.voice.speaking) send({ type: "speech", action: "stop" });
     else if (e.key === "Escape") { $("#settings").classList.remove("open"); closeSysmenu(); }
@@ -732,6 +894,498 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
     try { localStorage.setItem("agentos.accent", c); } catch (_) {}
   }
   try { setAccent(localStorage.getItem("agentos.accent") || "#3b82f6"); } catch (_) { setAccent("#3b82f6"); }
+
+  // ---------- setup assistant ----------
+  // First boot (until /etc/agentos/setup-done exists) and 系统菜单 → 网络和 AI
+  // 设置…. One question per page; nothing is written until the last step,
+  // where the shell runs `agentos-setup --apply` (see crates/shell/src/setup.rs).
+  const SA = { open: false, first: false, available: false, shown: false, step: 0, st: {}, cfg: {}, errors: {},
+    seq: 0, reqs: new Map(), wifi: null, scanning: false, joining: null, joinBusy: false, joinErr: "", ha: null, busy: false };
+  const icon = (paths, size = 20, sw = 1.9) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+  const IC = {
+    sparkle: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/>',
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.6 3.6 5.6 3.6 9s-1.2 6.4-3.6 9c-2.4-2.6-3.6-5.6-3.6-9S9.6 5.6 12 3z"/>',
+    chip: '<rect x="6" y="6" width="12" height="12" rx="3"/><path d="M9.5 3v3M14.5 3v3M9.5 18v3M14.5 18v3M3 9.5h3M3 14.5h3M18 9.5h3M18 14.5h3"/><path d="M12 9.2l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/>',
+    mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>',
+    home: '<path d="M4 11l8-7 8 7v8.5a.5.5 0 0 1-.5.5H15v-6H9v6H4.5a.5.5 0 0 1-.5-.5z"/>',
+    lock: '<rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3M12 14.5v2"/>',
+    drive: '<rect x="3" y="13" width="18" height="7" rx="2"/><path d="M5 13l2.5-8h9L19 13M7 16.5h.01M10 16.5h.01"/>',
+    check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+    cable: '<path d="M9 3v4M15 3v4M7 7h10v4a5 5 0 0 1-10 0zM12 16v5"/>',
+    cloud: '<path d="M7 18.5a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 17.8 9 4.75 4.75 0 0 1 17.5 18.5z"/>',
+    rules: '<path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/>',
+    off: '<circle cx="12" cy="12" r="9"/><path d="M8 12h8"/>',
+    eye: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>',
+    eyeOff: '<path d="M4 4l16 16M10.6 6A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-2.7 3.4M6.5 7.5C4 9.2 2.5 12 2.5 12S6 18.5 12 18.5c1.6 0 3-.4 4.2-1"/>',
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+    shield: '<path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/>',
+    try: '<path d="M7 4h10M8 4v4l-4 9a2 2 0 0 0 1.8 3h12.4a2 2 0 0 0 1.8-3l-4-9V4"/><path d="M6.5 14h11"/>',
+  };
+  const GRAD = {
+    welcome: "linear-gradient(150deg,#8fd0ff,#3b6cff 50%,#8b5cf6)", network: "linear-gradient(160deg,#6fd6ff,#0a7cff)",
+    planner: "linear-gradient(160deg,#c9a6ff,#6d42ff)", voice: "linear-gradient(160deg,#ffc15e,#ff7a1a)",
+    home: "linear-gradient(160deg,#ffe07a,#f59e0b)", pin: "linear-gradient(160deg,#ff9a9a,#e5484d)",
+    install: "linear-gradient(160deg,#e3e7ef,#8a93a8)", done: "linear-gradient(160deg,#7ff0b5,#16a36d)",
+    gray: "linear-gradient(160deg,#6b7488,#3a4256)", claude: "linear-gradient(160deg,#f0a27a,#c4573a)", green: "linear-gradient(160deg,#7ff0b5,#16a36d)",
+  };
+  const PRESETS = [
+    ["OpenAI", "https://api.openai.com/v1", "gpt-4.1"],
+    ["DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"],
+    ["通义千问", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus"],
+    ["本机 Ollama", "http://localhost:11434/v1", "qwen2.5"],
+  ];
+  const isUrl = (s) => /^https?:\/\/\S+$/.test((s || "").trim());
+  const saved = (k) => SA.st[k] === "1";
+  const online = () => SA.st.net === "connected";
+
+  function setupCall(op, fields) {
+    return new Promise((resolve) => {
+      const id = ++SA.seq;
+      SA.reqs.set(id, resolve);
+      send(Object.assign({ type: "setup", op, id }, fields || {}));
+    });
+  }
+
+  function pages() {
+    const p = SA.first ? ["welcome"] : [];
+    p.push("network", "planner", "voice", "home", "pin");
+    if (SA.st.installed !== "1") p.push("install");
+    p.push("done");
+    return p;
+  }
+
+  function initCfg() {
+    const s = SA.st;
+    SA.cfg = {
+      planner: s.AGENTOS_PLANNER || "claude", claudeKey: "", claudeModel: s.AGENTOS_MODEL || "",
+      oaBase: s.OPENAI_BASE_URL || PRESETS[0][1], oaKey: "", oaModel: s.OPENAI_MODEL || PRESETS[0][2],
+      voice: s.AGENTOS_STT === "openai" ? "openai" : "off", vSame: !s.AGENTOS_VOICE_BASE_URL && !saved("AGENTOS_VOICE_API_KEY"),
+      vBase: s.AGENTOS_VOICE_BASE_URL || s.OPENAI_BASE_URL || PRESETS[0][1], vKey: "", speak: s.AGENTOS_SPEAK || "auto",
+      ha: !!s.HASS_URL, haUrl: s.HASS_URL || "http://homeassistant.local:8123", haToken: "",
+      pinMode: s.pin === "1" ? "keep" : "change", pin1: "", pin2: "", install: "try",
+    };
+  }
+
+  async function openSetup(first) {
+    if (SA.open) return;
+    Object.assign(SA, { open: true, first, step: 0, errors: {}, wifi: null, joining: null, joinErr: "", ha: null, busy: false, st: {} });
+    closeSysmenu(); $("#settings").classList.remove("open");
+    $("#setup").classList.add("open");
+    $("#sa-close").textContent = first ? "稍后设置" : "取消";
+    $("#sa-page").replaceChildren(el("div", "sa-inner"));
+    const r = await setupCall("status");
+    SA.st = r.ok ? r.data : {};
+    initCfg();
+    saRender("fwd");
+    $("#sa-next").focus();
+    const def = PAGES[pages()[0]];
+    if (def.enter) def.enter();
+  }
+  function closeSetup() {
+    SA.open = false;
+    $("#setup").classList.remove("open");
+    $("#intent").focus();
+  }
+
+  // --- building blocks ---
+  function hero(tile, title, sub) {
+    const h = el("div", "sa-hero");
+    const t = el("div", "sa-tile"); t.style.background = GRAD[tile]; t.style.color = "#fff";
+    t.innerHTML = icon(IC[{ welcome: "sparkle", network: "globe", planner: "chip", voice: "mic", home: "home", pin: "lock", install: "drive", done: "check" }[tile]], tile === "welcome" ? 50 : 40, tile === "done" ? 2.6 : 1.8);
+    const h1 = el("h1", null, title); h1.id = "sa-title";
+    h.append(t, h1);
+    if (sub) h.append(el("p", null, sub));
+    return h;
+  }
+  function row(ic, grad, title, desc, end) {
+    const r = el("div", "sa-row");
+    const i = el("span", "ic"); i.style.background = grad; i.style.color = "#fff"; i.innerHTML = icon(IC[ic] || ic, 19);
+    const txt = el("div", "txt"); txt.append(el("div", "t", title)); if (desc) txt.append(el("div", "d", desc));
+    r.append(i, txt);
+    if (end) { const e = el("div", "end"); if (typeof end === "string") e.textContent = end; else e.append(end); r.append(e); }
+    return r;
+  }
+  // A radio row bound to SA.cfg[name]; `more` builds the fields shown while it is chosen.
+  function choice(group, name, value, ic, grad, title, desc, more) {
+    const b = el("button", "sa-row"); b.type = "button"; b.setAttribute("role", "radio");
+    const on = SA.cfg[name] === value; b.setAttribute("aria-checked", String(on));
+    const i = el("span", "ic"); i.style.background = grad; i.style.color = "#fff"; i.innerHTML = icon(IC[ic], 19);
+    const txt = el("div", "txt"); txt.append(el("div", "t", title)); if (desc) txt.append(el("div", "d", desc));
+    b.append(i, txt, el("span", "sa-radio"));
+    b.addEventListener("click", () => { if (SA.cfg[name] !== value) { SA.cfg[name] = value; SA.errors = {}; saRender(); } });
+    group.append(b);
+    if (on && more) { const m = el("div", "sa-more"); more(m); group.append(m); }
+  }
+  function field(label, key, opts) {
+    opts = opts || {};
+    const wrap = el("label", "sa-field"); wrap.append(el("span", null, label));
+    const box = el("div", "sa-input" + (opts.secret ? " has-eye" : ""));
+    const inp = el("input"); inp.type = opts.secret ? "password" : "text"; inp.value = SA.cfg[key] || "";
+    inp.placeholder = opts.saved ? "已保存 · 留空保持不变" : opts.placeholder || "";
+    inp.spellcheck = false; inp.autocomplete = "off"; inp.dataset.key = key;
+    if (opts.numeric) { inp.inputMode = "numeric"; inp.maxLength = 12; }
+    inp.addEventListener("input", () => { SA.cfg[key] = inp.value; if (opts.onInput) opts.onInput(); });
+    if (SA.errors[key]) inp.setAttribute("aria-invalid", "true");
+    box.append(inp);
+    if (opts.secret && !opts.numeric) {
+      const eye = el("button", "eye"); eye.type = "button"; eye.setAttribute("aria-label", "显示"); eye.innerHTML = icon(IC.eye, 17);
+      eye.addEventListener("click", (e) => { e.preventDefault(); const show = inp.type === "password"; inp.type = show ? "text" : "password"; eye.innerHTML = icon(show ? IC.eyeOff : IC.eye, 17); eye.setAttribute("aria-label", show ? "隐藏" : "显示"); inp.focus(); });
+      box.append(eye);
+    }
+    wrap.append(box);
+    if (SA.errors[key]) wrap.append(el("div", "sa-err", SA.errors[key]));
+    else if (opts.hint) wrap.append(el("small", null, opts.hint));
+    return wrap;
+  }
+  function seg(key, items, label) {
+    const s = el("div", "sa-seg"); s.setAttribute("role", "group"); if (label) s.setAttribute("aria-label", label);
+    for (const [v, t] of items) {
+      const b = el("button", null, t); b.type = "button"; b.setAttribute("aria-pressed", String(SA.cfg[key] === v));
+      b.addEventListener("click", () => { SA.cfg[key] = v; SA.errors = {}; saRender(); });
+      s.append(b);
+    }
+    return s;
+  }
+  function toggle(key, text, onChange) {
+    const b = el("button", "sa-switch"); b.type = "button"; b.setAttribute("role", "switch"); b.setAttribute("aria-checked", String(!!SA.cfg[key]));
+    b.append(el("span", "knob"), el("span", null, text));
+    b.addEventListener("click", () => { SA.cfg[key] = !SA.cfg[key]; SA.errors = {}; if (onChange) onChange(); saRender(); });
+    return b;
+  }
+  function note(ic, color, text) {
+    const n = el("div", "sa-note"); const i = el("span"); i.style.color = color; i.innerHTML = icon(IC[ic], 18); n.append(i, el("div", null, text)); return n;
+  }
+  function wifiIcon(signal) {
+    const lv = signal > 66 ? 3 : signal > 33 ? 2 : 1;
+    const arc = (d, n) => `<path d="${d}" stroke-opacity="${n <= lv ? 1 : 0.3}"/>`;
+    return icon(arc("M2.5 9a14 14 0 0 1 19 0", 3) + arc("M5.6 12.4a9.5 9.5 0 0 1 12.8 0", 2) + arc("M8.8 15.7a4.8 4.8 0 0 1 6.4 0", 1) + '<circle cx="12" cy="19" r="1.1" fill="currentColor"/>', 19);
+  }
+  function spinner() { return el("span", "sa-spin"); }
+
+  // --- pages ---
+  const PAGES = {
+    welcome: {
+      next: "开始设置",
+      body(c) {
+        c.append(hero("welcome", "你好", "欢迎使用 AgentOS。花一两分钟完成下面几项设置，管家就能开始帮你做事。"));
+        const g = el("div", "sa-steps");
+        for (const [ic, grad, t, d] of [["globe", GRAD.network, "网络", "网线或 Wi-Fi"], ["chip", GRAD.planner, "AI 模型", "管家的大脑"],
+          ["mic", GRAD.voice, "语音", "可选"], ["home", GRAD.home, "智能家居", "可选"], ["lock", GRAD.pin, "确认 PIN", "保护不可逆操作"]]) {
+          const d0 = el("div"), i = el("span", "ic"); i.style.background = grad; i.innerHTML = icon(IC[ic], 22);
+          const label = el("div", null, t); label.append(el("small", null, d));
+          d0.append(i, label); g.append(d0);
+        }
+        c.append(g);
+      },
+    },
+    network: {
+      next: () => online() ? "继续" : "先不联网",
+      enter() { if (SA.st.wifi === "1" && SA.wifi === null && !SA.scanning) scanWifi(); },
+      body(c) {
+        c.append(hero("network", "连接网络", "云端 AI 模型和语音需要联网。插上网线会自动连接，也可以在下面选一个 Wi‑Fi。"));
+        const g = el("div", "sa-group");
+        const wired = /ethernet/.test(SA.st.net_type || "");
+        if (online()) g.append(row(wired ? "cable" : "check", GRAD.green, "已连接", (wired ? "有线网络" : "Wi-Fi") + (SA.st.net_name ? ` · ${SA.st.net_name}` : "")));
+        else g.append(row("globe", GRAD.gray, "还没有连上网络", SA.st.wifi === "1" ? "选择一个 Wi-Fi，或者插上网线" : "没有找到无线网卡，可以插上网线"));
+        c.append(g);
+        if (SA.st.wifi !== "1") {
+          if (!online()) c.append(note("info", "#9cc8ff", "不联网也能继续：选择“离线规则规划器”先体验，联网后再到系统菜单里换成云端模型。"));
+          return;
+        }
+        const head = el("div"); head.style.cssText = "display:flex;align-items:center;justify-content:space-between;margin-bottom:-10px;padding:0 4px 0 16px";
+        const t = el("div", "sa-group-title", "Wi-Fi 网络"); t.style.margin = "0";
+        const rescan = el("button", "sa-btn plain small", SA.scanning ? "正在扫描…" : "重新扫描"); rescan.type = "button"; rescan.disabled = SA.scanning;
+        rescan.addEventListener("click", scanWifi);
+        head.append(t, rescan); c.append(head);
+        const list = el("div", "sa-group"); list.setAttribute("role", "list");
+        if (SA.wifi === null || (SA.scanning && !SA.wifi.length)) { const r = el("div", "sa-row"); r.append(spinner(), el("div", "d", "正在查找附近的网络…")); list.append(r); }
+        else if (!SA.wifi.length) list.append(row("globe", GRAD.gray, "附近没有找到 Wi-Fi", "靠近路由器后点“重新扫描”"));
+        for (const n of SA.wifi || []) {
+          const b = el("button", "sa-row"); b.type = "button";
+          const i = el("span", "ic"); i.style.background = n.active ? GRAD.network : "rgba(255,255,255,.12)"; i.style.color = "#fff"; i.innerHTML = wifiIcon(n.signal);
+          const txt = el("div", "txt"); txt.append(el("div", "t", n.ssid));
+          if (n.active) txt.append(el("div", "d", "已连接"));
+          const end = el("div", "end");
+          if (SA.joining === n.ssid && SA.joinBusy) end.append(spinner());
+          else if (n.active) { const k = el("span", "sa-ok"); k.innerHTML = icon(IC.check, 18, 2.4); end.append(k); }
+          if (n.secure) { const l = el("span"); l.innerHTML = icon(IC.lock, 15); l.title = "需要密码"; end.append(l); }
+          b.append(i, txt, end);
+          b.addEventListener("click", () => {
+            if (n.active || SA.joinBusy) return;
+            SA.joinErr = ""; SA.cfg.wifiPw = "";
+            if (n.secure) { SA.joining = SA.joining === n.ssid ? null : n.ssid; saRender(); const f = $('#sa-page input[data-key="wifiPw"]'); if (f) f.focus(); }
+            else joinWifi(n.ssid);
+          });
+          list.append(b);
+          if (SA.joining === n.ssid && n.secure && !n.active) {
+            const m = el("div", "sa-more");
+            const f = field(`“${n.ssid}”的密码`, "wifiPw", { secret: true });
+            const inp = f.querySelector("input");
+            inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); joinWifi(n.ssid); } });
+            const act = el("div"); act.style.cssText = "display:flex;gap:8px;justify-content:flex-end;align-items:center";
+            if (SA.joinErr) { const er = el("div", "sa-err", SA.joinErr); er.style.flex = "1"; act.append(er); }
+            const cancel = el("button", "sa-btn plain small", "取消"); cancel.type = "button"; cancel.addEventListener("click", () => { SA.joining = null; saRender(); });
+            const join = el("button", "sa-btn primary small", SA.joinBusy ? "正在连接…" : "加入"); join.type = "button"; join.disabled = SA.joinBusy;
+            join.addEventListener("click", () => joinWifi(n.ssid));
+            act.append(cancel, join); m.append(f, act); list.append(m);
+          }
+        }
+        if (SA.joinErr && !(SA.wifi || []).some((n) => n.ssid === SA.joining && n.secure)) list.append(Object.assign(el("div", "sa-row sa-err", SA.joinErr)));
+        c.append(list);
+      },
+    },
+    planner: {
+      autofocus: true,
+      body(c) {
+        c.append(hero("planner", "选择管家的 AI 模型", "管家用它理解你的意思、制定计划。无论选哪个，每一步执行前都要经过本机的策略引擎。"));
+        const g = el("div", "sa-group"); g.setAttribute("role", "radiogroup"); g.setAttribute("aria-label", "AI 模型");
+        choice(g, "planner", "claude", "sparkle", GRAD.claude, "Claude", "Anthropic API，理解和规划能力最强", (m) => {
+          m.append(field("API Key", "claudeKey", { secret: true, saved: saved("ANTHROPIC_API_KEY"), placeholder: "sk-ant-…", hint: "在 console.anthropic.com 创建" }),
+            field("模型（可选）", "claudeModel", { placeholder: "留空使用默认模型" }));
+        });
+        choice(g, "planner", "openai", "cloud", "linear-gradient(160deg,#5ee0c0,#0f9b8e)", "OpenAI 兼容接口", "OpenAI、DeepSeek、通义千问、本机 Ollama 等", (m) => {
+          const chips = el("div", "sa-chips");
+          for (const [name, base, model] of PRESETS) {
+            const b = el("button", "sa-chip", name); b.type = "button"; b.setAttribute("aria-pressed", String(SA.cfg.oaBase === base));
+            b.addEventListener("click", () => { SA.cfg.oaBase = base; SA.cfg.oaModel = model; SA.errors = {}; saRender(); });
+            chips.append(b);
+          }
+          m.append(chips, field("接口地址", "oaBase", { placeholder: "https://…/v1" }),
+            field("API Key", "oaKey", { secret: true, saved: saved("OPENAI_API_KEY"), hint: "本机 Ollama 等不需要 Key 的服务可以留空" }),
+            field("模型名", "oaModel", { placeholder: "gpt-4.1" }));
+        });
+        choice(g, "planner", "rule", "rules", GRAD.gray, "离线规则规划器", "不联网，只懂固定句式，适合先体验");
+        c.append(g);
+      },
+      check() {
+        const c = SA.cfg, e = {};
+        if (c.planner === "claude" && !c.claudeKey.trim() && !saved("ANTHROPIC_API_KEY")) e.claudeKey = "请填写 API Key，或者选择离线规则规划器";
+        if (c.planner === "openai") {
+          if (!isUrl(c.oaBase)) e.oaBase = "地址要以 http:// 或 https:// 开头";
+          if (!c.oaModel.trim()) e.oaModel = "请填写模型名";
+        }
+        return e;
+      },
+    },
+    voice: {
+      body(c) {
+        c.append(hero("voice", "用语音和管家说话", "按住 Caps Lock 键或屏幕上的麦克风说话，松开就发送。"));
+        const g = el("div", "sa-group"); g.setAttribute("role", "radiogroup"); g.setAttribute("aria-label", "语音");
+        choice(g, "voice", "openai", "cloud", GRAD.voice, "云端语音", "识别和朗读使用 OpenAI 兼容接口，录音会上传到该服务", (m) => {
+          const sameOk = SA.cfg.planner === "openai";
+          if (sameOk) m.append(toggle("vSame", "使用 AI 模型的接口和 API Key"));
+          if (!sameOk || !SA.cfg.vSame) {
+            m.append(field("语音接口地址", "vBase", { placeholder: "https://api.openai.com/v1", hint: "需要支持 /audio/transcriptions 和 /audio/speech" }),
+              field("API Key", "vKey", { secret: true, saved: saved("AGENTOS_VOICE_API_KEY") }));
+          }
+          const f = el("div", "sa-field"); f.append(el("span", null, "什么时候把回复读出来"), seg("speak", [["auto", "我用语音提问时"], ["always", "总是"], ["off", "不朗读"]], "朗读回复"));
+          m.append(f);
+        });
+        choice(g, "voice", "off", "off", GRAD.gray, "先不用语音", "以后可以在系统菜单里打开");
+        c.append(g, note("mic", "#ffb340", "只在按住时录音。录音时 Caps Lock 指示灯和菜单栏的橙色麦克风标志会亮起，每次录音都会记进审计日志。"));
+      },
+      check() {
+        const c = SA.cfg, e = {};
+        if (c.voice !== "openai" || (c.planner === "openai" && c.vSame)) return e;
+        if (!isUrl(c.vBase)) e.vBase = "地址要以 http:// 或 https:// 开头";
+        if (!c.vKey.trim() && !saved("AGENTOS_VOICE_API_KEY") && c.planner !== "openai") e.vKey = "云端语音需要 API Key";
+        return e;
+      },
+    },
+    home: {
+      skip: () => SA.cfg.ha,
+      onSkip() { SA.cfg.ha = false; },
+      body(c) {
+        c.append(hero("home", "连接智能家居", "家里有 Home Assistant 的话，管家可以查看和控制灯、空调、窗帘和门锁。"));
+        const g = el("div", "sa-group");
+        const top = el("div", "sa-row"); top.append(toggle("ha", "连接 Home Assistant", () => { SA.ha = null; }));
+        g.append(top);
+        if (SA.cfg.ha) {
+          const m = el("div", "sa-more"); m.style.paddingLeft = "16px";
+          m.append(field("地址", "haUrl", { placeholder: "http://homeassistant.local:8123", onInput: () => { SA.ha = null; } }),
+            field("长期访问令牌", "haToken", { secret: true, saved: saved("HASS_TOKEN"), hint: "在 Home Assistant 左下角「个人资料 → 安全」里创建", onInput: () => { SA.ha = null; } }));
+          const act = el("div"); act.style.cssText = "display:flex;align-items:center;gap:12px";
+          const test = el("button", "sa-btn small", SA.ha === "busy" ? "正在测试…" : "测试连接"); test.type = "button"; test.disabled = SA.ha === "busy";
+          test.addEventListener("click", testHa);
+          act.append(test);
+          if (SA.ha === "busy") act.append(spinner());
+          else if (SA.ha) { const r = el("div", SA.ha.ok ? "sa-ok" : "sa-bad", SA.ha.text); r.style.fontSize = "13px"; act.append(r); }
+          m.append(act); g.append(m);
+        }
+        c.append(g, note("shield", "#ffd66b", "开锁、开车库门这类操作，每次都要你在屏幕上确认并输入 PIN。"));
+      },
+      check() {
+        const c = SA.cfg, e = {};
+        if (!c.ha) return e;
+        if (!isUrl(c.haUrl)) e.haUrl = "地址要以 http:// 或 https:// 开头";
+        if (!c.haToken.trim() && !saved("HASS_TOKEN")) e.haToken = "请填写访问令牌，或者关闭上面的开关";
+        return e;
+      },
+    },
+    pin: {
+      autofocus: true,
+      body(c) {
+        c.append(hero("pin", "设置确认 PIN", "删除数据、开锁、安装插件这类不可逆的操作，执行前要输入 PIN。这样即使网页里藏着恶意指令，也没法替你点“确认”。"));
+        const has = SA.st.pin === "1";
+        c.append(seg("pinMode", has ? [["keep", "保持现在的 PIN"], ["change", "换一个"], ["clear", "不用 PIN"]] : [["change", "设置 PIN"], ["keep", "先不设置"]], "PIN"));
+        if (SA.cfg.pinMode === "change") {
+          const p = el("div", "sa-pin");
+          p.append(field("PIN（4 到 12 位数字）", "pin1", { secret: true, numeric: true }), field("再输入一次", "pin2", { secret: true, numeric: true }));
+          c.append(p);
+        } else if (SA.cfg.pinMode === "clear" || !has) {
+          c.append(note("info", "#ffb3b5", "不设置 PIN 时，点一下“确认”就会执行不可逆的操作。"));
+        } else {
+          c.append(note("check", "#7ee2a8", "已经设置过 PIN，会继续使用。"));
+        }
+      },
+      check() {
+        const c = SA.cfg, e = {};
+        if (c.pinMode !== "change") return e;
+        if (!/^\d{4,12}$/.test(c.pin1)) e.pin1 = "PIN 要是 4 到 12 位数字";
+        else if (c.pin1 !== c.pin2) e.pin2 = "两次输入不一样";
+        return e;
+      },
+    },
+    install: {
+      body(c) {
+        c.append(hero("install", "安装到这台电脑", "你现在是从 U 盘运行 AgentOS。可以先试用，满意了再安装到硬盘。"));
+        const g = el("div", "sa-group"); g.setAttribute("role", "radiogroup"); g.setAttribute("aria-label", "安装");
+        choice(g, "install", "try", "try", GRAD.gray, "先试用", "以后在系统菜单里选「安装到这台电脑的硬盘…」");
+        choice(g, "install", "disk", "drive", GRAD.install, "安装到硬盘", "完成设置后打开安装程序，刚才的设置会一起带过去。安装程序会让你选硬盘并再次确认。");
+        c.append(g);
+      },
+    },
+    done: {
+      next: "开始使用",
+      body(c) {
+        c.append(hero("done", "一切就绪", "管家已经准备好了。以后可以在左上角系统菜单的「网络和 AI 设置…」里修改这些设置。"));
+        const cf = SA.cfg;
+        const g = el("div", "sa-group sa-summary");
+        const ok = (b) => { const s = el("span", b ? "sa-ok" : null); s.innerHTML = icon(b ? IC.check : IC.off, 17, 2.2); return s; };
+        const plannerName = { claude: "Claude", openai: `OpenAI 兼容接口 · ${cf.oaModel}`, rule: "离线规则规划器" }[cf.planner];
+        g.append(row("globe", GRAD.network, "网络", online() ? SA.st.net_name || "已连接" : "未连接", ok(online())),
+          row("chip", GRAD.planner, "AI 模型", plannerName, ok(true)),
+          row("mic", GRAD.voice, "语音", cf.voice === "openai" ? "云端识别和朗读" : "未开启", ok(cf.voice === "openai")),
+          row("home", GRAD.home, "智能家居", cf.ha ? cf.haUrl : "未连接", ok(cf.ha)),
+          row("lock", GRAD.pin, "确认 PIN", cf.pinMode === "change" || (cf.pinMode === "keep" && SA.st.pin === "1") ? "已设置" : "未设置", ok(cf.pinMode === "change" || (cf.pinMode === "keep" && SA.st.pin === "1"))));
+        c.append(g);
+        if (cf.install === "disk") c.append(note("drive", "#d6dbe6", "点“开始使用”后会打开安装程序。"));
+      },
+    },
+  };
+
+  // --- actions ---
+  async function scanWifi() {
+    SA.scanning = true; saRender();
+    const r = await setupCall("wifi-scan");
+    SA.scanning = false; SA.wifi = r.ok ? r.data : [];
+    if (!r.ok) SA.joinErr = r.error || "扫描失败";
+    if (SA.open && pages()[SA.step] === "network") saRender();
+  }
+  async function refreshStatus() {
+    const r = await setupCall("status");
+    if (r.ok) SA.st = r.data;
+  }
+  async function joinWifi(ssid) {
+    if (SA.joinBusy) return;
+    const net = (SA.wifi || []).find((n) => n.ssid === ssid);
+    if (net && net.secure && !(SA.cfg.wifiPw || "")) { SA.joining = ssid; SA.joinErr = "请输入密码"; saRender(); return; }
+    SA.joining = ssid; SA.joinBusy = true; SA.joinErr = ""; saRender();
+    const r = await setupCall("wifi-connect", { ssid, password: SA.cfg.wifiPw || "" });
+    SA.joinBusy = false; SA.cfg.wifiPw = "";
+    if (r.ok) { SA.joining = null; await refreshStatus(); SA.wifi = (SA.wifi || []).map((n) => ({ ...n, active: n.ssid === ssid })); }
+    else SA.joinErr = r.error || "连接失败";
+    if (SA.open) saRender();
+  }
+  async function testHa() {
+    const e = PAGES.home.check(); SA.errors = e;
+    if (Object.keys(e).length) { saRender(); return; }
+    SA.ha = "busy"; saRender();
+    const r = await setupCall("test-ha", { hass_url: SA.cfg.haUrl, hass_token: SA.cfg.haToken, keep_hass_token: saved("HASS_TOKEN") });
+    const code = r.ok ? r.data.code : "";
+    SA.ha = !r.ok ? { ok: false, text: r.error || "测试失败" }
+      : code === "200" ? { ok: true, text: "连接成功" }
+      : code === "401" || code === "403" ? { ok: false, text: "Home Assistant 拒绝了这个令牌" }
+      : { ok: false, text: `暂时连不上（${code}），保存后网络通了会自动生效` };
+    if (SA.open) saRender();
+  }
+  function applyFields() {
+    const c = SA.cfg, same = c.planner === "openai" && c.vSame;
+    const f = {
+      planner: c.planner, anthropic_key: c.claudeKey, keep_anthropic_key: saved("ANTHROPIC_API_KEY"), model: c.claudeModel,
+      openai_base: c.oaBase, openai_key: c.oaKey, keep_openai_key: saved("OPENAI_API_KEY"), openai_model: c.oaModel,
+      voice: c.voice, speak: c.speak, voice_base: same ? "" : c.vBase, voice_key: same ? "" : c.vKey, keep_voice_key: !same && saved("AGENTOS_VOICE_API_KEY"),
+      hass_url: c.ha ? c.haUrl : "", hass_token: c.haToken, keep_hass_token: saved("HASS_TOKEN"),
+    };
+    if (c.pinMode === "change") f.pin = c.pin1;
+    if (c.pinMode === "clear") f.pin_clear = true;
+    return f;
+  }
+
+  // --- navigation ---
+  function saRender(dir) {
+    const list = pages(), page = list[SA.step], def = PAGES[page];
+    const inner = el("div", "sa-inner" + (dir ? " " + dir : "") + (page === "welcome" ? " sa-welcome" : ""));
+    def.body(inner);
+    const scroll = $("#sa-page").scrollTop;
+    $("#sa-page").replaceChildren(inner);
+    if (!dir) $("#sa-page").scrollTop = scroll;
+    // Progress: the steps between the welcome and the summary.
+    const steps = list.filter((p) => p !== "welcome" && p !== "done"), at = steps.indexOf(page);
+    $("#sa-dots").replaceChildren(...steps.map((_, i) => el("span", i === at ? "cur" : i < at || page === "done" ? "done" : "")));
+    $("#sa-dots").style.visibility = page === "welcome" ? "hidden" : "visible";
+    $("#sa-count").textContent = at >= 0 ? `${at + 1} / ${steps.length}` : "";
+    const next = $("#sa-next"), back = $("#sa-back"), skip = $("#sa-skip");
+    next.textContent = SA.busy ? "正在保存…" : typeof def.next === "function" ? def.next() : def.next || (list[SA.step + 1] === "done" ? "完成设置" : "继续");
+    next.disabled = SA.busy;
+    back.hidden = SA.step === 0 || page === "done";
+    skip.hidden = !(def.skip && def.skip());
+    $("#sa-close").hidden = page === "done";
+    if (!SA.busy) $("#sa-ferr").textContent = SA.ferr || "";
+    const firstBad = inner.querySelector('[aria-invalid="true"]');
+    if (firstBad) firstBad.focus();
+  }
+  const def0 = () => PAGES[pages()[SA.step]];
+  function go(delta) {
+    SA.step = Math.max(0, Math.min(pages().length - 1, SA.step + delta));
+    SA.errors = {}; SA.ferr = "";
+    saRender(delta > 0 ? "fwd" : "back");
+    $("#sa-page").scrollTop = 0;
+    // Keep Enter working: the default button takes focus unless a field needs it.
+    const first = def0().autofocus && $("#sa-page input:not([type=hidden])");
+    if (first && !first.value) first.focus({ preventScroll: true });
+    else if (!$("#sa-page").contains(document.activeElement)) $("#sa-next").focus({ preventScroll: true });
+    const def = PAGES[pages()[SA.step]];
+    if (def.enter) def.enter();
+  }
+  async function saNext() {
+    if (SA.busy) return;
+    const list = pages(), page = list[SA.step], def = PAGES[page];
+    if (page === "done") {
+      closeSetup();
+      setupCall("restart");
+      if (SA.cfg.install === "disk") send({ type: "system", action: "install" });
+      return;
+    }
+    const errors = def.check ? def.check() : {};
+    if (Object.keys(errors).length) { SA.errors = errors; saRender(); return; }
+    if (list[SA.step + 1] === "done") {
+      SA.busy = true; SA.ferr = ""; saRender();
+      const r = await setupCall("apply", applyFields());
+      SA.busy = false;
+      if (!r.ok) { SA.ferr = r.error || "保存失败"; saRender(); return; }
+      SA.st.setup_done = "1";
+    }
+    go(1);
+  }
+  $("#sa-next").addEventListener("click", saNext);
+  $("#sa-back").addEventListener("click", () => { if (!SA.busy) go(-1); });
+  $("#sa-skip").addEventListener("click", () => { const d = PAGES[pages()[SA.step]]; if (d.onSkip) d.onSkip(); SA.errors = {}; go(1); });
+  $("#sa-close").addEventListener("click", () => { if (!SA.busy) closeSetup(); });
+  $("#setup").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing && e.target.tagName === "INPUT") { e.preventDefault(); saNext(); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); if (SA.joining) { SA.joining = null; saRender(); } else if (!$("#sa-back").hidden) go(-1); }
+  });
 
   // ---------- offline demo (browser only) ----------
   let demoId = 0; const demoNotes = ["给物业打电话问暖气"]; let demoPending = null;
@@ -756,7 +1410,31 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
   }
   let demoMic = null;
   function demoVoice(patch) { receive(Object.assign({ type: "voice", mic: state.voice.mic, speaking: false, speak: state.voice.speak }, patch)); }
+  // Setup assistant demo: open with #setup (first boot) or #setup-again.
+  const demoSt = location.hash === "#setup-again"
+    ? { AGENTOS_PLANNER: "claude", ANTHROPIC_API_KEY: "1", net: "connected", net_type: "802-3-ethernet", net_name: "有线连接 1", wifi: "1", pin: "1", installed: "", HASS_URL: "http://homeassistant.local:8123", HASS_TOKEN: "1" }
+    : { net: "disconnected", wifi: "1", pin: "", installed: "" };
+  function demoSetup(msg) {
+    const reply = (ms, r) => later(ms, () => receive(Object.assign({ type: "setup", id: msg.id }, r)));
+    switch (msg.op) {
+      case "status": return reply(150, { ok: true, data: { ...demoSt } });
+      case "wifi-scan": return reply(900, { ok: true, data: [
+        { ssid: "Adele-Home", signal: 86, secure: true, active: demoSt.net_name === "Adele-Home" },
+        { ssid: "Adele-Home-5G", signal: 72, secure: true, active: false },
+        { ssid: "CMCC-3F2A", signal: 48, secure: true, active: false },
+        { ssid: "Starbucks", signal: 30, secure: false, active: false },
+      ] });
+      case "wifi-connect":
+        if (msg.password === "wrong") return reply(1200, { ok: false, error: "密码不对，或者这个网络需要其他登录方式" });
+        Object.assign(demoSt, { net: "connected", net_type: "802-11-wireless", net_name: msg.ssid });
+        return reply(1200, { ok: true, data: { online: "1" } });
+      case "test-ha": return reply(800, { ok: true, data: { code: msg.hass_token || msg.keep_hass_token ? "200" : "401" } });
+      case "apply": bubble("note", "演示模式：设置不会真的保存"); return reply(500, { ok: true, data: { saved: "1" } });
+      default: return reply(100, { ok: true, data: null });
+    }
+  }
   function demo(msg) {
+    if (msg.type === "setup") { demoSetup(msg); return; }
     if (msg.type === "speech") { if (msg.mode) demoVoice({ speak: msg.mode }); return; }
     if (msg.type === "listen") {
       if (msg.action === "start") {
@@ -795,6 +1473,7 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
   else {
     receive({ type: "hello", planner: "演示模式（未连接 agentosd）", voice: { input: true, input_label: "演示（不会真的录音）", destination: "本机", output: false, speak: "auto" } });
     receive({ type: "activity", items: [] });
+    if (location.hash.startsWith("#setup")) { SA.available = true; openSetup(location.hash === "#setup"); }
   }
   renderStatus();
 })();

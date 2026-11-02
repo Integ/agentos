@@ -1,11 +1,133 @@
 #!/bin/bash
 # First-boot setup: network, AI planner and API key, voice, smart home and the
-# PIN for irreversible actions. Re-run any time from the
-# system menu. Writes /etc/agentos/agentos.env (root:agent, 0640).
+# PIN for irreversible actions. Writes /etc/agentos/agentos.env (root:agent,
+# 0640).
+#
+# Without arguments: the text-mode wizard (text console, or a terminal).
+# On the desktop, agentos-shell shows a graphical setup assistant instead and
+# uses the options below as its backend (answers as KEY=VALUE lines on stdin,
+# results as KEY=VALUE lines on stdout):
+#   --status        current settings (secrets only as set/unset), network, PIN
+#   --wifi-scan     nearby Wi-Fi networks (nmcli terse output)
+#   --wifi-connect  SSID=, PASSWORD=
+#   --test-ha       HASS_URL=, HASS_TOKEN= (or KEEP=HASS_TOKEN): prints code=
+#   --apply         the managed settings below, KEEP=NAME to keep a saved
+#                   secret, PIN= or PIN_CLEAR=1; other lines in the env file
+#                   are kept
 set -u
 [ "$EUID" -eq 0 ] || exec sudo "$0" "$@"
 
-ENV_FILE=/etc/agentos/agentos.env
+ENV_FILE=${AGENTOS_ENV_FILE:-/etc/agentos/agentos.env}
+AGENT_HOME=/home/agent/.local/share/agentos
+MANAGED=(AGENTOS_PLANNER ANTHROPIC_API_KEY AGENTOS_MODEL OPENAI_BASE_URL OPENAI_API_KEY
+  OPENAI_MODEL AGENTOS_STT AGENTOS_TTS AGENTOS_SPEAK AGENTOS_VOICE_BASE_URL
+  AGENTOS_VOICE_API_KEY HASS_URL HASS_TOKEN)
+
+saved() { # saved NAME: its value in the current env file
+  [ -r "$ENV_FILE" ] || return 0
+  ( set +u; . "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${!1:-}" )
+}
+pin_set() { runuser -u agent -- test -f "$AGENT_HOME/pin.json" 2>/dev/null; }
+read_input() { # KEY=VALUE lines on stdin → IN[KEY]; KEEP=NAME → IN[NAME] from the file
+  declare -gA IN=()
+  local line k
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" == *=* ]] || continue
+    k=${line%%=*}
+    if [ "$k" = KEEP ]; then
+      k=${line#*=}
+      # Only the managed names: saved() expands the name indirectly.
+      [[ " ${MANAGED[*]} " == *" $k "* ]] && IN[$k]=$(saved "$k")
+    else
+      IN[$k]=${line#*=}
+    fi
+  done
+}
+
+case "${1:-}" in
+  --status)
+    for k in AGENTOS_PLANNER AGENTOS_MODEL OPENAI_BASE_URL OPENAI_MODEL AGENTOS_STT AGENTOS_SPEAK \
+             AGENTOS_VOICE_BASE_URL HASS_URL; do
+      printf '%s=%s\n' "$k" "$(saved "$k" | tr -d '\n')"
+    done
+    for k in ANTHROPIC_API_KEY OPENAI_API_KEY AGENTOS_VOICE_API_KEY HASS_TOKEN; do
+      [ -n "$(saved "$k")" ] && echo "$k=1" || echo "$k="
+    done
+    pin_set && echo pin=1 || echo pin=
+    [ -f /etc/agentos/installed ] && echo installed=1 || echo installed=
+    [ -f /etc/agentos/setup-done ] && echo setup_done=1 || echo setup_done=
+    if command -v nmcli >/dev/null; then
+      echo "net=$(nmcli -t -f STATE general 2>/dev/null)"
+      nmcli -t -f TYPE dev 2>/dev/null | grep -qx wifi && echo wifi=1 || echo wifi=
+      # The connection carrying the default route, e.g. "802-11-wireless:Home".
+      active=$(nmcli -t -f TYPE,NAME connection show --active 2>/dev/null | grep -v '^loopback:' | head -n1)
+      echo "net_type=${active%%:*}"
+      echo "net_name=${active#*:}"
+    else
+      echo net=unknown
+    fi
+    exit 0 ;;
+  --wifi-scan)
+    nmcli -t -f IN-USE,SIGNAL,SECURITY,SSID dev wifi list --rescan yes 2>/dev/null ||
+      nmcli -t -f IN-USE,SIGNAL,SECURITY,SSID dev wifi list
+    exit ;;
+  --wifi-connect)
+    read_input
+    [ -n "${IN[SSID]:-}" ] || { echo "缺少网络名" >&2; exit 2; }
+    if [ -n "${IN[PASSWORD]:-}" ]; then
+      out=$(nmcli -w 30 dev wifi connect "${IN[SSID]}" password "${IN[PASSWORD]}" 2>&1)
+    else
+      out=$(nmcli -w 30 dev wifi connect "${IN[SSID]}" 2>&1)
+    fi
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      case "$out" in
+        *[Ss]ecrets*|*password*|*802-1x*) echo "密码不对，或者这个网络需要其他登录方式" >&2 ;;
+        *) echo "连接失败：$(printf '%s' "$out" | tail -n1)" >&2 ;;
+      esac
+      exit 1
+    fi
+    nm-online -q -t 10 2>/dev/null && echo online=1 || echo online=
+    exit 0 ;;
+  --test-ha)
+    read_input
+    url=${IN[HASS_URL]:-} token=${IN[HASS_TOKEN]:-}
+    [ -n "$url" ] && [ -n "$token" ] || { echo "需要地址和令牌" >&2; exit 2; }
+    code=$(curl -s -o /dev/null -m 8 -w '%{http_code}' -H @- "${url%/}/api/" \
+      <<<"Authorization: Bearer $token" 2>/dev/null)
+    echo "code=${code:-000}"
+    exit 0 ;;
+  --apply)
+    read_input
+    tmp=$(mktemp)
+    {
+      echo "# 由 AgentOS 设置生成；可以手动编辑（不认识的行会保留）。"
+      for k in "${MANAGED[@]}"; do
+        [ -n "${IN[$k]:-}" ] && printf '%s=%q\n' "$k" "${IN[$k]}"
+      done
+      # Keep settings added by hand.
+      if [ -r "$ENV_FILE" ]; then
+        grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" |
+          grep -vE "^($(IFS='|'; echo "${MANAGED[*]}"))=" || true
+      fi
+    } > "$tmp"
+    install -m 0640 -o root -g agent "$tmp" "$ENV_FILE" || { rm -f "$tmp"; echo "无法写入 $ENV_FILE" >&2; exit 1; }
+    rm -f "$tmp"
+    if [ -n "${IN[PIN]:-}" ]; then
+      printf '%s\n%s\n' "${IN[PIN]}" "${IN[PIN]}" |
+        runuser -u agent -- /usr/local/bin/agentosd --home "$AGENT_HOME" --set-pin >/dev/null 2>&1 ||
+        { echo "设置已保存，但 PIN 设置失败（可以在终端运行 agentosd --set-pin）" >&2; exit 1; }
+    elif [ -n "${IN[PIN_CLEAR]:-}" ]; then
+      runuser -u agent -- /usr/local/bin/agentosd --home "$AGENT_HOME" --clear-pin >/dev/null 2>&1
+    fi
+    touch /etc/agentos/setup-done || exit 1
+    echo saved=1
+    exit 0 ;;
+  "") ;;
+  *) echo "用法：agentos-setup [--status|--wifi-scan|--wifi-connect|--test-ha|--apply]" >&2; exit 2 ;;
+esac
+
+# --- text-mode wizard ----------------------------------------------------------
 # Glass palette: the colour names below are slots in /etc/xdg/foot/foot.ini
 # (default = the translucent window, black = inset field, gray = dialog
 # panel, brightblue = accent), so the dialogs match the agentos-shell desktop.
@@ -109,7 +231,6 @@ touch /etc/agentos/setup-done
 # --- PIN for irreversible actions -------------------------------------------
 # Stored by agentosd in the agent user's data directory (never in the env
 # file). Without one, a click or "y" is enough to approve an L3 step.
-pin_set() { runuser -u agent -- test -f /home/agent/.local/share/agentos/pin.json; }
 if pin_set; then
   choice=$(W --title "PIN" --menu "删除数据、开锁、安装插件这类不可逆操作，确认时要输入 PIN。\n已经设置过 PIN。" 13 70 3 \
     keep   "保持不变" \

@@ -23,7 +23,7 @@ agentos-shell (WebKit 全屏窗口)  ⇄  Unix socket (JSON Lines)  ⇄  agentos
 ```
 
 - 界面整体画在一个 WebKit 窗口里（`crates/shell/ui/index.html`），所以毛玻璃效果不依赖合成器支持，sway 下也能用。
-- shell 本身没有任何权限。它只把意图和确认结果转发给 `agentosd`，所有操作仍然经过策略引擎并写入审计日志。界面能让 shell 做的本地动作只有一个：打开终端。
+- shell 本身没有任何权限。它只把意图和确认结果转发给 `agentosd`，所有操作仍然经过策略引擎并写入审计日志。界面能让 shell 做的本地动作只有系统菜单里固定的几项，以及设置助理的几个操作（见下文）。
 - socket 权限是 0600，只有当前用户能连接。
 
 ## 运行
@@ -94,6 +94,26 @@ agentosd → shell：
 | `voice_level` | 录音音量（0–1），约每 100 毫秒一次 |
 | `transcript` | 识别出的文字，随后作为意图交给管家 |
 | `voice_notice` | 语音相关的提示或错误（没配置、没声音、识别失败等） |
+
+## 设置助理
+
+![设置助理](images/shell-setup.jpg)
+
+第一次进入桌面（还没有 `/etc/agentos/setup-done`）时，shell 会盖上一层全屏的设置助理；以后从左上角系统菜单的「网络和 AI 设置…」再打开。一页只问一件事：网络（列出附近的 Wi‑Fi，点一下输入密码加入）→ AI 模型（Claude / OpenAI 兼容接口，带 DeepSeek、通义千问、Ollama 预设 / 离线规则）→ 语音 → Home Assistant（可当场测试连接）→ PIN → 是否安装到硬盘 → 总结。输入有问题时直接在对应的输入框下面提示；已经保存过的 API Key 和令牌不会显示，留空就保持不变。前面几步都不会写任何东西，最后一步才一次性保存，然后重启 agentosd 让它读到新设置。
+
+在浏览器里打开 `crates/shell/ui/index.html#setup`（或 `#setup-again`，模拟已经设置过）可以在演示模式下走一遍。
+
+后端是 `agentos-setup` 的几个选项，shell 通过 `sudo -n` 运行（镜像里桌面用户免密 sudo），答案以 `KEY=VALUE` 行写到 stdin。界面发来的内容先在 `crates/shell/src/setup.rs` 里检查：只接受已知字段和选项，地址必须是 http(s)，任何值都不能含控制字符（所以不可能在 env 文件里多写出一行）。
+
+| 界面 → shell | 做什么 |
+| --- | --- |
+| `{"type":"setup","op":"status"}` | 当前设置（密钥只报告有没有设置）、网络状态、是否有 PIN、是否已安装 |
+| `wifi-scan` / `wifi-connect` | 扫描附近的 Wi‑Fi（`nmcli`）、用密码加入 |
+| `test-ha` | 用地址和令牌请求 Home Assistant 的 `/api/` |
+| `apply` | 写 `/etc/agentos/agentos.env`（手动加的其他变量保留）、设置或取消 PIN、写 `setup-done` |
+| `restart` | 结束当前用户的 agentosd，`agentos-daemon` 用新设置重新启动它 |
+
+每个请求带 `id`，shell 在后台线程里执行，回一条 `{"type":"setup","id":…,"ok":…,"data":…,"error":…}`。没有图形界面的文本模式仍然运行原来的 `agentos-setup` 对话框向导。
 
 ## 还没做的
 

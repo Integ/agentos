@@ -9,8 +9,8 @@ rm -f "$XDG_RUNTIME_DIR/agentos-shell.ready"
 daemon=$!
 stop_daemon() { kill "$daemon" 2>/dev/null; pkill -x -u "$(id -u)" agentosd; }
 
-# First boot: the setup wizard opens in a window over the desktop.
-[ -f /etc/agentos/setup-done ] || /usr/local/bin/agentos-system setup &
+# First boot: agentos-shell opens its setup assistant by itself until
+# /etc/agentos/setup-done exists (the text console runs agentos-setup).
 
 # Without a GPU render node (simple VM graphics) WebKit's DMA-BUF renderer
 # shows a blank window; use shared-memory buffers instead.

@@ -30,7 +30,7 @@
 
 ## 配置
 
-首次启动的设置向导（`agentos-setup`）里可以选择云端语音。手动配置写在 `/etc/agentos/agentos.env`：
+首次启动的设置助理（文本模式下是 `agentos-setup`）里可以选择云端语音。手动配置写在 `/etc/agentos/agentos.env`：
 
 | 变量 | 作用 |
 | --- | --- |

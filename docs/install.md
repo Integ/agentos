@@ -91,7 +91,7 @@ sudo image/test/qemu-smoke.sh out/agentos-debian-x86_64.img
 | --- | --- |
 | 底层 | Debian 13 或 Ubuntu 24.04 最小系统，发行版内核和固件，NetworkManager |
 | 引导 | 发行版签名的 shim + grub（支持安全启动），根分区按 UUID 挂载 |
-| 会话 | tty1 自动登录用户 `agent` → sway → `agentos-desktop`：后台 `agentosd --listen`，前台全屏图形桌面 `agentos-shell`（见 [shell.md](shell.md)）；首次启动时设置向导以窗口形式出现在桌面上；图形界面起不来时退回文本菜单 `agentos-console` |
+| 会话 | tty1 自动登录用户 `agent` → sway → `agentos-desktop`：后台 `agentosd --listen`，前台全屏图形桌面 `agentos-shell`（见 [shell.md](shell.md)）；首次启动时桌面上会打开图形设置助理（文本模式下是 `agentos-setup` 向导）；图形界面起不来时退回文本菜单 `agentos-console` |
 | 中文 | Noto CJK 字体，fcitx5 拼音输入法，`zh_CN.UTF-8`，时区 Asia/Shanghai |
 | 插件运行时 | bubblewrap 沙箱，Python 3 |
 | AgentOS | `/usr/local/bin/agentosd`、`agentos-shell`，以及 `agentos-session`、`agentos-desktop`、`agentos-daemon`、`agentos-system`、`agentos-setup`、`agentos-install`、`agentos-update`、`agentos-console` |
