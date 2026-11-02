@@ -1,9 +1,26 @@
 #!/bin/bash
 # tty1 autologin → sway → AgentOS desktop (agentosd + agentos-shell).
 # Falls back to the plain text console if the graphical session can't start.
-if grep -qw 'agentos.safe=1' /proc/cmdline || ! command -v sway >/dev/null; then
+
+# The Linux console has no CJK glyphs: run the (Chinese) text console inside
+# fbterm, which draws with the system fonts on the framebuffer.
+text_console() {
+  if [ "${TERM:-}" = linux ] && command -v fbterm >/dev/null && [ -w /dev/fb0 ]; then
+    exec fbterm --font-names="Noto Sans Mono CJK SC" --font-size=18 -- /usr/local/bin/agentos-console
+  fi
   exec /usr/local/bin/agentos-console
+}
+
+if grep -qw 'agentos.safe=1' /proc/cmdline || ! command -v sway >/dev/null; then
+  text_console
 fi
+
+# Autologin can win the race against the GPU driver (slow USB disks, firmware
+# loading): give the display device a few seconds to appear.
+for _ in $(seq 20); do
+  ls /dev/dri/card* >/dev/null 2>&1 && break
+  sleep 0.5
+done
 
 export XDG_CURRENT_DESKTOP=sway XDG_SESSION_TYPE=wayland
 export XMODIFIERS=@im=fcitx QT_IM_MODULE=fcitx GTK_IM_MODULE=fcitx
@@ -15,7 +32,10 @@ export WLR_NO_HARDWARE_CURSORS=1
 
 log=/tmp/agentos-sway.log
 if ! sway --config /usr/share/agentos/sway.conf >"$log" 2>&1; then
-  echo "图形界面启动失败（日志：$log），改用文本模式。"
+  # Keep the reason after a reboot: journalctl -t agentos-sway
+  command -v systemd-cat >/dev/null && tail -n 40 "$log" | systemd-cat -t agentos-sway -p err
+  echo "Graphical session failed (journalctl -t agentos-sway); using text mode."
+  echo "图形界面启动失败（日志：journalctl -t agentos-sway），改用文本模式。"
   sleep 3
-  exec /usr/local/bin/agentos-console
+  text_console
 fi

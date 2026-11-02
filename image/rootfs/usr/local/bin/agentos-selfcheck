@@ -42,6 +42,14 @@ else
   console "AGENTOS-MICLED: FAIL"
 fi
 
+# Chinese text: a CJK font for the desktop and terminal, and fbterm for the
+# text-mode fallback (the bare Linux console cannot draw CJK).
+if fc-list :lang=zh family | grep -q 'Noto Sans Mono CJK SC'; then
+  console "AGENTOS-CJK: OK (text mode: $(command -v fbterm >/dev/null && echo fbterm || echo 'no fbterm'))"
+else
+  console "AGENTOS-CJK: FAIL"
+fi
+
 # Network: NetworkManager brought a connection up and DNS resolves.
 if nm-online -q -t 60 && { getent hosts archive.ubuntu.com || getent hosts deb.debian.org; } >/dev/null; then
   console "AGENTOS-NETWORK: OK"
