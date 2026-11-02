@@ -38,10 +38,6 @@ BUNDLE_ONLY=1 image/build-in-docker.sh   # out/agentos-update-x86_64.tar.gz
 
 - 真实性靠 HTTPS 和 GitHub 账号安全：`.sha256` 和更新包来自同一个 Release，能防传输损坏，防不了 Release 本身被篡改。后续计划给更新包加离线签名（minisign / ed25519），本机只信任镜像里内置的公钥。
 - 不会删除新版本里不再需要的旧文件（只覆盖和新增）。
-- v0.1.0 镜像里还没有 `agentos-update`。第一次先从 Release 下载 `agentos-update-x86_64.tar.gz` 和 `.sha256`，用包里自带的脚本安装，之后就可以在线更新了：
-
-  ```sh
-  tar -xzf agentos-update-x86_64.tar.gz usr/local/bin/agentos-update
-  sudo bash usr/local/bin/agentos-update --file agentos-update-x86_64.tar.gz
-  ```
+- **v0.1.0 不能原地升级，请重新写入 v0.2.0 镜像。** v0.1.0 镜像有一个属主错误（根文件系统沿用了 CI 的 uid 1001），`sudo` 会要密码，而 `agent` 账户根本没有密码，所以无法以 root 运行 `agentos-update`。v0.2.0 起镜像构建时会检查 `agent` 能免密 sudo，之后的版本都可以用 `agentos-update` 在线升级。v0.1.0 里值得留的数据在 `~/.local/share/agentos/`（笔记、插件）和 `/var/lib/agentos/audit.jsonl`（审计日志），重装前可以拷到 U 盘上，重装后放回同一位置。
+- 更新包只覆盖 `usr/…` 和 AgentOS 自己的 systemd 单元、udev 规则。`/etc` 下其他由镜像提供的文件（`sudoers.d`、`journald.conf.d`、`modules-load.d`、终端 `foot.ini`）在线更新不会改动，要换这些得重新写镜像。
 - 还没有 A/B 分区：内核和基础系统的更新仍是 apt 的原地升级。
