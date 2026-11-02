@@ -21,6 +21,7 @@
 #   AGENTOS_SHELL_BIN  prebuilt agentos-shell binary (skips cargo build)
 #   EXTRA_MB      free space left in the root fs, in MiB (default: 1024)
 #   COMPRESS      1 to also write <image>.xz            (default: 0)
+#   AGENTOS_RELEASE  release tag recorded in the image  (default: git describe)
 #
 # Host requirements: debootstrap, sfdisk (fdisk), mkfs.vfat (dosfstools),
 # mtools, mkfs.ext4 (e2fsprogs >= 1.47), cargo and libwebkit2gtk-4.1-dev
@@ -211,6 +212,9 @@ chmod 0440 "$ROOT/etc/sudoers.d/agentos"
 echo "$DISTRO" > "$ROOT/usr/share/agentos/distro"
 git -C "$REPO" rev-parse --short HEAD > "$ROOT/usr/share/agentos/version" 2>/dev/null \
   || echo unknown > "$ROOT/usr/share/agentos/version"
+# Release tag: agentos-update compares it with the latest GitHub release.
+echo "${AGENTOS_RELEASE:-$(git -C "$REPO" describe --tags --always 2>/dev/null || echo unknown)}" \
+  > "$ROOT/usr/share/agentos/release"
 
 echo agentos > "$ROOT/etc/hostname"
 cat > "$ROOT/etc/hosts" <<EOF

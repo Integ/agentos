@@ -6,6 +6,7 @@
 #   image/build-in-docker.sh                 # Debian 13
 #   DISTRO=ubuntu image/build-in-docker.sh   # Ubuntu 24.04
 #   COMPRESS=1 image/build-in-docker.sh      # also write .img.xz
+#   BUNDLE_ONLY=1 image/build-in-docker.sh   # only the agentos-update bundle
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DISTRO="${DISTRO:-debian}"
@@ -28,8 +29,14 @@ if [[ -z "${AGENTOSD_BIN:-}" || -z "${AGENTOS_SHELL_BIN:-}" ]]; then
   AGENTOS_SHELL_BIN=target/image/release/agentos-shell
 fi
 
+if [[ "${BUNDLE_ONLY:-0}" == 1 ]]; then
+  AGENTOSD_BIN="$REPO/${AGENTOSD_BIN#"$REPO"/}" \
+    AGENTOS_SHELL_BIN="$REPO/${AGENTOS_SHELL_BIN#"$REPO"/}" "$REPO/image/make-bundle.sh"
+  exit 0
+fi
+
 docker run --rm --privileged --platform linux/amd64 -v "$REPO:/src" -w /src \
-  -e DISTRO -e MIRROR -e EXTRA_MB -e COMPRESS -e AGENTOSD_BIN="/src/${AGENTOSD_BIN#"$REPO"/}" \
+  -e DISTRO -e MIRROR -e EXTRA_MB -e COMPRESS -e AGENTOS_RELEASE -e AGENTOSD_BIN="/src/${AGENTOSD_BIN#"$REPO"/}" \
   -e AGENTOS_SHELL_BIN="/src/${AGENTOS_SHELL_BIN#"$REPO"/}" \
   "$BASE" bash -euc '
     export DEBIAN_FRONTEND=noninteractive

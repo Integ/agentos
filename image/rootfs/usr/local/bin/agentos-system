@@ -9,6 +9,11 @@ case "${1:-}" in
     # new planner and keys (agentos-daemon restarts it).
     exec foot --app-id agentos-setup sh -c \
       'sudo /usr/local/bin/agentos-setup; pkill -x -u "$(id -u)" agentosd' ;;
+  update)
+    # Install the latest AgentOS release (agentos-update restarts agentosd;
+    # the desktop itself switches over at the next login).
+    exec foot --app-id agentos-setup sh -c \
+      'sudo /usr/local/bin/agentos-update; read -r -p "按回车关闭" _' ;;
   install)
     exec foot --app-id agentos-setup sh -c \
       'sudo /usr/local/bin/agentos-install; read -r -p "按回车关闭" _' ;;
@@ -17,6 +22,6 @@ case "${1:-}" in
   poweroff)
     exec sudo systemctl poweroff ;;
   *)
-    echo "用法：agentos-system terminal|setup|install|reboot|poweroff" >&2
+    echo "用法：agentos-system terminal|setup|update|install|reboot|poweroff" >&2
     exit 2 ;;
 esac
