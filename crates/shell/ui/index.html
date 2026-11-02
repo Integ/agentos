@@ -276,8 +276,8 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
         <label for="intent" class="sr-only">告诉管家你想做什么</label>
         <input id="intent" placeholder="告诉管家你想做什么…" autofocus>
         <div id="listening" hidden><div class="bars" id="bars" aria-hidden="true"></div><span id="listen-text">正在听… 松开发送</span></div>
-        <span class="kbd">回车发送 · 按住右 Ctrl 说话</span>
-        <button id="mic" class="round mic" type="button" aria-label="按住说话" aria-pressed="false" title="按住说话，松开发送（也可以按住右 Ctrl）"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></button>
+        <span class="kbd">回车发送 · 按住 Caps Lock 说话</span>
+        <button id="mic" class="round mic" type="button" aria-label="按住说话" aria-pressed="false" title="按住说话，松开发送（也可以按住 Caps Lock）"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></button>
         <button class="round" type="submit" aria-label="发送"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button>
       </form>
       <div id="chips">
@@ -496,7 +496,7 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
   const bars = $("#bars");
   for (let i = 0; i < BAR_COUNT; i++) bars.append(el("span"));
   const levels = new Array(BAR_COUNT).fill(0);
-  let talking = false, rightCtrl = false;
+  let talking = false, capsHeld = false;
 
   function renderVoice() {
     const v = state.voice, mic = $("#mic"), ind = $("#mic-ind"), form = $("#intent-form");
@@ -508,7 +508,7 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
     $("#spk-ind").hidden = !v.speaking;
     mic.setAttribute("aria-pressed", String(talking || v.mic === "listening"));
     mic.setAttribute("aria-disabled", String(!v.input));
-    mic.title = v.input ? `按住说话，松开发送（也可以按住右 Ctrl）· ${dest}` : "还没有配置语音识别（运行 agentos-setup）";
+    mic.title = v.input ? `按住说话，松开发送（也可以按住 Caps Lock）· ${dest}` : "还没有配置语音识别（运行 agentos-setup）";
     form.classList.toggle("listening", talking || open);
     $("#listening").hidden = !(talking || open);
     $("#listen-text").textContent = v.mic === "transcribing" ? "正在识别…" : "正在听… 松开发送";
@@ -543,14 +543,18 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
   micBtn.addEventListener("keydown", (e) => { if ((e.key === " " || e.key === "Enter") && !e.repeat) { e.preventDefault(); talkStart(); } });
   micBtn.addEventListener("keyup", (e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); talkEnd(false); } });
   micBtn.addEventListener("click", (e) => e.preventDefault());
-  // Hold right Ctrl anywhere. Pressing another key meanwhile means it was a
-  // shortcut (e.g. switching the input method), so the recording is dropped.
+  // Hold Caps Lock anywhere (every keyboard has one; the session's xkb
+  // option caps:none stops it toggling caps, and agentosd lights its LED
+  // while recording). Matched by physical key, since its keysym is void.
+  // Pressing another key meanwhile means it was a slip, so the recording is
+  // dropped.
+  const isTalkKey = (e) => e.code === "CapsLock" || e.key === "CapsLock";
   document.addEventListener("keydown", (e) => {
-    if (e.code === "ControlRight") { if (!e.repeat && !rightCtrl) { rightCtrl = true; talkStart(); } return; }
-    if (rightCtrl) { rightCtrl = false; talkEnd(true); }
+    if (isTalkKey(e)) { e.preventDefault(); if (!e.repeat && !capsHeld) { capsHeld = true; talkStart(); } return; }
+    if (capsHeld) { capsHeld = false; talkEnd(true); }
   }, true);
-  document.addEventListener("keyup", (e) => { if (e.code === "ControlRight" && rightCtrl) { rightCtrl = false; talkEnd(false); } }, true);
-  window.addEventListener("blur", () => { rightCtrl = false; talkEnd(true); });
+  document.addEventListener("keyup", (e) => { if (isTalkKey(e)) { e.preventDefault(); if (capsHeld) { capsHeld = false; talkEnd(false); } } }, true);
+  window.addEventListener("blur", () => { capsHeld = false; talkEnd(true); });
   $("#spk-ind").addEventListener("click", () => send({ type: "speech", action: "stop" }));
 
   // ---------- confirmation sheet ----------

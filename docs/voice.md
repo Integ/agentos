@@ -7,7 +7,7 @@
 麦克风和扬声器是 `agentosd` 里的两个设备：
 
 ```
-按住麦克风按钮 / 右 Ctrl
+按住麦克风按钮 / Caps Lock
   agentos-shell ──listen start──▶ agentosd ── arecord（16 kHz 单声道 PCM）
   松开          ──listen stop───▶          ── 语音识别（云端或本机）──▶ 文字意图（来源设备 mic）
                                                                          │
@@ -44,6 +44,7 @@
 | `AGENTOS_STT_CMD` | 本机识别命令，`{wav}` 会替换成临时 WAV 文件路径，从标准输出读文字 |
 | `AGENTOS_TTS_CMD` | 本机合成命令，从标准输入读文字，向标准输出写 WAV |
 | `AGENTOS_MIC_CMD` | 录音命令，需向标准输出写 16 kHz 单声道 s16le 原始 PCM。默认 `arecord -q -t raw -f S16_LE -r 16000 -c 1` |
+| `AGENTOS_MIC_LED` | 录音指示灯。默认点亮 `/sys/class/leds/*::capslock`（镜像用 udev 规则让 input 组可写）；`off` 关闭 |
 | `AGENTOS_PLAY_CMD` | 播放命令，从标准输入读音频。默认 `aplay -q -` |
 
 命令按空格拆分，不经过 shell；需要管道等复杂写法时请写成脚本。
@@ -69,10 +70,12 @@ AGENTOS_TTS_CMD=/opt/piper/piper --model /opt/piper/zh_CN-huayan-medium.onnx --o
 
 | 操作 | 方式 |
 | --- | --- |
-| 说话 | 按住意图栏右侧的麦克风按钮，或按住**右 Ctrl**；松开发送 |
-| 放弃这次录音 | 按住右 Ctrl 时按任何其他键（例如切换输入法），或把窗口切走 |
+| 说话 | 按住意图栏右侧的麦克风按钮，或按住 **Caps Lock**；松开发送。录音时 Caps Lock 指示灯亮着 |
+| 放弃这次录音 | 按住 Caps Lock 时按任何其他键，或把窗口切走 |
 | 停止朗读 | 菜单栏的“正在播报 · 停止”，或 Esc；开始说话也会打断朗读 |
 | 朗读设置 | Dock 里的“设置” → 朗读回复：语音提问时 / 总是 / 关闭 |
+
+在 AgentOS 桌面里 Caps Lock 不再切换大小写（sway 的 `xkb_options caps:none`），输入大写字母用 Shift。
 
 只朗读结果、错误和确认请求，不读计划；超过 240 字的回复只读开头，完整内容看屏幕。
 
