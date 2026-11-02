@@ -59,7 +59,7 @@ sudo agentos-install /dev/nvme0n1    # 直接指定
 - 高风险操作（比如清空笔记、安装插件）会弹出确认窗口，默认焦点在「取消」，Esc 也是取消。
 - 设置保存在 `/etc/agentos/agentos.env`（可以手动编辑），审计日志在 `/var/lib/agentos/audit.jsonl`。
 - 图形桌面起不来时会自动退回文本菜单（`agentos-console`）；也可以在开机菜单选「排障模式」，直接在文本控制台运行管家 Agent。
-- 系统更新：`sudo apt update && sudo apt full-upgrade`，内核升级后无需额外操作。
+- 更新：系统菜单里的「检查更新…」，或在终端运行 `sudo agentos-update`（AgentOS 本身）/ `sudo agentos-update --system`（再加上基础系统的 apt 升级）。详见 [update.md](update.md)。
 
 ## 自己构建镜像
 
@@ -93,7 +93,7 @@ sudo image/test/qemu-smoke.sh out/agentos-debian-x86_64.img
 | 会话 | tty1 自动登录用户 `agent` → sway → `agentos-desktop`：后台 `agentosd --listen`，前台全屏图形桌面 `agentos-shell`（见 [shell.md](shell.md)）；首次启动时设置向导以窗口形式出现在桌面上；图形界面起不来时退回文本菜单 `agentos-console` |
 | 中文 | Noto CJK 字体，fcitx5 拼音输入法，`zh_CN.UTF-8`，时区 Asia/Shanghai |
 | 插件运行时 | bubblewrap 沙箱，Python 3 |
-| AgentOS | `/usr/local/bin/agentosd`、`agentos-shell`，以及 `agentos-session`、`agentos-desktop`、`agentos-daemon`、`agentos-system`、`agentos-setup`、`agentos-install`、`agentos-console` |
+| AgentOS | `/usr/local/bin/agentosd`、`agentos-shell`，以及 `agentos-session`、`agentos-desktop`、`agentos-daemon`、`agentos-system`、`agentos-setup`、`agentos-install`、`agentos-update`、`agentos-console` |
 | 开机服务 | `agentos-growroot`（首次启动扩展分区）、`agentos-selfcheck`（用离线规划器跑一遍 agentosd，检查插件沙箱和网络） |
 
 ## 目前的限制

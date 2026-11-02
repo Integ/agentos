@@ -1,0 +1,222 @@
+#!/bin/bash
+# Update the AgentOS layer (agentosd, agentos-shell, the agentos-* scripts and
+# their systemd/udev files) from a GitHub release, with a health check before
+# anything is replaced and one-step rollback.
+#
+#   sudo agentos-update              # install the latest release
+#   agentos-update --check           # only report whether one is available
+#   sudo agentos-update --to v0.2.0  # install a specific release
+#   sudo agentos-update --file agentos-update-x86_64.tar.gz   # offline
+#   sudo agentos-update --rollback   # put the previous version back
+#   sudo agentos-update --system     # also apt full-upgrade the base system
+#
+# Only files under usr/, etc/systemd/system/agentos-* and
+# etc/udev/rules.d/*agentos* are accepted from a bundle. User settings
+# (/etc/agentos, the data directory) are never touched.
+#
+# Environment (mostly for tests):
+#   AGENTOS_UPDATE_REPO  owner/name on GitHub        (default Integ/agentos)
+#   AGENTOS_UPDATE_API   GitHub API base URL         (default https://api.github.com)
+#   AGENTOS_UPDATE_ROOT  install root                (default /)
+set -euo pipefail
+
+REPO="${AGENTOS_UPDATE_REPO:-Integ/agentos}"
+API="${AGENTOS_UPDATE_API:-https://api.github.com}"
+ROOT="${AGENTOS_UPDATE_ROOT:-/}"
+ROOT="${ROOT%/}"
+ASSET=agentos-update-x86_64.tar.gz
+STATE="$ROOT/var/lib/agentos-update"
+RELEASE_FILE="$ROOT/usr/share/agentos/release"
+
+die() { echo "agentos-update: $*" >&2; exit 1; }
+say() { echo "==> $*"; }
+
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+mode=install target="" file="" system=0 force=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check) mode=check ;;
+    --rollback) mode=rollback ;;
+    --to) target="${2:?--to 需要版本号}"; shift ;;
+    --file) file="${2:?--file 需要文件路径}"; shift ;;
+    --system) system=1 ;;
+    --force) force=1 ;;
+    -h|--help) usage 0 ;;
+    *) echo "未知参数：$1" >&2; usage 2 ;;
+  esac
+  shift
+done
+
+current=$(cat "$RELEASE_FILE" 2>/dev/null || echo unknown)
+
+need_root() {
+  if [ -z "$ROOT" ] && [ "$(id -u)" -ne 0 ]; then
+    die "需要 root 权限，请用 sudo 运行"
+  fi
+}
+
+# Print "tag<TAB>bundle-url<TAB>sha256-url" for the requested release.
+release_info() {
+  local url
+  if [ -n "$target" ]; then
+    url="$API/repos/$REPO/releases/tags/$target"
+  else
+    url="$API/repos/$REPO/releases/latest"
+  fi
+  curl -fsSL --retry 3 --max-time 30 -H 'Accept: application/vnd.github+json' "$url" |
+    python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assets = {a["name"]: a["browser_download_url"] for a in r.get("assets", [])}
+name = sys.argv[1]
+if name not in assets or name + ".sha256" not in assets:
+    sys.exit("release %s has no %s" % (r.get("tag_name"), name))
+print(r["tag_name"], assets[name], assets[name + ".sha256"], sep="\t")
+' "$ASSET"
+}
+
+# Services that pick up new files: systemd units, udev rules, the daemon
+# (agentos-daemon restarts it within a second). The shell needs a new session.
+reload() {
+  [ -z "$ROOT" ] || return 0
+  systemctl daemon-reload 2>/dev/null || true
+  udevadm control --reload 2>/dev/null || true
+  pkill -x agentosd 2>/dev/null || true
+}
+
+# Accept only the paths AgentOS owns; reject links, devices and the like.
+check_tree() {
+  local dir="$1" bad
+  bad=$(cd "$dir" && find . -mindepth 1 \( ! -type f ! -type d \) -print -quit)
+  [ -z "$bad" ] || die "更新包里有不允许的文件类型：$bad"
+  bad=$(cd "$dir" && find . -type f | sed 's|^\./||' | grep -Ev \
+    '^(usr/.+|etc/systemd/system/agentos-[^/]+|etc/udev/rules\.d/[^/]*agentos[^/]*)$' | head -1 || true)
+  [ -z "$bad" ] || die "更新包里有不允许的路径：$bad"
+  [ -x "$dir/usr/local/bin/agentosd" ] || die "更新包里没有 agentosd"
+  [ -s "$dir/usr/share/agentos/release" ] || die "更新包里没有版本号"
+}
+
+# The new agentosd must start and answer with the offline rule planner
+# before it replaces the running one.
+health_check() {
+  local dir="$1" tmp out
+  tmp=$(mktemp -d)
+  out=$(printf '记一下 更新自检\n看看笔记\n' |
+    timeout 60 "$dir/usr/local/bin/agentosd" --planner rule --home "$tmp/home" \
+      --audit "$tmp/audit.jsonl" 2>&1) || true
+  rm -rf "$tmp"
+  grep -q '更新自检' <<<"$out" || { printf '%s\n' "$out" | tail -20 >&2; die "新版本自检失败，未做任何改动"; }
+}
+
+# Copy every file of $1 over $ROOT, each one atomically (write next to the
+# target, then rename), so a running binary is never half-written.
+install_tree() {
+  local dir="$1" f dest
+  (cd "$dir" && find . -type f | sed 's|^\./||') | while read -r f; do
+    dest="$ROOT/$f"
+    mkdir -p "$(dirname "$dest")"
+    cp -p "$dir/$f" "$dest.agentos-new"
+    mv -f "$dest.agentos-new" "$dest"
+  done
+}
+
+do_rollback() {
+  need_root
+  local back="$STATE/rollback"
+  [ -d "$back/files" ] || die "没有可回滚的版本"
+  say "回滚到 $(cat "$back/release" 2>/dev/null || echo unknown)"
+  install_tree "$back/files"
+  if [ -s "$back/new-files" ]; then
+    while read -r f; do rm -f "$ROOT/$f"; done <"$back/new-files"
+  fi
+  rm -rf "$back"
+  reload
+  say "已回滚。重新登录（或重启）后桌面也会用回旧版本。"
+}
+
+system_upgrade() {
+  [ -z "$ROOT" ] || { say "跳过系统升级（AGENTOS_UPDATE_ROOT 不是 /）"; return 0; }
+  say "升级基础系统（apt）"
+  DEBIAN_FRONTEND=noninteractive apt-get update -q
+  DEBIAN_FRONTEND=noninteractive apt-get -y -q \
+    -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold full-upgrade
+}
+
+if [ "$mode" = rollback ]; then
+  do_rollback
+  exit 0
+fi
+
+if [ "$mode" = check ]; then
+  info=$(release_info) || die "查不到发布信息（网络或 GitHub 不可用）"
+  latest=${info%%$'\t'*}
+  if [ "$latest" = "$current" ]; then
+    echo "已是最新版本：$current"
+  else
+    echo "有新版本：$latest（当前 $current）"
+    echo "安装：sudo agentos-update"
+  fi
+  exit 0
+fi
+
+need_root
+mkdir -p "$STATE"
+chmod 0700 "$STATE"
+work=$(mktemp -d "$STATE/work.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+
+if [ -n "$file" ]; then
+  [ -r "$file" ] || die "读不到 $file"
+  [ -r "$file.sha256" ] || die "缺少校验文件 $file.sha256"
+  cp "$file" "$work/$ASSET"
+  cp "$file.sha256" "$work/$ASSET.sha256"
+else
+  info=$(release_info) || die "查不到发布信息（网络或 GitHub 不可用）"
+  IFS=$'\t' read -r latest bundle_url sum_url <<<"$info"
+  if [ "$latest" = "$current" ] && [ "$force" -eq 0 ]; then
+    say "AgentOS 已是最新版本：$current"
+    [ "$system" -eq 1 ] && system_upgrade
+    exit 0
+  fi
+  say "下载 $latest"
+  curl -fsSL --retry 3 --max-time 600 -o "$work/$ASSET" "$bundle_url"
+  curl -fsSL --retry 3 --max-time 60 -o "$work/$ASSET.sha256" "$sum_url"
+fi
+
+want=$(awk '{print $1; exit}' "$work/$ASSET.sha256")
+got=$(sha256sum "$work/$ASSET" | awk '{print $1}')
+[ -n "$want" ] && [ "$want" = "$got" ] || die "校验失败（sha256 不匹配），未做任何改动"
+
+mkdir "$work/new"
+tar --no-same-owner --no-same-permissions -xzf "$work/$ASSET" -C "$work/new"
+# Keep the executable bits from the bundle, but nothing setuid.
+chmod -R u+rwX,go+rX,go-w,ug-s "$work/new"
+check_tree "$work/new"
+new=$(cat "$work/new/usr/share/agentos/release")
+say "自检新版本 $new"
+health_check "$work/new"
+
+# Back up what is about to be replaced, then swap the files in.
+back="$work/rollback"
+mkdir -p "$back/files"
+: >"$back/new-files"
+(cd "$work/new" && find . -type f | sed 's|^\./||') | while read -r f; do
+  if [ -e "$ROOT/$f" ]; then
+    mkdir -p "$back/files/$(dirname "$f")"
+    cp -p "$ROOT/$f" "$back/files/$f"
+  else
+    echo "$f" >>"$back/new-files"
+  fi
+done
+echo "$current" >"$back/release"
+rm -rf "$STATE/rollback"
+mv "$back" "$STATE/rollback"
+
+say "安装 $new"
+install_tree "$work/new"
+reload
+say "已更新到 $new（之前是 $current）。重新登录（或重启）后桌面也会用上新版本；有问题可以 sudo agentos-update --rollback。"
+
+[ "$system" -eq 1 ] && system_upgrade
+exit 0

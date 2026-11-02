@@ -23,3 +23,5 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all
+      # agentos-update against a fake release API (uses target/debug/agentosd).
+      - run: image/test/update-test.sh

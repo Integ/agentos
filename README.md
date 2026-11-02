@@ -19,6 +19,8 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 下载镜像写进 U 盘，从 U 盘启动即可使用，首次设置里可以一键装到硬盘（UEFI，支持安全启动）。详见 [docs/install.md](docs/install.md)。
 
+升级已经装好的机器：`sudo agentos-update`（从 GitHub Release 下载更新包，先自检再替换，可 `--rollback`）。详见 [docs/update.md](docs/update.md)。
+
 ## 仓库结构
 
 ```

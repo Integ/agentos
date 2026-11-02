@@ -36,6 +36,7 @@ jobs:
       - name: Build image
         env:
           DISTRO: ${{ matrix.distro }}
+          AGENTOS_RELEASE: ${{ github.event.release.tag_name }}
           COMPRESS: "1"
           # archive.ubuntu.com is slow from GitHub's runners (~1.4 MB/s);
           # the in-region Azure mirror is the one the runners themselves use.
@@ -86,3 +87,42 @@ jobs:
           gh release upload "$TAG" --clobber --repo "$GITHUB_REPOSITORY" \
             out/agentos-${{ matrix.distro }}-x86_64.img.xz \
             out/agentos-${{ matrix.distro }}-x86_64.img.xz.sha256
+
+  # The update bundle `agentos-update` installs on existing machines. Same
+  # binaries for both bases (built on Debian 12, like the images).
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git describe
+
+      - name: Build update bundle
+        env:
+          BUNDLE_ONLY: "1"
+          AGENTOS_RELEASE: ${{ github.event.release.tag_name }}
+        run: image/build-in-docker.sh
+
+      - name: Test agentos-update against the bundle
+        run: image/test/update-test.sh out/agentos-update-x86_64.tar.gz
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentos-update-x86_64
+          path: |
+            out/agentos-update-x86_64.tar.gz
+            out/agentos-update-x86_64.tar.gz.sha256
+          compression-level: 0
+          retention-days: 14
+
+      - name: Attach to release
+        if: github.event.release.tag_name != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$TAG" --clobber --repo "$GITHUB_REPOSITORY" \
+            out/agentos-update-x86_64.tar.gz \
+            out/agentos-update-x86_64.tar.gz.sha256

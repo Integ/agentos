@@ -84,7 +84,9 @@ fn daemon_loop(path: PathBuf, conn: Conn, proxy: EventLoopProxy<Value>) {
 
 /// System actions the UI may ask for, run by the `agentos-system` helper that
 /// the AgentOS image installs.
-const SYSTEM_ACTIONS: [&str; 5] = ["terminal", "setup", "install", "reboot", "poweroff"];
+const SYSTEM_ACTIONS: [&str; 6] = [
+    "terminal", "setup", "update", "install", "reboot", "poweroff",
+];
 
 /// `AGENTOS_SYSTEM`, else `/usr/local/bin/agentos-system` if it exists.
 fn system_helper() -> Option<PathBuf> {
