@@ -356,6 +356,12 @@ impl Capability for PluginCapability {
         &self.spec
     }
 
+    /// A plugin that can reach the network (or runs unsandboxed and so can
+    /// reach anything) may return content an attacker wrote.
+    fn untrusted_output(&self) -> bool {
+        self.manifest.permissions.network || self.sandbox == SandboxMode::None
+    }
+
     async fn invoke(&self, args: Value) -> Result<Value, CapabilityError> {
         if self.manifest.permissions.storage {
             std::fs::create_dir_all(&self.data_dir)

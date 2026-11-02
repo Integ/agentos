@@ -4,7 +4,8 @@
 //! protocol (vLLM, Ollama, LM Studio, DeepSeek, Qwen/DashScope, Moonshot, ...).
 //! As with the Claude planner, every capability is offered as a function tool;
 //! the returned `tool_calls` become plan steps and still go through the policy
-//! engine before anything runs.
+//! engine before anything runs. Earlier rounds are replayed as assistant
+//! `tool_calls` followed by `tool` messages.
 
 use std::time::Duration;
 
@@ -12,8 +13,10 @@ use agentos_core::{CapabilitySpec, Intent};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::llm::TextModel;
-use crate::planner::{capability_name, tool_name, Plan, Planner, Step, SYSTEM_PROMPT};
+use crate::llm::{send_with_retry, Retry, TextModel};
+use crate::planner::{
+    capability_name, tool_name, Conversation, Plan, Planner, Step, SYSTEM_PROMPT,
+};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -46,7 +49,20 @@ impl OpenAiConfig {
 }
 
 pub fn build_request(cfg: &OpenAiConfig, intent: &Intent, available: &[CapabilitySpec]) -> Value {
-    let tools: Vec<Value> = available
+    build_turn_request(
+        cfg,
+        &Conversation {
+            system: SYSTEM_PROMPT,
+            intent,
+            history: &[],
+            available,
+        },
+    )
+}
+
+pub fn build_turn_request(cfg: &OpenAiConfig, conv: &Conversation<'_>) -> Value {
+    let tools: Vec<Value> = conv
+        .available
         .iter()
         .map(|s| {
             json!({
@@ -59,17 +75,44 @@ pub fn build_request(cfg: &OpenAiConfig, intent: &Intent, available: &[Capabilit
             })
         })
         .collect();
-    let mut user = intent.text.clone();
-    if let Some(speaker) = &intent.speaker {
+    let mut user = conv.intent.text.clone();
+    if let Some(speaker) = &conv.intent.speaker {
         user = format!("[{speaker}] {user}");
     }
-    let mut body = json!({
-        "model": cfg.model,
-        "messages": [
-            { "role": "system", "content": SYSTEM_PROMPT },
-            { "role": "user", "content": user },
-        ],
-    });
+    let mut messages = vec![
+        json!({ "role": "system", "content": conv.system }),
+        json!({ "role": "user", "content": user }),
+    ];
+    for round in conv.history {
+        let calls: Vec<Value> = round
+            .calls
+            .iter()
+            .map(|c| {
+                json!({
+                    "id": c.id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name(&c.capability),
+                        "arguments": c.args.to_string(),
+                    }
+                })
+            })
+            .collect();
+        messages.push(json!({
+            "role": "assistant",
+            "content": round.text,
+            "tool_calls": calls,
+        }));
+        for r in &round.results {
+            let content = if r.ok {
+                r.content.clone()
+            } else {
+                format!("错误：{}", r.content)
+            };
+            messages.push(json!({ "role": "tool", "tool_call_id": r.id, "content": content }));
+        }
+    }
+    let mut body = json!({ "model": cfg.model, "messages": messages });
     // Some servers reject an empty tool list.
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools);
@@ -105,6 +148,11 @@ pub fn parse_response(body: &Value) -> Plan {
         };
         match args {
             Ok(args) => steps.push(Step {
+                id: call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
                 capability: capability_name(name),
                 args,
             }),
@@ -142,6 +190,7 @@ pub fn parse_response(body: &Value) -> Plan {
 pub struct OpenAiPlanner {
     cfg: OpenAiConfig,
     http: reqwest::Client,
+    retry: Retry,
 }
 
 impl OpenAiPlanner {
@@ -149,12 +198,22 @@ impl OpenAiPlanner {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(600))
             .build()?;
-        Ok(Self { cfg, http })
+        Ok(Self::with_client(cfg, http))
     }
 
     /// Use a caller-built HTTP client (custom proxy, TLS or timeout settings).
     pub fn with_client(cfg: OpenAiConfig, http: reqwest::Client) -> Self {
-        Self { cfg, http }
+        Self {
+            cfg,
+            http,
+            retry: Retry::default(),
+        }
+    }
+
+    /// How rate limits and overloaded or unreachable servers are retried.
+    pub fn with_retry(mut self, retry: Retry) -> Self {
+        self.retry = retry;
+        self
     }
 
     pub fn model(&self) -> &str {
@@ -170,14 +229,15 @@ impl OpenAiPlanner {
             "{}/chat/completions",
             self.cfg.base_url.trim_end_matches('/')
         );
-        let mut req = self.http.post(url).json(body);
-        if let Some(key) = &self.cfg.api_key {
-            req = req.bearer_auth(key);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| format!("无法连接 {}：{e}", self.cfg.base_url))?;
+        let resp = send_with_retry(self.retry, || {
+            let req = self.http.post(&url).json(body);
+            match &self.cfg.api_key {
+                Some(key) => req.bearer_auth(key),
+                None => req,
+            }
+        })
+        .await
+        .map_err(|e| format!("无法连接 {}：{e}", self.cfg.base_url))?;
         let status = resp.status();
         let value: Value = resp
             .json()
@@ -222,7 +282,17 @@ impl TextModel for OpenAiPlanner {
 #[async_trait]
 impl Planner for OpenAiPlanner {
     async fn plan(&self, intent: &Intent, available: &[CapabilitySpec]) -> Plan {
-        let body = build_request(&self.cfg, intent, available);
+        self.plan_turn(&Conversation {
+            system: SYSTEM_PROMPT,
+            intent,
+            history: &[],
+            available,
+        })
+        .await
+    }
+
+    async fn plan_turn(&self, conv: &Conversation<'_>) -> Plan {
+        let body = build_turn_request(&self.cfg, conv);
         match self.call(&body).await {
             Ok(resp) => parse_response(&resp),
             Err(e) => Plan {
@@ -281,6 +351,44 @@ mod tests {
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "notes__append");
         assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn history_is_replayed_as_tool_calls_and_tool_messages() {
+        use crate::planner::{Round, ToolResult};
+        let i = intent("记一下 x");
+        let history = vec![Round {
+            text: None,
+            calls: vec![Step {
+                id: "c1".into(),
+                capability: CapabilityName::new("notes.append"),
+                args: json!({"text": "x"}),
+            }],
+            results: vec![ToolResult {
+                id: "c1".into(),
+                ok: true,
+                content: "{\"message\":\"ok\"}".into(),
+            }],
+        }];
+        let body = build_turn_request(
+            &cfg("x", None),
+            &Conversation {
+                system: "sys",
+                intent: &i,
+                history: &history,
+                available: &specs(),
+            },
+        );
+        let m = &body["messages"];
+        assert_eq!(m[0]["content"], "sys");
+        assert_eq!(m[2]["role"], "assistant");
+        assert_eq!(m[2]["tool_calls"][0]["id"], "c1");
+        assert_eq!(
+            m[2]["tool_calls"][0]["function"]["arguments"],
+            "{\"text\":\"x\"}"
+        );
+        assert_eq!(m[3]["role"], "tool");
+        assert_eq!(m[3]["tool_call_id"], "c1");
     }
 
     #[test]

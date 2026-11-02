@@ -10,6 +10,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 - 设计草案：[AgentOS 架构设计草案](https://claude.ai/artifact/RzRDjHkBbJVbnyFDRSZ4BN)
 - 架构概要与 P0 进度：[docs/architecture.md](docs/architecture.md)
+- 管家调度子 Agent：[docs/agents.md](docs/agents.md)
 - 自我进化：[docs/self-evolution.md](docs/self-evolution.md)
 - 图形界面：[docs/shell.md](docs/shell.md)
 - 语音输入与朗读：[docs/voice.md](docs/voice.md)
@@ -102,7 +103,18 @@ y                             # 确认安装（L3）
 
 插件在 bubblewrap 沙箱中运行（`apt install bubblewrap python3`），存放在 `~/.local/share/agentos/evolve`（`--home` 或 `AGENTOS_HOME` 可改）。详见 [docs/self-evolution.md](docs/self-evolution.md)。
 
-审计日志默认写到 `agentos-audit.jsonl`，可用 `--audit <路径>` 或环境变量 `AGENTOS_AUDIT` 指定。
+数据目录默认是 `~/.local/share/agentos`（`--home` 或 `AGENTOS_HOME` 可改），笔记保存在其中的 `notes.json`，重启后还在。审计日志默认写到数据目录里的 `audit.jsonl`，可用 `--audit <路径>` 或环境变量 `AGENTOS_AUDIT` 指定。
+
+### 不可逆操作的 PIN
+
+L3 操作（删除数据、安装插件等）默认只要点“确认执行”。设置 PIN 后，确认框会要求输入 PIN，键盘回复 y 或语音“确认”都不能单独通过：
+
+```bash
+agentosd --set-pin      # 输入两次 4–12 位数字
+agentosd --clear-pin    # 取消
+```
+
+PIN 以加盐迭代哈希存在数据目录的 `pin.json`（0600），连续输错 5 次锁定 5 分钟，每次核对都记入审计日志（不含 PIN 本身）。控制台模式下先输入 `pin 你的PIN` 再回复 y。它能挡住提示注入、旁人和随手乱试，但挡不住已经能以桌面用户身份运行代码的人。
 
 ## 开发
 

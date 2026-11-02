@@ -63,6 +63,12 @@ impl PolicyEngine {
         }
     }
 
+    /// Replace everything `agent` holds with exactly `caps`.
+    pub fn set_grants(&mut self, agent: &AgentId, caps: impl IntoIterator<Item = CapabilityName>) {
+        self.grants
+            .insert(agent.clone(), caps.into_iter().collect());
+    }
+
     pub fn preapprove(&mut self, agent: &AgentId, cap: &CapabilityName) {
         self.preapproved
             .entry(agent.clone())
@@ -191,6 +197,18 @@ mod tests {
             e.check(&a, &l3, CallContext::default()),
             Decision::NeedsConfirmation { .. }
         ));
+    }
+
+    #[test]
+    fn set_grants_replaces_previous_grants() {
+        let mut e = PolicyEngine::new();
+        let a = AgentId::new("sub");
+        let l0 = spec("l0", RiskLevel::ReadOnly);
+        let other = spec("other", RiskLevel::ReadOnly);
+        e.grant(&a, &other.name);
+        e.set_grants(&a, [l0.name.clone()]);
+        assert_eq!(e.check(&a, &l0, CallContext::default()), Decision::Allow);
+        assert!(!e.is_granted(&a, &other.name));
     }
 
     #[test]

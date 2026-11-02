@@ -8,7 +8,7 @@ console() {
 }
 
 out=$(printf '记一下 开机自检\n看看笔记\n' |
-  timeout 60 /usr/local/bin/agentosd --planner rule --audit /run/agentos-selfcheck.jsonl 2>&1)
+  timeout 60 /usr/local/bin/agentosd --planner rule --home /run/agentos-selfcheck --audit /run/agentos-selfcheck.jsonl 2>&1)
 if grep -q '开机自检' <<<"$out"; then
   console "AGENTOS-SELFCHECK: OK ($(cat /usr/share/agentos/distro 2>/dev/null) $(cat /usr/share/agentos/version 2>/dev/null), root $(df -h --output=size / | tail -1 | tr -d " "))"
 else

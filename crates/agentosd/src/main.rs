@@ -7,14 +7,18 @@
 use std::sync::Arc;
 
 use agentos_audit::AuditLog;
-use agentos_core::{AgentId, Sensor};
+use agentos_core::{AgentId, PerceptKind, Sensor};
 use agentos_policy::PolicyEngine;
+use agentosd::agents::AgentDirectory;
+use agentosd::blackboard::{self, Blackboard};
 use agentosd::builtin;
 use agentosd::butler::{grant_manifest, Butler};
 use agentosd::claude_planner::{ClaudeConfig, ClaudePlanner};
 use agentosd::devices::{ConsoleOutput, LineSensor};
 use agentosd::evolve::{self, LlmGenerator, NoGenerator, PluginGenerator};
 use agentosd::expression::ExpressionHub;
+use agentosd::identity::{self, PinCheck, PinVault};
+use agentosd::judge::LlmJudge;
 use agentosd::llm::TextModel;
 use agentosd::openai_planner::{OpenAiConfig, OpenAiPlanner};
 use agentosd::perception::PerceptionHub;
@@ -23,6 +27,7 @@ use agentosd::plugin::SandboxMode;
 use agentosd::plugin_store::PluginManager;
 use agentosd::registry::CapabilityRegistry;
 use agentosd::shell_api::{self, ShellServer, SocketOutput};
+use agentosd::tasks::TaskStore;
 use agentosd::voice::{SpeechOutput, Voice, VoiceConfig, MIC_DEVICE};
 use tokio::sync::mpsc;
 
@@ -36,13 +41,16 @@ fn arg(name: &str) -> Option<String> {
     None
 }
 
-fn audit_path() -> String {
+/// `--audit`, `AGENTOS_AUDIT`, or `audit.jsonl` in the data directory.
+fn audit_path(home: &std::path::Path) -> std::path::PathBuf {
     arg("--audit")
         .or_else(|| std::env::var("AGENTOS_AUDIT").ok())
-        .unwrap_or_else(|| "agentos-audit.jsonl".into())
+        .filter(|p| !p.is_empty())
+        .map(Into::into)
+        .unwrap_or_else(|| home.join("audit.jsonl"))
 }
 
-/// Where AgentOS keeps its state (plugins, ...): `--home`, `AGENTOS_HOME`,
+/// Where AgentOS keeps its state (notes, plugins, audit log, ...): `--home`, `AGENTOS_HOME`,
 /// `$XDG_DATA_HOME/agentos`, or `~/.local/share/agentos`.
 fn home_dir() -> std::path::PathBuf {
     if let Some(h) = arg("--home").or_else(|| std::env::var("AGENTOS_HOME").ok()) {
@@ -147,23 +155,86 @@ fn make_planner() -> Models {
     }
 }
 
+/// `agentosd --set-pin`: read a new PIN (twice) from stdin and store it.
+/// `agentosd --clear-pin`: remove it, so L3 steps need only a confirmation.
+fn pin_command(home: &std::path::Path) -> Option<std::io::Result<()>> {
+    let all: Vec<String> = std::env::args().collect();
+    let path = home.join("pin.json");
+    if all.iter().any(|a| a == "--clear-pin") {
+        return Some(match std::fs::remove_file(&path) {
+            Ok(()) => {
+                println!("已删除 PIN（{}）。", path.display());
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                println!("没有设置过 PIN。");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        });
+    }
+    if !all.iter().any(|a| a == "--set-pin") {
+        return None;
+    }
+    Some((|| {
+        let mut lines = std::io::stdin().lines();
+        let mut ask = |prompt: &str| -> std::io::Result<String> {
+            eprint!("{prompt}");
+            Ok(lines
+                .next()
+                .transpose()?
+                .unwrap_or_default()
+                .trim()
+                .to_string())
+        };
+        let first = ask("新 PIN（4 到 12 位数字）：")?;
+        if !identity::valid_pin(&first) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "PIN 必须是 4 到 12 位数字",
+            ));
+        }
+        if ask("再输入一次：")? != first {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "两次输入的 PIN 不一致",
+            ));
+        }
+        PinVault::open(&path)?.set(&first)?;
+        println!(
+            "PIN 已设置（{}）。不可逆的操作现在需要输入它。",
+            path.display()
+        );
+        Ok(())
+    })())
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let audit = Arc::new(AuditLog::open(audit_path())?);
+    let home = home_dir();
+    std::fs::create_dir_all(&home)?;
+    if let Some(r) = pin_command(&home) {
+        return r;
+    }
+    let audit = Arc::new(AuditLog::open(audit_path(&home))?);
+    let pins = Arc::new(PinVault::open(home.join("pin.json"))?.with_audit(audit.clone()));
 
     let (planner, text_model, planner_label) = make_planner();
 
     let mut registry = CapabilityRegistry::new();
-    builtin::register_all(&mut registry);
+    builtin::register_with_notes_file(&mut registry, home.join("notes.json"))?;
 
-    let home = home_dir();
     let sandbox = SandboxMode::detect();
     let plugins = Arc::new(PluginManager::open(home.join("evolve"), sandbox)?);
-    let generator: Arc<dyn PluginGenerator> = match text_model.or_else(fallback_text_model) {
+    let text_model = text_model.or_else(fallback_text_model);
+    let generator: Arc<dyn PluginGenerator> = match text_model.clone() {
         Some(m) => Arc::new(LlmGenerator::new(m)),
         None => Arc::new(NoGenerator),
     };
     evolve::register_all(&mut registry, plugins.clone(), generator);
+
+    let board = Blackboard::open(home.join("blackboard.json"))?;
+    blackboard::register_all(&mut registry, board.clone());
 
     let butler_id = AgentId::new("butler");
     let mut policy = PolicyEngine::new();
@@ -190,9 +261,35 @@ async fn main() -> std::io::Result<()> {
         expr.add_output(Arc::new(SpeechOutput::new(v.clone())));
     }
 
-    let mut butler = Butler::new(butler_id, registry, policy, planner, audit.clone(), expr)
+    let mut agents = AgentDirectory::with_builtin();
+    for note in agents.load_dir(&home.join("agents")) {
+        eprintln!("{note}");
+    }
+    let agent_names: Vec<String> = agents
+        .all()
+        .map(|m| format!("{}（@{}）", m.name, m.id))
+        .collect();
+
+    let butler = Butler::new(butler_id, registry, policy, planner, audit.clone(), expr)
         .with_plugins(plugins.clone())
-        .with_events(bus.clone());
+        .with_events(bus.clone())
+        .with_agents(agents)
+        .with_blackboard(board)
+        .with_pin_vault(pins.clone());
+    // AGENTOS_JUDGE=1: a model reviews allowed L1+ steps before they run.
+    let judge_on = std::env::var("AGENTOS_JUDGE").is_ok_and(|v| v == "1" || v == "on");
+    let butler = match (&text_model, judge_on) {
+        (Some(m), true) => butler.with_judge(Arc::new(LlmJudge::new(m.clone()))),
+        (None, true) => {
+            eprintln!("AGENTOS_JUDGE 需要配置一个模型，裁判未启用");
+            butler
+        }
+        _ => butler,
+    };
+    let (mut butler, task_notes) = butler.with_task_store(TaskStore::open(home.join("tasks"))?);
+    for n in task_notes {
+        eprintln!("{n}");
+    }
 
     if let Some(path) = socket_path() {
         let listener = shell_api::bind(&path)?;
@@ -208,12 +305,29 @@ async fn main() -> std::io::Result<()> {
             audit: audit.path().to_path_buf(),
             percepts: tx.clone(),
             voice: voice.clone(),
+            pins: Some(pins.clone()),
         };
         tokio::spawn(server.serve(listener));
     }
     let mut sensor = LineSensor::stdin();
+    let console_pins = pins.clone();
     tokio::spawn(async move {
         while let Some(p) = sensor.next().await {
+            // "pin 1234" on the console vouches for the next L3 answer. It is
+            // handled here so the PIN never becomes an intent (or audit text).
+            if let PerceptKind::Text { text, .. } = &p.kind {
+                if let Some(pin) = text.trim().strip_prefix("pin ") {
+                    let check = console_pins.verify_for(None, pin.trim());
+                    println!(
+                        "{}",
+                        match check {
+                            PinCheck::Ok => "PIN 正确，现在回复 y 确认（1 分钟内有效）。".into(),
+                            other => other.message(),
+                        }
+                    );
+                    continue;
+                }
+            }
             if tx.send(p).await.is_err() {
                 break;
             }
@@ -229,6 +343,12 @@ async fn main() -> std::io::Result<()> {
         plugins.root().display(),
         sandbox.label()
     );
+    println!(
+        "可调度的子 Agent：{}；自定义 Agent 放在 {}。任务和黑板保存在 {}，重启后接着做。",
+        agent_names.join("、"),
+        home.join("agents").display(),
+        home.display()
+    );
     if let Some(v) = &voice {
         let d = v.describe();
         let label = |k: &str| d[k].as_str().unwrap_or("未配置").to_string();
@@ -243,6 +363,13 @@ async fn main() -> std::io::Result<()> {
             }
         );
     }
+    if butler.pending_resume() > 0 {
+        println!(
+            "有 {} 个重启前未完成的任务，继续执行。",
+            butler.pending_resume()
+        );
+    }
+    butler.resume().await;
     let mut perception = PerceptionHub::new();
     while let Some(p) = rx.recv().await {
         if let Some(intent) = perception.to_intent(p) {
