@@ -17,6 +17,7 @@ use agentosd::claude_planner::{ClaudeConfig, ClaudePlanner};
 use agentosd::devices::{ConsoleOutput, LineSensor};
 use agentosd::evolve::{self, LlmGenerator, NoGenerator, PluginGenerator};
 use agentosd::expression::ExpressionHub;
+use agentosd::homeassistant::{self, Hass, HassConfig};
 use agentosd::identity::{self, PinCheck, PinVault};
 use agentosd::judge::LlmJudge;
 use agentosd::llm::TextModel;
@@ -235,6 +236,19 @@ async fn main() -> std::io::Result<()> {
 
     let board = Blackboard::open(home.join("blackboard.json"))?;
     blackboard::register_all(&mut registry, board.clone());
+    // HASS_URL + HASS_TOKEN: the smart home, through Home Assistant.
+    let home_label = match HassConfig::from_env().map(Hass::new) {
+        Some(Ok(h)) => {
+            let label = format!("Home Assistant（{}）", h.base_url());
+            homeassistant::register_all(&mut registry, Arc::new(h));
+            Some(label)
+        }
+        Some(Err(e)) => {
+            eprintln!("无法创建 Home Assistant 客户端：{e}");
+            None
+        }
+        None => None,
+    };
 
     let butler_id = AgentId::new("butler");
     let mut policy = PolicyEngine::new();
@@ -362,6 +376,10 @@ async fn main() -> std::io::Result<()> {
                 _ => "语音提问时朗读回复",
             }
         );
+    }
+    match &home_label {
+        Some(l) => println!("智能家居：{l}。"),
+        None => println!("智能家居：未配置（设置 HASS_URL 和 HASS_TOKEN 接入 Home Assistant）。"),
     }
     if butler.pending_resume() > 0 {
         println!(

@@ -193,6 +193,12 @@ impl Planner for RulePlanner {
         if has(&["笔记", "notes"]) {
             return step("notes.list", json!({}));
         }
+        let home = CapabilityName::new("home.list");
+        if has(&["智能家居", "家里的设备", "家里设备", "smart home"])
+            && available.iter().any(|s| s.name == home)
+        {
+            return step("home.list", json!({}));
+        }
         if has(&["几点", "时间", "time"]) {
             return step("clock.now", json!({}));
         }
