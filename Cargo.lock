@@ -48,6 +48,7 @@ dependencies = [
  "agentos-policy",
  "async-trait",
  "chrono",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

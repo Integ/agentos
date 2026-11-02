@@ -28,6 +28,50 @@ const PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_OUTPUT: u64 = 64 * 1024;
 
+/// Per-process resource limits applied to every plugin run (and inherited
+/// by anything it spawns). They are set in the child between fork and exec,
+/// so they hold in both sandbox modes.
+pub mod limits {
+    /// Address space: enough for Python/Node plus real work, not enough to
+    /// push the desktop into swap.
+    pub const ADDRESS_SPACE: u64 = 1024 * 1024 * 1024;
+    /// Largest single file a plugin may write.
+    pub const FILE_SIZE: u64 = 64 * 1024 * 1024;
+    /// CPU seconds (all threads together); the wall-clock timeout is 10 s.
+    pub const CPU_SECONDS: u64 = 10;
+    /// Open file descriptors.
+    pub const OPEN_FILES: u64 = 256;
+}
+
+/// Apply [`limits`] to the child. RLIMIT_NPROC is deliberately not used: it
+/// counts every process of the real uid, so it would trip over the user's
+/// own desktop. Fork bombs are contained by the PID namespace (bwrap) and
+/// the wall-clock timeout, which kills the whole sandbox.
+fn apply_limits(cmd: &mut Command) {
+    // SAFETY: the closure runs between fork and exec and only calls
+    // setrlimit, which is async-signal-safe; it allocates nothing.
+    unsafe {
+        cmd.pre_exec(|| {
+            let set = |res, v: u64| {
+                let lim = libc::rlimit {
+                    rlim_cur: v as libc::rlim_t,
+                    rlim_max: v as libc::rlim_t,
+                };
+                if libc::setrlimit(res, &lim) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            };
+            set(libc::RLIMIT_AS, limits::ADDRESS_SPACE)?;
+            set(libc::RLIMIT_FSIZE, limits::FILE_SIZE)?;
+            set(libc::RLIMIT_CPU, limits::CPU_SECONDS)?;
+            set(libc::RLIMIT_NOFILE, limits::OPEN_FILES)?;
+            set(libc::RLIMIT_CORE, 0)?;
+            Ok(())
+        });
+    }
+}
+
 /// What a plugin may touch beyond computing on its input.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Permissions {
@@ -232,6 +276,7 @@ pub async fn run_plugin(
             c
         }
     };
+    apply_limits(&mut cmd);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -460,6 +505,61 @@ pub(crate) mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("3") && e.contains("boom"), "{e}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn memory_limit_stops_runaway_allocation() {
+        let dir = temp_dir("plugin-mem");
+        std::fs::write(
+            dir.join("main.py"),
+            "import json\ntry:\n    b = bytearray(2 * 1024 ** 3)\n    print(json.dumps({'got': len(b)}))\nexcept MemoryError:\n    print(json.dumps({'oom': True}))\n",
+        )
+        .unwrap();
+        let m = manifest("t.mem", "python3");
+        let out = run_plugin(SandboxMode::detect(), &m, &dir, None, &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(out, json!({"oom": true}));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn file_size_limit_stops_huge_writes() {
+        let dir = temp_dir("plugin-fsize");
+        let data = temp_dir("plugin-fsize-data");
+        std::fs::write(
+            dir.join("main.py"),
+            "import json, os, signal\nsignal.signal(signal.SIGXFSZ, signal.SIG_IGN)\np = os.path.join(os.environ['AGENTOS_DATA'], 'big')\ntry:\n    with open(p, 'wb') as f:\n        f.write(b'x' * (65 * 1024 * 1024))\n    print(json.dumps({'wrote': True}))\nexcept OSError as e:\n    print(json.dumps({'refused': e.errno}))\n",
+        )
+        .unwrap();
+        let mut m = manifest("t.fsize", "python3");
+        m.permissions.storage = true;
+        let out = run_plugin(SandboxMode::detect(), &m, &dir, Some(&data), &json!({}))
+            .await
+            .unwrap();
+        assert!(out.get("refused").is_some(), "{out}");
+        let size = std::fs::metadata(data.join("big"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        assert!(size <= limits::FILE_SIZE, "{size}");
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    #[tokio::test]
+    async fn core_dumps_off_and_fd_cap() {
+        let dir = temp_dir("plugin-core");
+        std::fs::write(
+            dir.join("main.py"),
+            "import json, resource\nprint(json.dumps({'core': resource.getrlimit(resource.RLIMIT_CORE)[0], 'nofile': resource.getrlimit(resource.RLIMIT_NOFILE)[0]}))\n",
+        )
+        .unwrap();
+        let m = manifest("t.core", "python3");
+        let out = run_plugin(SandboxMode::detect(), &m, &dir, None, &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(out, json!({"core": 0, "nofile": limits::OPEN_FILES}));
         let _ = std::fs::remove_dir_all(dir);
     }
 
