@@ -58,7 +58,16 @@ if [ -e "$marker" ]; then
   console "AGENTOS-DESKTOP: OK ($(cat "$marker"))"
 else
   console "AGENTOS-DESKTOP: FAIL"
+  journalctl -q -b --no-pager -n 20 -t agentos-shell -t agentosd -t agentos-desktop 2>/dev/null
   tail -n 20 "/run/user/$(id -u agent)/agentos-shell.log" /tmp/agentos-sway.log 2>/dev/null
+fi
+
+# Crash logging: the desktop's agentosd writes to the journal (agentos-daemon
+# runs it under systemd-cat), so its output and any crash report survive.
+if journalctl -q -b --no-pager -t agentosd 2>/dev/null | grep -q '管家 Agent 已就绪'; then
+  console "AGENTOS-JOURNAL: OK"
+else
+  console "AGENTOS-JOURNAL: FAIL"
 fi
 
 # Test hook, only reachable from a VM: QEMU's

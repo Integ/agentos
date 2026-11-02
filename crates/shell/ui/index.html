@@ -477,6 +477,14 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
         li.append(el("span", "dot wait"), box);
         return li;
       }
+      if (a.kind === "crash") {
+        const box = el("div"), meta = el("div", "meta");
+        meta.append(el("span", "mono", "agentosd"), document.createTextNode(" · " + relTime(a.at_ms)));
+        box.append(el("div", null, "管家进程异常退出，已自动重启"), meta);
+        box.title = a.summary || "";
+        li.append(el("span", "dot bad"), box);
+        return li;
+      }
       const dot = el("span", "dot" + (a.ok ? "" : " bad"));
       const box = el("div");
       const desc = state.descriptions.get(a.capability);

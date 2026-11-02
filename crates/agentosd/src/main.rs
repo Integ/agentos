@@ -14,6 +14,7 @@ use agentosd::blackboard::{self, Blackboard};
 use agentosd::builtin;
 use agentosd::butler::{grant_manifest, Butler};
 use agentosd::claude_planner::{ClaudeConfig, ClaudePlanner};
+use agentosd::crash;
 use agentosd::devices::{ConsoleOutput, LineSensor};
 use agentosd::evolve::{self, LlmGenerator, NoGenerator, PluginGenerator};
 use agentosd::expression::ExpressionHub;
@@ -255,7 +256,15 @@ async fn main() -> std::io::Result<()> {
     if std::env::args().any(|a| a == "--verify-audit") {
         return verify_audit(&audit_path(&home));
     }
+    crash::install(&home);
     let audit = Arc::new(AuditLog::open(audit_path(&home))?);
+    if let Some(summary) = crash::take_last(&home) {
+        eprintln!(
+            "上次 agentosd 异常退出：{summary}\n  完整报告：{}（也在 journalctl -t agentosd 里）",
+            home.join("crash.prev.txt").display()
+        );
+        audit.append(agentos_audit::AuditEvent::DaemonCrashed { summary })?;
+    }
     let pins = Arc::new(PinVault::open(home.join("pin.json"))?.with_audit(audit.clone()));
 
     let (planner, text_model, planner_label) = make_planner();

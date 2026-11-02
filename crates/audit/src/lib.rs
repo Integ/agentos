@@ -99,6 +99,11 @@ pub enum AuditEvent {
         action: String,
         detail: Value,
     },
+    /// The previous agentosd run crashed; `summary` is the first line of its
+    /// crash report (message and source location).
+    DaemonCrashed {
+        summary: String,
+    },
 }
 
 /// Serializable snapshot of an [`Intent`].

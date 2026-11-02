@@ -115,6 +115,7 @@ wait_for "$WORK/serial-usb.log" 'AGENTOS-NETWORK: OK' 120 || fail usb "网络没
 log "有线网络自动连接、DNS 正常"
 wait_for "$WORK/serial-usb.log" 'AGENTOS-DESKTOP: OK' 240 || fail usb "图形桌面（agentos-shell）没有就绪"
 log "图形桌面就绪：$(grep -ao 'AGENTOS-DESKTOP: OK[^\r]*' "$WORK/serial-usb.log" | tail -1)"
+wait_for "$WORK/serial-usb.log" 'AGENTOS-JOURNAL: OK' 60 || fail usb "agentosd 的输出没有进 journal（agentos-daemon / systemd-cat）"
 wait_for "$WORK/serial-usb.log" 'AGENTOS-AUTOINSTALL: OK' "$TIMEOUT" || fail usb "自动安装失败"
 log "安装完成，等待关机"
 for _ in $(seq 120); do kill -0 "$QEMU_PID" 2>/dev/null || break; sleep 1; done

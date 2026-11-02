@@ -2,17 +2,49 @@
 # Keep agentosd running for the graphical session, serving agentos-shell on
 # $AGENTOS_SOCKET. Re-reads /etc/agentos/agentos.env on every start, so
 # `pkill -x agentosd` applies new settings.
+#
+# Its output (including crash reports with backtraces) goes to the journal:
+#   journalctl -t agentosd
+# A daemon that keeps dying right after start is restarted with a growing
+# pause (up to 30 s) instead of in a tight loop.
 ENV_FILE=/etc/agentos/agentos.env
 AUDIT=/var/lib/agentos/audit.jsonl
 SOCKET="${AGENTOS_SOCKET:-${XDG_RUNTIME_DIR:-/tmp}/agentos.sock}"
 
+log() { # log <priority> <message>
+  if command -v systemd-cat >/dev/null; then
+    echo "$2" | systemd-cat -t agentos-daemon -p "$1"
+  else
+    echo "agentos-daemon: $2" >&2
+  fi
+}
+
+journal() { # run "$@" with stdout/stderr in the journal, if there is one
+  if command -v systemd-cat >/dev/null; then
+    exec systemd-cat -t agentosd --stderr-priority=warning "$@"
+  fi
+  exec "$@"
+}
+
+pause=1
 while true; do
+  started=$(date +%s)
   (
     set -a
     # shellcheck disable=SC1090
     [ -r "$ENV_FILE" ] && . "$ENV_FILE"
     set +a
-    exec /usr/local/bin/agentosd --listen "$SOCKET" --audit "$AUDIT" </dev/null
+    journal /usr/local/bin/agentosd --listen "$SOCKET" --audit "$AUDIT" </dev/null
   )
-  sleep 1
+  status=$?
+  if [ $((  $(date +%s) - started )) -ge 60 ]; then
+    pause=1
+  fi
+  case "$status" in
+    0 | 143) log info "agentosd 退出（$status），重新启动" ;;
+    101) log err "agentosd 崩溃（panic），${pause} 秒后重启；详情见 journalctl -t agentosd" ;;
+    *) log err "agentosd 异常退出（$status），${pause} 秒后重启" ;;
+  esac
+  sleep "$pause"
+  [ "$status" -eq 0 ] || [ "$status" -eq 143 ] || pause=$((pause * 2 > 30 ? 30 : pause * 2))
 done
