@@ -1,10 +1,27 @@
 # 更新日志
 
-## 未发布
+## v0.2.2（2026-11-02）
+
+这一版主要是真机测试（Intel N100 小主机、笔记本）发现的问题修复，外加图形设置助理。没有 v0.2.1，版本号直接从 v0.2.0 跳到 v0.2.2。
+
+**从 v0.2.0 升级：** `sudo agentos-update` 会更新 AgentOS 自己的文件（桌面、设置助理、会话脚本、sway 配置），但不会安装新的系统软件包。显卡固件和输入法候选窗口这两个修复靠新软件包，在线升级拿不到。建议重新写入镜像；不想重装的话，在线升级后再运行（Ubuntu 镜像不需要第一条）：
+
+```
+sudo apt install firmware-intel-graphics firmware-intel-misc firmware-nvidia-graphics firmware-mediatek firmware-sof-signed intel-microcode amd64-microcode
+sudo apt install fcitx5-frontend-gtk3 fbterm
+```
 
 ### 改进
 
-- **全新的设置助理**：首次进入桌面时不再弹出终端里的对话框，而是一个 Liquid Glass 风格的图形设置助理：一页一件事，用鼠标点选；Wi‑Fi 列表点一下就能加入；OpenAI 兼容接口带 DeepSeek、通义千问、Ollama 预设；Home Assistant 可以当场测试连接；输入错误就地提示；已保存的密钥留空即保持不变，手动加在 env 文件里的设置会保留。系统菜单「网络和 AI 设置…」打开同一个界面。文本模式仍用原来的向导。见 [docs/shell.md](docs/shell.md#设置助理)。
+- **全新的设置助理**：首次进入桌面时不再弹出终端里的对话框，而是一个 Liquid Glass 风格的图形设置助理：一页一件事，用鼠标点选；Wi‑Fi 列表点一下就能加入；OpenAI 兼容接口带 DeepSeek、通义千问、Ollama 预设；Home Assistant 可以当场测试连接；输入错误就地提示；已保存的密钥留空即保持不变，手动加在 env 文件里的设置会保留。系统菜单「网络和 AI 设置…」打开同一个界面。文本模式仍用原来的向导。见 [docs/shell.md](docs/shell.md#设置助理)。（#30）
+- **笔记本触摸板轻触点击**：默认开启，单指点按是左键、双指右键、三指中键。（#31）
+
+### 修复
+
+- **Debian 镜像在 Intel 核显（如 N100）上进不了桌面**：Debian 13 把显卡固件拆成了单独的包，镜像里缺 i915 GuC 固件，sway 启动失败。现在镜像带上 Intel、NVIDIA、MediaTek 固件、声卡 SOF 固件和 CPU 微码。（#29）
+- **桌面起不来时多一次机会**：先等显卡设备就绪；GPU 渲染失败时用 CPU 渲染再试一次；失败原因写入日志（`journalctl -t agentos-sway`）。（#29）
+- **文本模式中文显示成方块**：文本模式改在 fbterm 里运行，中文正常显示。（#29）
+- **拼音输入法不显示候选字**：补上 fcitx5 的 GTK 输入模块。（#29）
 
 ## v0.2.0（2026-11-02）
 
