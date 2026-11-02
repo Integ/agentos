@@ -5,7 +5,7 @@ AgentOS 通过 [Home Assistant](https://www.home-assistant.io/) 控制家里的�
 ## 配置
 
 1. 在 HA 里打开 **个人资料 → 安全 → 长期访问令牌**，创建一个令牌。建议给 AgentOS 单独建一个 HA 用户。
-2. 设置环境变量（装机镜像里写进 `/etc/agentos/agentos.env`，然后 `pkill -x agentosd` 让它重新加载）：
+2. 装机镜像：在设置向导（首次开机或菜单里的「设置」）的“智能家居”一步填入地址和令牌，向导会测试连接。其他环境设置这两个变量（镜像里写在 `/etc/agentos/agentos.env`，然后 `pkill -x agentosd` 让它重新加载）：
 
 ```bash
 HASS_URL=http://homeassistant.local:8123
@@ -38,5 +38,4 @@ HASS_TOKEN=eyJhbGciOi...
 ## 以后
 
 - 订阅 HA 的 WebSocket 事件，把门铃、人体传感器等状态变化当作感知事件送给管家。
-- 在设置向导里加一步填写 HA 地址和令牌。
 - 让 `home.list` 按区域（房间）分组。

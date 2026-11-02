@@ -1,5 +1,6 @@
 #!/bin/bash
-# First-boot setup: network, AI planner and API key. Re-run any time from the
+# First-boot setup: network, AI planner and API key, voice, smart home and the
+# PIN for irreversible actions. Re-run any time from the
 # system menu. Writes /etc/agentos/agentos.env (root:agent, 0640).
 set -u
 [ "$EUID" -eq 0 ] || exec sudo "$0" "$@"
@@ -17,7 +18,7 @@ export NEWT_COLORS='root=lightgray,default roottext=brightcyan,default helpline=
   emptyscale=,black fullscale=,brightblue'
 W() { whiptail --backtitle "AgentOS 设置" "$@" 3>&1 1>&2 2>&3; }
 
-W --title "欢迎" --msgbox "欢迎使用 AgentOS！\n\n接下来只需要几步：\n  1. 连接网络\n  2. 选择管家 Agent 使用的 AI 模型\n  3. 选择要不要用语音\n\n用方向键和回车操作，Tab 切换按钮。" 15 60
+W --title "欢迎" --msgbox "欢迎使用 AgentOS！\n\n接下来只需要几步：\n  1. 连接网络\n  2. 选择管家 Agent 使用的 AI 模型\n  3. 选择要不要用语音\n  4. 连接 Home Assistant（可跳过）\n  5. 设置确认危险操作用的 PIN\n\n用方向键和回车操作，Tab 切换按钮。" 17 60
 
 # --- network ---------------------------------------------------------------
 online() { nm-online -q -t "${1:-8}" 2>/dev/null; }
@@ -84,9 +85,68 @@ if [ "$voice" = openai ]; then
   } >> "$tmp"
 fi
 
+# --- smart home ----------------------------------------------------------------
+if W --title "智能家居" --yes-button "连接" --no-button "跳过" \
+     --yesno "家里有 Home Assistant 吗？\n\n连接后管家可以查看和控制灯、空调、窗帘、门锁等设备。\n开锁、开车库门这类操作每次都要你确认并输入 PIN。" 13 70; then
+  hurl=$(W --title "Home Assistant" --inputbox "地址：" 10 70 "http://homeassistant.local:8123") || hurl=""
+  hurl=${hurl%/}
+  htoken=$(W --title "Home Assistant" --passwordbox "长期访问令牌（在 HA 的「个人资料 → 安全」里创建）：" 10 76) || htoken=""
+  if [ -n "$hurl" ] && [ -n "$htoken" ]; then
+    printf 'HASS_URL=%q\nHASS_TOKEN=%q\n' "$hurl" "$htoken" >> "$tmp"
+    code=$(curl -s -o /dev/null -m 8 -w '%{http_code}' -H "Authorization: Bearer $htoken" "$hurl/api/" 2>/dev/null)
+    case "$code" in
+      200) W --title "Home Assistant" --msgbox "连接成功。" 8 40 ;;
+      401|403) W --title "Home Assistant" --msgbox "Home Assistant 拒绝了这个令牌，请检查后在菜单里重新设置。\n（设置已保存。）" 10 64 ;;
+      *) W --title "Home Assistant" --msgbox "暂时连不上 $hurl（$code）。\n设置已保存，网络通了以后会自动生效。" 10 70 ;;
+    esac
+  fi
+fi
+
 install -m 0640 -o root -g agent "$tmp" "$ENV_FILE"
 rm -f "$tmp"
 touch /etc/agentos/setup-done
+
+# --- PIN for irreversible actions -------------------------------------------
+# Stored by agentosd in the agent user's data directory (never in the env
+# file). Without one, a click or "y" is enough to approve an L3 step.
+pin_set() { runuser -u agent -- test -f /home/agent/.local/share/agentos/pin.json; }
+if pin_set; then
+  choice=$(W --title "PIN" --menu "删除数据、开锁、安装插件这类不可逆操作，确认时要输入 PIN。\n已经设置过 PIN。" 13 70 3 \
+    keep   "保持不变" \
+    change "换一个 PIN" \
+    clear  "取消 PIN（只需点确认）") || choice=keep
+else
+  choice=$(W --title "PIN" --menu "删除数据、开锁、安装插件这类不可逆操作，确认时要输入 PIN。\n建议设置，防止别人或网页里的恶意指令替你点“确认”。" 13 76 2 \
+    change "设置 PIN" \
+    keep   "先不设置") || choice=keep
+fi
+case "$choice" in
+  change)
+    while :; do
+      p1=$(W --title "PIN" --passwordbox "新 PIN（4 到 12 位数字）：" 10 60) || break
+      if ! [[ "$p1" =~ ^[0-9]{4,12}$ ]]; then
+        W --title "PIN" --msgbox "PIN 必须是 4 到 12 位数字。" 8 50
+        continue
+      fi
+      p2=$(W --title "PIN" --passwordbox "再输入一次：" 10 60) || break
+      if [ "$p1" != "$p2" ]; then
+        W --title "PIN" --msgbox "两次输入不一致，请重新设置。" 8 50
+        continue
+      fi
+      if printf '%s\n%s\n' "$p1" "$p2" | runuser -u agent -- /usr/local/bin/agentosd --home /home/agent/.local/share/agentos --set-pin >/dev/null 2>&1; then
+        W --title "PIN" --msgbox "PIN 已设置。" 8 40
+      else
+        W --title "PIN" --msgbox "PIN 设置失败，可以稍后在终端运行 agentosd --set-pin。" 9 60
+      fi
+      break
+    done
+    unset p1 p2
+    ;;
+  clear)
+    runuser -u agent -- /usr/local/bin/agentosd --home /home/agent/.local/share/agentos --clear-pin >/dev/null 2>&1
+    W --title "PIN" --msgbox "已取消 PIN。" 8 40
+    ;;
+esac
 
 # --- offer to install --------------------------------------------------------
 if [ ! -f /etc/agentos/installed ]; then
