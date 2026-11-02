@@ -9,6 +9,7 @@ pub mod blackboard;
 pub mod builtin;
 pub mod butler;
 pub mod claude_planner;
+pub mod crash;
 pub mod devices;
 pub mod evolve;
 pub mod expression;

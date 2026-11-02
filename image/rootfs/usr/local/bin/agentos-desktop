@@ -16,11 +16,17 @@ stop_daemon() { kill "$daemon" 2>/dev/null; pkill -x -u "$(id -u)" agentosd; }
 # shows a blank window; use shared-memory buffers instead.
 ls /dev/dri/renderD* >/dev/null 2>&1 || export WEBKIT_DISABLE_DMABUF_RENDERER=1
 
-/usr/local/bin/agentos-shell 2>>"$XDG_RUNTIME_DIR/agentos-shell.log"
+# Shell output goes to the journal (journalctl -t agentos-shell).
+if command -v systemd-cat >/dev/null; then
+  systemd-cat -t agentos-shell --stderr-priority=warning /usr/local/bin/agentos-shell
+else
+  /usr/local/bin/agentos-shell 2>>"$XDG_RUNTIME_DIR/agentos-shell.log"
+fi
 status=$?
 stop_daemon
 if [ "$status" -ne 0 ]; then
-  echo "agentos-shell 退出（$status），改用文本模式" >>"$XDG_RUNTIME_DIR/agentos-shell.log"
+  echo "agentos-shell 退出（$status），改用文本模式" | systemd-cat -t agentos-desktop -p err 2>/dev/null ||
+    echo "agentos-shell 退出（$status），改用文本模式" >>"$XDG_RUNTIME_DIR/agentos-shell.log"
   exec foot --app-id agentos-console /usr/local/bin/agentos-console
 fi
 swaymsg exit

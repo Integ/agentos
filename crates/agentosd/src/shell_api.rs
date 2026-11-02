@@ -150,6 +150,13 @@ pub fn recent_activity(audit: &Path, n: usize) -> Vec<Value> {
                 "detail": detail,
                 "ok": true,
             })),
+            AuditEvent::DaemonCrashed { summary } => Some(json!({
+                "seq": e.seq,
+                "at_ms": e.at_ms,
+                "kind": "crash",
+                "summary": summary,
+                "ok": false,
+            })),
             _ => None,
         })
         .collect();
@@ -388,6 +395,24 @@ async fn write_line(w: &mut tokio::net::unix::OwnedWriteHalf, v: &Value) -> std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_shows_crashes() {
+        let dir = std::env::temp_dir().join(format!("agentos-activity-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("audit.jsonl");
+        let log = AuditLog::open(&path).unwrap();
+        log.append(AuditEvent::DaemonCrashed {
+            summary: "agentosd 0.1.0 崩溃：boom".into(),
+        })
+        .unwrap();
+        let items = recent_activity(&path, 20);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["kind"], "crash");
+        assert_eq!(items[0]["ok"], false);
+        assert!(items[0]["summary"].as_str().unwrap().contains("boom"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn requests_become_intent_text() {
