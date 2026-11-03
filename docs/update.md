@@ -5,7 +5,7 @@
 ```sh
 agentos-update --check            # 只看看有没有新版本
 sudo agentos-update               # 安装最新版本
-sudo agentos-update --to v0.2.0   # 安装指定版本（也可以用来降级）
+sudo agentos-update --to v0.2.2   # 安装指定版本（也可以用来降级）
 sudo agentos-update --system      # 再顺便 apt full-upgrade 基础系统
 sudo agentos-update --rollback    # 回到更新前的版本
 sudo agentos-update --file agentos-update-x86_64.tar.gz   # 离线安装（旁边要有 .sha256）

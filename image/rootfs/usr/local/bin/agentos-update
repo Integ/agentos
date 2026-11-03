@@ -5,7 +5,7 @@
 #
 #   sudo agentos-update              # install the latest release
 #   agentos-update --check           # only report whether one is available
-#   sudo agentos-update --to v0.2.0  # install a specific release
+#   sudo agentos-update --to v0.2.2  # install a specific release
 #   sudo agentos-update --file agentos-update-x86_64.tar.gz   # offline
 #   sudo agentos-update --rollback   # put the previous version back
 #   sudo agentos-update --system     # also apt full-upgrade the base system
