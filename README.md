@@ -8,18 +8,46 @@
 
 AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层：意图总线、Agent 运行时、统一的感知/表达设备抽象，以及基于能力令牌和风险分级的权限模型。
 
+当前版本：**v0.2.2**（[更新日志](CHANGELOG.md)）。
+
+## 现在能做什么
+
+- **管家 Agent + 子 Agent**：用自然语言下达意图，管家拆解任务、派给子 Agent；任务即进程，每一步写检查点，守护进程重启后接着做；子 Agent 通过共享黑板协作，可选模型裁判在有影响的步骤前复核。见 [docs/agents.md](docs/agents.md)。
+- **云端大模型规划**：Claude（默认 `claude-opus-5-5`）或任意 OpenAI 兼容接口（OpenAI、DeepSeek、通义千问、Ollama 等）；也有离线规则规划器。限流和 5xx 自动重试。
+- **玻璃风格桌面**：WebKit 写的 `agentos-shell`，带玻璃风格终端和确认弹窗。见 [docs/shell.md](docs/shell.md)。
+- **图形设置助理**：首次进入桌面时出现 Liquid Glass 风格的设置助理，一页一件事：Wi‑Fi、模型接口（带 DeepSeek/通义千问/Ollama 预设）、语音、Home Assistant（可当场测试连接）、PIN、安装到硬盘。系统菜单「网络和 AI 设置…」可随时重新打开。见 [docs/shell.md](docs/shell.md#设置助理)。
+- **语音输入与朗读**：按住麦克风按钮或 **Caps Lock** 说话，松开发送，Caps Lock 指示灯就是录音灯；回复可以读出来。只在按住时录音，没有唤醒词。见 [docs/voice.md](docs/voice.md)。
+- **智能家居**：接入 Home Assistant，开灯、调空调是 L1，场景脚本是 L2，开锁、撤防、开车库门是 L3。见 [docs/smart-home.md](docs/smart-home.md)。
+- **MCP 工具**：`mcp.json` 里配置的 MCP server，工具自动成为管家的能力。见 [docs/mcp.md](docs/mcp.md)。
+- **自我进化**：让 AgentOS 给自己写新能力，以沙箱插件形式安装，可回滚。见 [docs/self-evolution.md](docs/self-evolution.md)。
+- **安全模型**：能力令牌 + 风险分级确认（L0–L3）；污点追踪（网络插件、MCP 输出会让后续有影响的操作都要确认）；L3 操作可要求 PIN；审计日志带 SHA-256 哈希链，可校验；插件有 bubblewrap 沙箱和资源上限（内存 1 GiB、CPU 10 秒等）。
+- **稳健性与运维**：守护进程崩溃时写入 journal 和 `crash.txt`、退避重启，并在桌面「最近活动」里提示；journal 跨重启保留；`sudo agentos-update` 在线更新，先自检再替换，可回滚。
+
+更多文档：
+
 - 设计草案：[AgentOS 架构设计草案](https://claude.ai/artifact/RzRDjHkBbJVbnyFDRSZ4BN)
-- 架构概要与 P0 进度：[docs/architecture.md](docs/architecture.md)
-- 管家调度子 Agent：[docs/agents.md](docs/agents.md)
-- 自我进化：[docs/self-evolution.md](docs/self-evolution.md)
-- 图形界面：[docs/shell.md](docs/shell.md)
-- 语音输入与朗读：[docs/voice.md](docs/voice.md)
+- 架构概要与进度：[docs/architecture.md](docs/architecture.md)
+- 安装：[docs/install.md](docs/install.md)，在线更新：[docs/update.md](docs/update.md)
 
 ## 安装到 PC
 
-下载镜像写进 U 盘，从 U 盘启动即可使用，首次设置里可以一键装到硬盘（UEFI，支持安全启动）。详见 [docs/install.md](docs/install.md)。
+到 [Releases](https://github.com/Integ/agentos/releases) 下载镜像（Debian 13 或 Ubuntu 24.04 两种），写进 U 盘，从 U 盘启动即可使用；设置助理里可以一键装到硬盘。需要 x86-64、UEFI 启动，安全启动可以保持开启。详见 [docs/install.md](docs/install.md)。
 
-升级已经装好的机器：`sudo agentos-update`（从 GitHub Release 下载更新包，先自检再替换，可 `--rollback`）。详见 [docs/update.md](docs/update.md)（v0.1.0 不能原地升级，需要重新写镜像）。各版本变化见 [CHANGELOG.md](CHANGELOG.md)。
+- 镜像自带 Intel、NVIDIA、MediaTek 显卡固件、声卡 SOF 固件和 CPU 微码，Intel N100 这类核显小主机可以直接进桌面。
+- 内置 fcitx5 拼音输入法；笔记本触摸板默认开启轻触点击。
+- 图形桌面起不来时自动退回文本模式（fbterm，中文正常显示），原因记在 `journalctl -t agentos-sway`。
+
+### 升级
+
+已经装好的机器运行 `sudo agentos-update`（或系统菜单「检查更新…」），可 `--rollback`。详见 [docs/update.md](docs/update.md)。
+
+- **从 v0.1.0 升级**：必须重新写入镜像（v0.1.0 的 `sudo` 会要密码，无法运行更新）。
+- **从 v0.2.0 升级**：建议重新写入镜像。在线更新只更新 AgentOS 自己的文件，不会安装新的系统软件包，所以 v0.2.2 的显卡固件和输入法候选窗口修复拿不到。不想重装的话，在线更新后再运行（Ubuntu 镜像不需要第一条）：
+
+  ```sh
+  sudo apt install firmware-intel-graphics firmware-intel-misc firmware-nvidia-graphics firmware-mediatek firmware-sof-signed intel-microcode amd64-microcode
+  sudo apt install fcitx5-frontend-gtk3 fbterm
+  ```
 
 ## 仓库结构
 
@@ -30,7 +58,7 @@ crates/
   audit/     只追加审计日志（JSON Lines），可回放
   agentosd/  P0 守护进程：感知中枢 → 管家 Agent → 表达中枢；插件运行时与自我进化（evolve）
   shell/     图形界面 agentos-shell：玻璃风格桌面，通过 Unix socket 连接 agentosd
-image/       可启动磁盘镜像：构建脚本、系统集成文件、QEMU 冒烟测试
+image/       可启动磁盘镜像：构建脚本、系统集成文件（设置助理、会话脚本、agentos-update）、OTA 更新包、QEMU 冒烟测试
 ```
 
 ## 快速开始
@@ -57,6 +85,8 @@ y
 cargo run -p agentosd -- --listen $XDG_RUNTIME_DIR/agentos.sock
 cargo run -p agentos-shell -- --windowed   # 需要 libwebkit2gtk-4.1-dev
 ```
+
+按住界面上的麦克风按钮（或 Caps Lock）可以语音输入，配置方法见 [docs/voice.md](docs/voice.md)。
 
 ![AgentOS 桌面](docs/images/shell-desktop.jpg)
 
