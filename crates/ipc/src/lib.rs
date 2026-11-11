@@ -30,7 +30,9 @@ pub struct Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
-    Ping,
+    // Empty struct variants make Serde enforce deny_unknown_fields; unit
+    // variants silently discard extra fields in an internally tagged object.
+    Ping {},
     Submit {
         text: String,
     },
@@ -54,7 +56,7 @@ pub enum Command {
         /// Exact token received with this task's concrete confirmation prompt.
         confirmation: String,
     },
-    Capabilities,
+    Capabilities {},
     Watch {
         #[serde(default)]
         after: Option<u64>,
@@ -359,6 +361,49 @@ mod tests {
             read_frame(&mut reader).await.unwrap().unwrap().len(),
             MAX_FRAME_BYTES
         );
+    }
+
+    #[test]
+    fn every_command_rejects_unknown_fields() {
+        for command in [
+            json!({"method":"ping"}),
+            json!({"method":"capabilities"}),
+            json!({"method":"submit","text":"现在几点"}),
+            json!({"method":"list","limit":1}),
+            json!({"method":"get","id":1}),
+            json!({"method":"cancel","id":1}),
+            json!({"method":"approve","id":1,"step":1,"confirmation":"nonce"}),
+            json!({"method":"watch"}),
+        ] {
+            let request = json!({"version":VERSION,"id":7,"command":command});
+            assert!(serde_json::from_value::<Request>(request.clone()).is_ok());
+            for value in [json!("admin"), json!(null), json!({"role":"admin"})] {
+                let mut unknown = request.clone();
+                unknown["command"]["speaker"] = value;
+                let wire = serde_json::to_vec(&unknown).unwrap();
+                assert!(
+                    serde_json::from_slice::<Request>(&wire).is_err(),
+                    "accepted unknown field on the wire: {unknown}"
+                );
+                assert!(
+                    serde_json::from_value::<Request>(unknown.clone()).is_err(),
+                    "accepted unknown field in JSON value: {unknown}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_commands_preserve_the_protocol_v1_wire_shape() {
+        for (command, method) in [
+            (Command::Ping {}, "ping"),
+            (Command::Capabilities {}, "capabilities"),
+        ] {
+            let expected = json!({"method":method});
+            assert_eq!(serde_json::to_value(command).unwrap(), expected);
+            let decoded: Command = serde_json::from_value(expected.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+        }
     }
 
     #[tokio::test]

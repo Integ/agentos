@@ -148,8 +148,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
                 confirmation: rest[4].clone(),
             })
         }
-        Some("capabilities") if rest.len() == 1 => Action::Request(Command::Capabilities),
-        Some("ping") if rest.len() == 1 => Action::Request(Command::Ping),
+        Some("capabilities") if rest.len() == 1 => Action::Request(Command::Capabilities {}),
+        Some("ping") if rest.len() == 1 => Action::Request(Command::Ping {}),
         Some("watch") if rest.len() == 1 => Action::Watch(None),
         Some("watch") if rest.len() == 3 && rest[1] == "--after" => Action::Watch(Some(
             rest[2].parse().map_err(|_| "revision 必须是非负整数")?,

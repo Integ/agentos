@@ -345,7 +345,10 @@ async fn pages_and_watchers_resynchronize_without_replaying_mutations() {
         reconnect.event().await.kind,
         EventKind::ResyncRequired { .. }
     ));
-    assert!(matches!(client.ok(Command::Ping).await, Reply::Pong { .. }));
+    assert!(matches!(
+        client.ok(Command::Ping {}).await,
+        Reply::Pong { .. }
+    ));
     // Stop must close an otherwise-idle watch connection instead of hanging.
     harness.stop().await;
     assert!(
@@ -368,7 +371,7 @@ async fn malformed_versions_and_oversized_frames_cannot_break_the_service() {
         &Request {
             version: 999,
             id: 44,
-            command: Command::Ping,
+            command: Command::Ping {},
         },
     )
     .await
@@ -405,7 +408,39 @@ async fn malformed_versions_and_oversized_frames_cannot_break_the_service() {
         .await
         .unwrap();
     assert!(matches!(result, Ok(None) | Err(_)));
-    assert!(matches!(client.ok(Command::Ping).await, Reply::Pong { .. }));
+    assert!(matches!(
+        client.ok(Command::Ping {}).await,
+        Reply::Pong { .. }
+    ));
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn empty_commands_reject_unknown_fields_and_keep_the_connection_usable() {
+    let mut harness = Harness::start(Box::new(RulePlanner), vec![]).await;
+    let mut client = harness.connect().await;
+    for (index, method) in ["ping", "capabilities"].into_iter().enumerate() {
+        let id = 100 + index as u64;
+        write_frame(
+            &mut client.writer,
+            &json!({"version":VERSION,"id":id,"command":{"method":method,"speaker":"admin"}}),
+        )
+        .await
+        .unwrap();
+        let response = client.response().await;
+        assert_eq!(response.id, id);
+        assert_eq!(error_code(response), "invalid_request");
+    }
+    assert!(matches!(
+        client.ok(Command::Ping {}).await,
+        Reply::Pong { .. }
+    ));
+    assert!(matches!(
+        client.ok(Command::Capabilities {}).await,
+        Reply::Capabilities { .. }
+    ));
+    assert!(harness.tasks.list().is_empty());
+    assert_eq!(harness.tasks.revision(), 0);
     harness.stop().await;
 }
 
@@ -669,6 +704,9 @@ async fn oversized_details_return_a_bounded_error_while_summary_pages_remain_usa
     assert!(
         matches!(client.ok(Command::List { before: None, limit: 1, state: None }).await, Reply::Tasks { tasks, .. } if tasks.len() == 1 && tasks[0].text == "large result")
     );
-    assert!(matches!(client.ok(Command::Ping).await, Reply::Pong { .. }));
+    assert!(matches!(
+        client.ok(Command::Ping {}).await,
+        Reply::Pong { .. }
+    ));
     harness.stop().await;
 }

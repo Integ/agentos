@@ -374,8 +374,8 @@ fn command(request: &Request) -> Result<Command, HttpError> {
         .split_once('?')
         .unwrap_or((&request.target, ""));
     match (request.method.as_str(), path) {
-        ("GET", "/api/status") if parameters.is_empty() => Ok(Command::Ping),
-        ("GET", "/api/capabilities") if parameters.is_empty() => Ok(Command::Capabilities),
+        ("GET", "/api/status") if parameters.is_empty() => Ok(Command::Ping {}),
+        ("GET", "/api/capabilities") if parameters.is_empty() => Ok(Command::Capabilities {}),
         ("GET", "/api/tasks") => {
             let parameters = query(parameters)?;
             if parameters

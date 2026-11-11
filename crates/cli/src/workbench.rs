@@ -297,7 +297,7 @@ async fn perform(
         }
         WorkbenchCommand::Capabilities => {
             let reply = client
-                .request(Command::Capabilities)
+                .request(Command::Capabilities {})
                 .await
                 .map_err(|e| request_error(view, e))?;
             println!("\n{}", render::reply_text(&reply));

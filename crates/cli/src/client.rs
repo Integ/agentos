@@ -117,7 +117,7 @@ async fn connect(path: &Path) -> Result<UnixStream, ClientError> {
 fn reply_matches(command: &Command, reply: &Reply) -> bool {
     matches!(
         (command, reply),
-        (Command::Ping, Reply::Pong { .. })
+        (Command::Ping {}, Reply::Pong { .. })
             | (Command::Submit { .. }, Reply::Accepted { .. })
             | (Command::List { .. }, Reply::Tasks { .. })
             | (
@@ -125,7 +125,7 @@ fn reply_matches(command: &Command, reply: &Reply) -> bool {
                 Reply::Task { .. }
             )
             | (Command::Approve { .. }, Reply::ApprovalQueued { .. })
-            | (Command::Capabilities, Reply::Capabilities { .. })
+            | (Command::Capabilities {}, Reply::Capabilities { .. })
             | (Command::Watch { .. }, Reply::Watching { .. })
     )
 }
@@ -339,7 +339,10 @@ mod tests {
         ));
         let listener = UnixListener::bind(&path).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
-        let error = Client::new(&path).request(Command::Ping).await.unwrap_err();
+        let error = Client::new(&path)
+            .request(Command::Ping {})
+            .await
+            .unwrap_err();
         assert!(!error.ambiguous());
         assert!(timeout(Duration::from_millis(50), listener.accept())
             .await

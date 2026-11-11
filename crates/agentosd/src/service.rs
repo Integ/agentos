@@ -336,7 +336,7 @@ impl Controller {
 
     fn handle(&self, command: Command, uid: u32) -> Result<Reply, ProtocolError> {
         match command {
-            Command::Ping => Ok(Reply::Pong {
+            Command::Ping {} => Ok(Reply::Pong {
                 server_version: env!("CARGO_PKG_VERSION").into(),
                 revision: self.tasks.revision(),
             }),
@@ -426,7 +426,7 @@ impl Controller {
                 });
                 Ok(Reply::ApprovalQueued { id, step })
             }
-            Command::Capabilities => Ok(Reply::Capabilities {
+            Command::Capabilities {} => Ok(Reply::Capabilities {
                 capabilities: self.capabilities.clone(),
             }),
             Command::Watch { .. } => unreachable!("watch is handled at the connection boundary"),

@@ -481,7 +481,7 @@ async fn gather_facts(client: &Client, selected_id: Option<u64>) -> Facts {
                 }
             }
         },
-        client.request(Command::Capabilities)
+        client.request(Command::Capabilities {})
     );
     if let Ok(Reply::Capabilities { capabilities }) = capability_read {
         facts.capabilities = capabilities.into_iter().take(16).map(|spec|json!({"name":spec.name,"description":truncate(&spec.description,140),"risk":spec.risk})).collect();
