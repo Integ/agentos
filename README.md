@@ -8,7 +8,9 @@
 
 AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层：意图总线、Agent 运行时、统一的感知/表达设备抽象，以及基于能力令牌和风险分级的权限模型。
 
-当前版本：**v0.2.2**（[更新日志](CHANGELOG.md)）。
+当前版本：**v0.3.0**（[更新日志](CHANGELOG.md)）。
+
+新增持久任务工作台和语音优先的情景式 Web Shell，与现有系统服务及原生桌面并行提供。多轮规划、MCP、插件、智能家居、PIN 和镜像更新继续由 `agentosd` / `agentos-shell` 提供；新的 `agentos-taskd` / `agentos-web-shell` 使用独立协议和状态目录。见[持久任务与 Web Shell](docs/persistent-workspace.md)。
 
 ## 现在能做什么
 
@@ -58,12 +60,17 @@ crates/
   audit/     只追加审计日志（JSON Lines），可回放
   agentosd/  P0 守护进程：感知中枢 → 管家 Agent → 表达中枢；插件运行时与自我进化（evolve）
   shell/     图形界面 agentos-shell：玻璃风格桌面，通过 Unix socket 连接 agentosd
+  taskd/     独立持久任务服务 agentos-taskd（协议 v1）
+  web-shell/ 情景式浏览器界面 agentos-web-shell：模型布局与连续实时语音
+  cli/       agentos 命令与独立终端任务工作台
+  runtime/   持久任务、分页、通知、取消与中断恢复
+  ipc/       严格校验、受限帧与本机连接协议
 image/       可启动磁盘镜像：构建脚本、系统集成文件（设置助理、会话脚本、agentos-update）、OTA 更新包、QEMU 冒烟测试
 ```
 
 ## 快速开始
 
-需要 Rust 1.80+。
+需要 Rust 1.88+。
 
 ```sh
 cargo run -p agentosd
@@ -87,6 +94,20 @@ cargo run -p agentos-shell -- --windowed   # 需要 libwebkit2gtk-4.1-dev
 ```
 
 按住界面上的麦克风按钮（或 Caps Lock）可以语音输入，配置方法见 [docs/voice.md](docs/voice.md)。
+
+### 持久任务与情景式 Web Shell
+
+在三个终端中分别启动（同一个状态目录）：
+
+```sh
+cargo run -p agentos-taskd -- --planner rule --state-dir /tmp/agentos-workspace
+cargo run -p agentos-web-shell -- --state-dir /tmp/agentos-workspace
+cargo run -p agentos-cli -- --state-dir /tmp/agentos-workspace workbench
+```
+
+打开 Web Shell 输出的完整本机链接。它支持模型根据任务和上下文生成受限布局、连续实时语音及开口打断；API 密钥仅由服务端读取。完整配置见[情景式 Shell](docs/ambient-shell.md)。
+
+这组入口当前提供时钟与笔记能力；MCP、插件、智能家居和多轮规划使用上面的原生桌面入口。两组服务的 socket、任务恢复语义、笔记和审计格式各自独立，不互相读取或迁移状态。现有镜像仍默认启动原生桌面。
 
 ![AgentOS 桌面](docs/images/shell-desktop.jpg)
 

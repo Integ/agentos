@@ -87,7 +87,7 @@ pub fn levels(pcm: &[u8]) -> (f32, f32) {
     let mut peak = 0f32;
     let mut sum = 0f64;
     let mut n = 0usize;
-    for s in pcm.chunks_exact(2) {
+    for s in pcm.as_chunks::<2>().0 {
         let v = i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0;
         peak = peak.max(v.abs());
         sum += (v as f64) * (v as f64);

@@ -533,7 +533,7 @@ impl Butler {
         let pin_ok = || {
             self.pins
                 .as_ref()
-                .map_or(true, |p| !p.is_set() || p.take_grant(id))
+                .is_none_or(|p| !p.is_set() || p.take_grant(id))
         };
         if approved && task.verify_identity && !pin_ok() {
             // A bare "y" is not enough for L3: show the sheet again for the PIN.

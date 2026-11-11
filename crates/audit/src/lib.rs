@@ -10,6 +10,8 @@
 //! every later entry, or cutting off the tail, is not detectable from the
 //! file alone; note [`VerifyReport::head`] somewhere else to catch that.)
 
+pub mod durable;
+
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -395,7 +397,7 @@ mod tests {
         AuditEvent::HumanConfirmation {
             intent: IntentId(n),
             capability: CapabilityName::new("notes.clear"),
-            approved: n % 2 == 0,
+            approved: n.is_multiple_of(2),
         }
     }
 

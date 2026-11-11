@@ -38,3 +38,33 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories bans licenses sources
+
+  web-shell:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --check crates/web-shell/assets/shell.js
+      - run: node --check crates/web-shell/assets/realtime-voice.js
+      - run: node --test crates/web-shell/assets/*.test.mjs
+
+  persistent-runtime:
+    if: github.event_name != 'schedule'
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            toolchain: stable
+          - os: ubuntu-latest
+            toolchain: 1.88.0
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p agentos-taskd -p agentos-web-shell -p agentos-cli -p agentos-ipc -p agentos-runtime -p agentos-audit -p agentos-core -p agentos-policy

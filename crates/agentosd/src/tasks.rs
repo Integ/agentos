@@ -226,7 +226,7 @@ impl TaskStore {
             return (tasks, notes);
         };
         for p in entries.filter_map(|e| e.ok().map(|e| e.path())) {
-            if p.extension().map_or(true, |x| x != "json") {
+            if p.extension().is_none_or(|x| x != "json") {
                 continue;
             }
             match std::fs::read_to_string(&p)
