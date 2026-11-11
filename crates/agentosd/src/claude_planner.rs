@@ -77,47 +77,70 @@ pub fn build_request(cfg: &ClaudeConfig, intent: &Intent, available: &[Capabilit
 /// Turn a Messages API response into a plan.
 pub fn parse_response(body: &Value) -> Plan {
     if body.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
-        return Plan {
-            reply: Some("模型拒绝了这个请求。".into()),
-            ..Plan::default()
-        };
+        return Plan::failed("模型拒绝了这个请求。");
     }
+    if let Some(reason) = body.get("stop_reason") {
+        if !matches!(
+            reason.as_str(),
+            Some("end_turn" | "tool_use" | "stop_sequence")
+        ) {
+            return Plan::failed("模型响应未正常完成，已放弃整个计划。");
+        }
+    }
+    let Some(content) = body.get("content").and_then(Value::as_array) else {
+        return Plan::failed("模型没有返回有效内容。");
+    };
     let mut steps = Vec::new();
     let mut text = Vec::new();
-    for block in body
-        .get("content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
+    for block in content {
         match block.get("type").and_then(Value::as_str) {
             Some("tool_use") => {
-                if let Some(name) = block.get("name").and_then(Value::as_str) {
-                    steps.push(Step {
-                        capability: capability_name(name),
-                        args: block.get("input").cloned().unwrap_or_else(|| json!({})),
-                    });
-                }
+                let Some(name) = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.trim().is_empty())
+                else {
+                    return Plan::failed("模型返回的工具调用缺少名称，已放弃整个计划。");
+                };
+                let Some(args @ Value::Object(_)) = block.get("input") else {
+                    return Plan::failed(format!(
+                        "模型返回的工具参数无效（{name}），已放弃整个计划。"
+                    ));
+                };
+                steps.push(Step {
+                    capability: capability_name(name),
+                    args: args.clone(),
+                });
             }
             Some("text") => {
-                if let Some(t) = block.get("text").and_then(Value::as_str) {
-                    if !t.trim().is_empty() {
-                        text.push(t.trim().to_string());
-                    }
+                let Some(t) = block.get("text").and_then(Value::as_str) else {
+                    return Plan::failed("模型返回的文本格式无效，已放弃整个计划。");
+                };
+                if !t.trim().is_empty() {
+                    text.push(t.trim().to_string());
                 }
             }
-            _ => {}
+            // Thinking blocks are not executable plan steps.
+            Some("thinking") if block.get("thinking").is_some_and(Value::is_string) => {}
+            Some("redacted_thinking") if block.get("data").is_some_and(Value::is_string) => {}
+            _ => return Plan::failed("模型返回的内容块格式无效，已放弃整个计划。"),
         }
+    }
+    if body.get("stop_reason").and_then(Value::as_str) == Some("tool_use") && steps.is_empty() {
+        return Plan::failed("模型响应缺少完整的工具调用，已放弃整个计划。");
     }
     let reply = if text.is_empty() {
         None
     } else {
         Some(text.join("\n"))
     };
+    if steps.is_empty() && reply.is_none() {
+        return Plan::failed("模型没有返回任何内容。");
+    }
     Plan {
         steps,
         reply,
-        tainted: false,
+        ..Plan::default()
     }
 }
 
@@ -177,10 +200,7 @@ impl Planner for ClaudePlanner {
         let body = build_request(&self.cfg, intent, available);
         match self.call(&body).await {
             Ok(resp) => parse_response(&resp),
-            Err(e) => Plan {
-                reply: Some(e),
-                ..Plan::default()
-            },
+            Err(e) => Plan::failed(e),
         }
     }
 }
@@ -255,6 +275,42 @@ mod tests {
         let plan = parse_response(&resp);
         assert!(plan.steps.is_empty());
         assert!(plan.reply.is_some());
+        assert!(plan.error.is_some());
+    }
+
+    #[test]
+    fn incomplete_or_malformed_blocks_never_run_a_partial_plan() {
+        let good = json!({"type": "tool_use", "id": "t1", "name": "notes__append", "input": {"text": "x"}});
+        let bad_blocks = [
+            json!({"type": "tool_use", "input": {}}),
+            json!({"type": "tool_use", "name": " ", "input": {}}),
+            json!({"type": "tool_use", "name": "notes__clear"}),
+            json!({"type": "tool_use", "name": "notes__clear", "input": []}),
+            json!({"type": "tool_use", "name": "notes__clear", "input": null}),
+            json!({"type": "text"}),
+            json!({"type": "unknown"}),
+        ];
+        for bad in bad_blocks {
+            let plan = parse_response(&json!({"stop_reason": "tool_use", "content": [good, bad]}));
+            assert!(plan.steps.is_empty());
+            assert!(plan.error.is_some());
+        }
+        for reason in [json!("max_tokens"), json!("pause_turn"), Value::Null] {
+            let plan = parse_response(&json!({"stop_reason": reason, "content": [good]}));
+            assert!(plan.steps.is_empty());
+            assert!(plan.error.is_some());
+        }
+    }
+
+    #[test]
+    fn thinking_blocks_do_not_hide_valid_tool_calls() {
+        let plan = parse_response(&json!({"stop_reason": "tool_use", "content": [
+            {"type": "thinking", "thinking": "reasoning", "signature": "test"},
+            {"type": "redacted_thinking", "data": "test"},
+            {"type": "tool_use", "name": "notes__list", "input": {}}
+        ]}));
+        assert_eq!(plan.steps.len(), 1);
+        assert!(plan.error.is_none());
     }
 
     fn local_planner(url: &str) -> ClaudePlanner {
@@ -291,6 +347,7 @@ mod tests {
         let planner = local_planner(&url);
         let plan = planner.plan(&intent("hi"), &specs()).await;
         assert!(plan.steps.is_empty());
+        assert!(plan.error.is_some());
         assert!(plan.reply.unwrap().contains("invalid x-api-key"));
     }
 }

@@ -1,4 +1,4 @@
-//! AgentOS P0 runtime.
+//! AgentOS task runtime.
 //!
 //! Data flow: `Sensor` → [`perception::PerceptionHub`] → `Intent` →
 //! [`butler::Butler`] (plan → policy → capability) → `Expression` →
@@ -7,12 +7,14 @@
 pub mod builtin;
 pub mod butler;
 pub mod claude_planner;
+pub mod control;
 pub mod devices;
 pub mod expression;
 pub mod openai_planner;
 pub mod perception;
 pub mod planner;
 pub mod registry;
+pub mod service;
 
 #[cfg(test)]
 mod test_http;

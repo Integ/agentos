@@ -1,6 +1,6 @@
 [package]
 name = "agentosd"
-description = "AgentOS P0 daemon: perception hub, butler agent, capability registry, expression hub"
+description = "AgentOS daemon: durable tasks, policy-gated execution and human control"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,8 @@ rust-version.workspace = true
 agentos-core.workspace = true
 agentos-policy.workspace = true
 agentos-audit.workspace = true
+agentos-runtime.workspace = true
+agentos-ipc.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true

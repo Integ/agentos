@@ -1,0 +1,15 @@
+[package]
+name = "agentos-shell"
+description = "Voice-first contextual browser shell for the local AgentOS task service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+agentos-cli = { path = "../cli" }
+agentos-ipc.workspace = true
+agentos-runtime.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

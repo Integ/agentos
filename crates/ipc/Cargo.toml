@@ -1,0 +1,13 @@
+[package]
+name = "agentos-ipc"
+description = "AgentOS versioned local control protocol and bounded framing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+agentos-core.workspace = true
+agentos-runtime.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

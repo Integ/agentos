@@ -1,6 +1,6 @@
 //! Planners turn an intent into a sequence of capability calls.
 //!
-//! [`RulePlanner`] is a keyword-based stand-in so the runtime works offline
+//! [`RulePlanner`] is an explicit-command stand-in so the runtime works offline
 //! and deterministically. An LLM-backed planner (cloud or local) implements the
 //! same trait and receives the capability specs as its tool list.
 
@@ -36,8 +36,21 @@ pub struct Plan {
     pub steps: Vec<Step>,
     /// Text to show when there is nothing to execute.
     pub reply: Option<String>,
+    /// Planning failed; no step from this plan may execute.
+    pub error: Option<String>,
     /// The plan was influenced by untrusted external content.
     pub tainted: bool,
+}
+
+impl Plan {
+    pub fn failed(message: impl Into<String>) -> Self {
+        let message = message.into();
+        Self {
+            reply: Some(message.clone()),
+            error: Some(message),
+            ..Self::default()
+        }
+    }
 }
 
 #[async_trait]
@@ -67,20 +80,38 @@ impl Planner for RulePlanner {
     async fn plan(&self, intent: &Intent, available: &[CapabilitySpec]) -> Plan {
         let t = intent.text.trim();
         let lower = t.to_lowercase();
-        let has = |keys: &[&str]| keys.iter().any(|k| lower.contains(k));
 
         if let Some(rest) = strip_any(t, &["记一下", "记住", "note "]) {
             let text = rest.trim_start_matches([':', '：', ' ']).trim();
             return step("notes.append", json!({ "text": text }));
         }
-        if has(&["笔记", "notes"]) && has(&["清空", "删除", "clear"]) {
-            return step("notes.clear", json!({}));
+        let normalized = lower.trim_end_matches(['。', '.', '！', '!']).trim();
+        let command = strip_any(normalized, &["请帮我", "帮我", "请"])
+            .unwrap_or(normalized)
+            .trim_start();
+        // Mutations require a complete command. Negations, questions, quoted
+        // commands and explanations must never become writes by substring match.
+        match command {
+            "恢复笔记" | "撤销清空" | "撤销清空笔记" | "restore notes" => {
+                return step("notes.restore", json!({}));
+            }
+            "清空笔记" | "清空全部笔记" | "清空所有笔记" | "删除笔记" | "删除全部笔记"
+            | "删除所有笔记" | "clear notes" | "clear all notes" => {
+                return step("notes.clear", json!({}));
+            }
+            _ => {}
         }
-        if has(&["笔记", "notes"]) {
-            return step("notes.list", json!({}));
-        }
-        if has(&["几点", "时间", "time"]) {
-            return step("clock.now", json!({}));
+        let read_command = strip_any(normalized, &["请帮我", "请问", "帮我", "请"])
+            .unwrap_or(normalized)
+            .trim()
+            .trim_end_matches(['?', '？'])
+            .trim_end();
+        match read_command {
+            "笔记" | "看看笔记" | "查看笔记" | "列出笔记" | "列出所有笔记" | "notes"
+            | "list notes" | "show notes" => return step("notes.list", json!({})),
+            "时间" | "几点" | "几点了" | "现在几点" | "现在几点了" | "现在时间" | "当前时间"
+            | "time" | "what time is it" => return step("clock.now", json!({})),
+            _ => {}
         }
         let list = available
             .iter()
@@ -89,7 +120,7 @@ impl Planner for RulePlanner {
             .join("\n");
         Plan {
             reply: Some(format!(
-                "我还不会处理这句话。当前可用的能力：\n{list}\n试试：\"记一下 买牛奶\"、\"看看笔记\"、\"清空笔记\"、\"现在几点\""
+                "我还不会处理这句话。当前可用的能力：\n{list}\n试试：\"记一下 买牛奶\"、\"看看笔记\"、\"清空笔记\"、\"恢复笔记\"、\"现在几点\""
             )),
             ..Plan::default()
         }
@@ -129,6 +160,12 @@ mod tests {
         );
         assert_eq!(first("清空笔记").await.as_deref(), Some("notes.clear"));
         assert_eq!(first("看看笔记").await.as_deref(), Some("notes.list"));
+        assert_eq!(first("恢复笔记").await.as_deref(), Some("notes.restore"));
+        assert_eq!(first("撤销清空").await.as_deref(), Some("notes.restore"));
+        assert_eq!(
+            first("restore notes").await.as_deref(),
+            Some("notes.restore")
+        );
         assert_eq!(first("现在几点").await.as_deref(), Some("clock.now"));
         assert_eq!(first("讲个笑话").await, None);
     }
@@ -137,5 +174,77 @@ mod tests {
     async fn note_text_is_extracted() {
         let p = RulePlanner.plan(&intent("记一下：买牛奶"), &[]).await;
         assert_eq!(p.steps[0].args, json!({"text": "买牛奶"}));
+        let p = RulePlanner.plan(&intent("note clear notes?"), &[]).await;
+        assert_eq!(p.steps[0].capability.as_str(), "notes.append");
+        assert_eq!(p.steps[0].args, json!({"text": "clear notes?"}));
+    }
+
+    #[tokio::test]
+    async fn complete_mutating_commands_allow_polite_prefixes_and_terminal_punctuation() {
+        for text in [
+            "清空笔记",
+            "请清空笔记。",
+            "帮我清空笔记！",
+            "请帮我 清空笔记!",
+            "CLEAR NOTES",
+            "  clear notes.  ",
+        ] {
+            assert_eq!(first(text).await.as_deref(), Some("notes.clear"), "{text}");
+        }
+        for text in [
+            "恢复笔记",
+            "请恢复笔记。",
+            "帮我撤销清空！",
+            "请帮我 撤销清空笔记!",
+            "RESTORE NOTES",
+            "  restore notes.  ",
+        ] {
+            assert_eq!(
+                first(text).await.as_deref(),
+                Some("notes.restore"),
+                "{text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn negations_questions_and_quoted_commands_do_not_mutate_notes() {
+        for text in [
+            "不要清空笔记",
+            "请不要清空笔记",
+            "别恢复笔记",
+            "怎么清空笔记",
+            "清空笔记吗",
+            "清空笔记?",
+            "清空笔记？！",
+            "请问清空笔记",
+            "恢复笔记？",
+            "帮我恢复笔记？",
+            "Do not clear notes",
+            "can you restore notes?",
+            "clear notes?",
+            "\"clear notes\"",
+            "“清空笔记”",
+            "这句话是清空笔记",
+            "清空笔记后怎么恢复笔记",
+        ] {
+            let p = RulePlanner.plan(&intent(text), &[]).await;
+            assert!(
+                p.steps.is_empty(),
+                "unexpected action for {text}: {:?}",
+                p.steps
+            );
+            assert!(p.reply.unwrap().contains("恢复笔记"));
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_read_only_questions_remain_available() {
+        for text in ["看看笔记", "请查看笔记？", "SHOW NOTES?"] {
+            assert_eq!(first(text).await.as_deref(), Some("notes.list"), "{text}");
+        }
+        for text in ["现在几点", "请问现在几点？", "What Time Is It?"] {
+            assert_eq!(first(text).await.as_deref(), Some("clock.now"), "{text}");
+        }
     }
 }
