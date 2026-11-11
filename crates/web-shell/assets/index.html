@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#111918">
+    <meta name="description" content="AgentOS — 以意图为入口的情景式操作系统界面。">
+    <title>AgentOS · 你的意图空间</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%23131c19'/%3E%3Ccircle cx='32' cy='32' r='18' fill='none' stroke='%23c8decf' stroke-width='3'/%3E%3Cellipse cx='32' cy='32' rx='27' ry='9' fill='none' stroke='%23c8decf' stroke-width='2' transform='rotate(-35 32 32)'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="/shell.css">
+    <script type="module" src="/shell.js"></script>
+  </head>
+  <body>
+    <svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+      <symbol id="i-orbit" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6.5"/><ellipse cx="12" cy="12" rx="11" ry="3.8" transform="rotate(-38 12 12)"/></symbol>
+      <symbol id="i-home" viewBox="0 0 24 24"><path d="m12 3 8 8v9h-6v-6h-4v6H4v-9z"/></symbol>
+      <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1.5"/><rect x="14" y="4" width="6" height="6" rx="1.5"/><rect x="4" y="14" width="6" height="6" rx="1.5"/><rect x="14" y="14" width="6" height="6" rx="1.5"/></symbol>
+      <symbol id="i-memory" viewBox="0 0 24 24"><path d="M8 5H5v14h14v-3M9 3h12v10H9zM12 7h6M12 10h4M8 16h7"/></symbol>
+      <symbol id="i-activity" viewBox="0 0 24 24"><path d="M4 12h4l3-7 3 14 3-7h3"/></symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5"/><circle cx="15" cy="17" r="2.5"/></symbol>
+      <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 2.3 6.7L21 12l-6.7 2.3L12 21l-2.3-6.7L3 12l6.7-2.3z"/></symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+      <symbol id="i-diagonal" viewBox="0 0 24 24"><path d="M6 18 18 6M6 6h12v12"/></symbol>
+      <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M9 22h6"/></symbol>
+      <symbol id="i-mic-off" viewBox="0 0 24 24"><path d="m3 3 18 18M9 9v3a3 3 0 0 0 5 2M15 9V6a3 3 0 0 0-5-2M5 10v2a7 7 0 0 0 12 5M19 10v2M12 19v3M9 22h6"/></symbol>
+      <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="3"/><path d="M6 9h.1M10 9h.1M14 9h.1M18 9h.1M6 12h.1M10 12h.1M14 12h.1M18 12h.1M7 15h10"/></symbol>
+      <symbol id="i-volume" viewBox="0 0 24 24"><path d="m11 4-5 5H3v6h3l5 5zM15 8a6 6 0 0 1 0 8M18 5a10 10 0 0 1 0 14"/></symbol>
+      <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+      <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></symbol>
+      <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 4 12 8-12 8z"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M6.2 7a7 7 0 0 1 11.6-1L20 9M4 15l2.2 3A7 7 0 0 0 18 17"/></symbol>
+      <symbol id="i-leaf" viewBox="0 0 24 24"><path d="M20 3C8 2 2 8 5 15s14 5 15-12ZM5 20 16 8"/></symbol>
+      <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    </defs></svg>
+    <div class="os-shell">
+      <aside class="rail" aria-label="系统导航">
+        <button class="brand-mark" data-scene="overview" aria-label="AgentOS 首页"><svg><use href="#i-orbit"/></svg></button>
+        <div class="rail-line"></div>
+        <nav class="rail-navigation">
+          <button class="rail-button active" data-scene="overview" title="此刻 · Alt+1" aria-label="此刻" aria-current="page"><svg><use href="#i-orbit"/></svg><span>此刻</span></button>
+          <button class="rail-button" data-scene="focus" title="专注空间 · Alt+2" aria-label="专注空间"><svg><use href="#i-grid"/></svg><span>空间</span></button>
+          <button class="rail-button" data-scene="memory" title="记忆 · Alt+3" aria-label="记忆"><svg><use href="#i-memory"/></svg><span>记忆</span></button>
+          <button class="rail-button" data-scene="activity" title="任务轨迹 · Alt+4" aria-label="任务轨迹"><svg><use href="#i-activity"/></svg><span>轨迹</span><i id="activity-dot" hidden></i></button>
+        </nav>
+        <div class="rail-bottom">
+          <button class="rail-button" id="settings-button" title="偏好设置" aria-label="偏好设置"><svg><use href="#i-settings"/></svg></button>
+          <div class="profile" title="本机个人空间">我</div>
+        </div>
+      </aside>
+      <div class="main-shell">
+        <header class="topbar">
+          <div class="wordmark">agent<span>OS</span><span class="wordmark-separator"></span><span class="wordmark-caption">与你，一起思考</span></div>
+          <div class="system-indicators"><button id="connection-button" class="connection-indicator" title="查看连接信息"><i></i><span id="connection-label">本地空间</span></button><span class="indicator-divider"></span><span id="system-time">--:--</span><svg class="top-volume"><use href="#i-volume"/></svg></div>
+        </header>
+        <main id="main" tabindex="-1">
+          <div class="workspace-heading"><div class="breadcrumb"><span id="scene-number">01</span><span class="breadcrumb-slash">/</span><span id="scene-label">此刻</span></div><div class="adaptive-label"><svg><use href="#i-spark"/></svg><span>界面随意图而生</span><span class="tiny-dot"></span><span id="workspace-mode" role="status">情景画布</span><button id="regenerate-layout" class="subtle-button" title="根据当前情景重新组织界面" aria-label="重新生成布局"><svg><use href="#i-refresh"/></svg></button></div></div>
+          <div id="scene-content" class="scene-content"></div>
+        </main>
+        <footer class="voice-dock">
+          <section id="live-voice-panel" class="live-voice-panel" aria-label="实时语音对话" hidden>
+            <div class="voice-session-heading"><div class="voice-session-label"><span class="voice-connection-dot"></span><span id="voice-session-status" role="status">实时语音待机</span></div><div class="voice-session-actions"><button type="button" id="voice-interrupt" class="voice-action" title="打断当前回应 · Esc" aria-label="打断当前回应"><svg><use href="#i-pause"/></svg><span>打断</span></button><button type="button" id="voice-mute" class="voice-action" title="静音麦克风" aria-label="静音麦克风" aria-pressed="false"><svg><use href="#i-mic"/></svg></button><button type="button" id="voice-end" class="voice-action voice-end" title="结束对话 · Shift+Esc" aria-label="结束对话"><svg><use href="#i-close"/></svg></button></div></div>
+            <div id="voice-captions" class="voice-captions" aria-live="off"></div><p id="voice-error" class="voice-error" role="alert" hidden></p>
+          </section>
+          <div id="voice-announcement" class="sr-only" role="status" aria-live="polite"></div>
+          <div id="response-line" class="response-line" role="status" aria-live="polite"><span class="response-orbit">✧</span><span id="response-text">我在这里。说出你的想法，剩下的交给我。</span></div>
+          <form id="intent-form" class="intent-bar" autocomplete="off">
+            <button type="button" class="mic-button" id="mic-button" aria-label="开始实时语音对话" title="开始实时语音对话 · Alt+V"><svg><use href="#i-mic"/></svg></button>
+            <div class="intent-input-wrap"><label class="sr-only" for="intent-input">告诉 AgentOS 你的意图</label><input id="intent-input" name="intent" maxlength="16384" placeholder="说点什么，或在这里输入…" aria-describedby="input-hint"><span class="listening-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></div>
+            <span class="voice-shortcut" id="input-hint">⌥ V <span>唤起语音</span></span>
+            <button type="button" class="subtle-button" id="keyboard-button" title="键盘输入 · /" aria-label="使用键盘输入"><svg><use href="#i-keyboard"/></svg></button>
+            <span class="input-divider"></span><button type="submit" class="send-button" aria-label="提交意图" title="提交意图 · Enter"><svg><use href="#i-arrow"/></svg></button>
+          </form>
+          <div class="dock-bottom"><span><i class="availability-dot"></i><span id="voice-mode-label">按下麦克风，开始实时对话</span></span><span>一个意图，无限可能<span class="footer-plus">＋</span></span><button id="privacy-button"><svg><use href="#i-lock"/></svg>你的空间，由你掌控</button></div>
+        </footer>
+      </div>
+    </div>
+    <dialog id="settings-dialog" aria-labelledby="settings-title"><div class="dialog-top"><span class="eyebrow">MAKE YOURSELF AT HOME</span><button class="subtle-button" data-close-dialog="settings-dialog" aria-label="关闭设置"><svg><use href="#i-close"/></svg></button></div><h2 id="settings-title">让系统适应你。</h2><p class="dialog-intro">决定这个空间如何与你相处。</p><div class="setting-row"><div><strong>键盘操作朗读</strong><p>实时对话之外，用声音读出操作结果</p></div><button class="toggle" id="speech-toggle" role="switch" aria-checked="false" aria-label="键盘操作朗读"><span></span></button></div><div class="voice-settings-row"><strong>实时语音对话</strong><p id="voice-settings-status" class="connection-details">正在检查实时语音连接…</p></div><div class="setting-row"><div><strong>环境动效</strong><p>让粒子和光晕缓慢流动</p></div><button class="toggle" id="motion-toggle" role="switch" aria-checked="true" aria-label="环境动效"><span></span></button></div><div class="setting-row"><div><strong>AI 情景布局</strong><p>由模型选择内容、组件和排版</p></div><button class="toggle" id="layout-toggle" role="switch" aria-checked="true" aria-label="AI 情景布局"><span></span></button></div><p id="layout-details" class="connection-details"></p><div class="connection-details" id="connection-details"></div><div class="dialog-note">快捷键：<kbd>/</kbd> 输入 · <kbd>⌥ V</kbd> 连接或结束语音 · <kbd>Esc</kbd> 打断回应 · <kbd>Shift Esc</kbd> 结束对话 · <kbd>⌥ 1–4</kbd> 切换空间</div></dialog>
+    <dialog id="voice-dialog" aria-labelledby="voice-title"><div class="dialog-top"><span class="eyebrow">A CONVERSATION, AT YOUR PACE</span><button class="subtle-button" data-close-dialog="voice-dialog" aria-label="关闭语音说明"><svg><use href="#i-close"/></svg></button></div><div class="dialog-symbol"><svg><use href="#i-mic"/></svg></div><h2 id="voice-title">接着说，我在听。</h2><p class="dialog-intro">开启后，麦克风声音会实时传给配置的语音模型。说完即可回应，无需提交转录；你可以随时开口或按 Esc 打断 AI。</p><p class="dialog-intro">对话中可用语音记笔记、切换空间、控制专注。字幕仅供参考，待批准操作仍需在界面明确批准。结束对话或离开页面会关闭麦克风。</p><p class="voice-support" id="voice-support"></p><button id="voice-consent-button" class="primary-button">开启实时对话 <svg><use href="#i-arrow"/></svg></button><button class="text-button" data-close-dialog="voice-dialog">继续使用键盘</button></dialog>
+    <dialog id="privacy-dialog" aria-labelledby="privacy-title"><div class="dialog-top"><span class="eyebrow">YOUR SPACE. YOUR CHOICE.</span><button class="subtle-button" data-close-dialog="privacy-dialog" aria-label="关闭隐私说明"><svg><use href="#i-close"/></svg></button></div><div class="dialog-symbol"><svg><use href="#i-lock"/></svg></div><h2 id="privacy-title">让每一步，都看得见。</h2><p class="dialog-intro">开启实时对话后，麦克风音频会直接传给配置的实时语音模型，任务与笔记摘要用于理解上下文。字幕只保留在当前页面；Shell 不保存原始音频。结束、离开或隐藏页面会关闭麦克风。</p><p class="dialog-intro">AI 布局会接收当前意图、任务与笔记摘要、专注目标和屏幕尺寸。输入草稿、原始音频和批准令牌不参与布局生成。系统不会后台自动监听，也不会把一句“好的”当作任务批准。</p><div class="dialog-note">打断 AI 只停止语音回应，已接收的后台任务继续运行。文件、日历、消息等外部应用尚未接入。</div></dialog>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>

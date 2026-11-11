@@ -344,8 +344,8 @@ impl Capability for HomeList {
                 let id = s.get("entity_id").and_then(Value::as_str).unwrap_or("");
                 let d_ok = domain
                     .filter(|d| !d.is_empty())
-                    .map_or(true, |d| id.split('.').next() == Some(d));
-                let q_ok = query.as_ref().map_or(true, |q| {
+                    .is_none_or(|d| id.split('.').next() == Some(d));
+                let q_ok = query.as_ref().is_none_or(|q| {
                     id.contains(q.as_str()) || friendly(s).to_lowercase().contains(q.as_str())
                 });
                 d_ok && q_ok

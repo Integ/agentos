@@ -194,7 +194,7 @@ impl Blackboard {
     /// A short rendering for a planner's context.
     pub fn summary(&self, max_chars: usize) -> Option<String> {
         let g = self.lock();
-        if g.doc.as_object().map_or(true, Map::is_empty) {
+        if g.doc.as_object().is_none_or(Map::is_empty) {
             return None;
         }
         let mut s = g.doc.to_string();

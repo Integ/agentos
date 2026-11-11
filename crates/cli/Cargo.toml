@@ -1,0 +1,18 @@
+[package]
+name = "agentos-cli"
+description = "AgentOS Unix socket client and independent terminal task workbench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "agentos"
+path = "src/main.rs"
+
+[dependencies]
+agentos-core.workspace = true
+agentos-runtime.workspace = true
+agentos-ipc.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

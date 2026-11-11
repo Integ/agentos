@@ -1,0 +1,353 @@
+//! Planner backed by the Claude Messages API.
+//!
+//! Each intent becomes one `POST /v1/messages` call. Every registered
+//! capability is offered as a tool; the `tool_use` blocks in the response
+//! become plan steps (the planner never executes anything itself — the butler
+//! runs each step through the policy engine). Text blocks become the reply.
+//!
+//! Rust has no official Anthropic SDK, so this speaks raw HTTP.
+
+use std::time::Duration;
+
+use agentos_core::{CapabilitySpec, Intent};
+use async_trait::async_trait;
+use serde_json::{json, Value};
+
+use crate::planner::{capability_name, tool_name, Plan, Planner, Step, SYSTEM_PROMPT};
+
+pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
+pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+const API_VERSION: &str = "2026-10-21";
+const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
+
+#[derive(Debug, Clone)]
+pub struct ClaudeConfig {
+    pub api_key: String,
+    pub model: String,
+    pub base_url: String,
+    pub effort: String,
+    pub max_tokens: u32,
+}
+
+impl ClaudeConfig {
+    /// Build from `ANTHROPIC_API_KEY`, `AGENTOS_MODEL`, `ANTHROPIC_BASE_URL`.
+    /// Returns `None` when no API key is set.
+    pub fn from_env() -> Option<Self> {
+        let api_key = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())?;
+        Some(Self {
+            api_key,
+            model: std::env::var("AGENTOS_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()),
+            base_url: std::env::var("ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|_| DEFAULT_BASE_URL.into()),
+            effort: "medium".into(),
+            max_tokens: 16_000,
+        })
+    }
+}
+
+/// Request body for one intent.
+pub fn build_request(cfg: &ClaudeConfig, intent: &Intent, available: &[CapabilitySpec]) -> Value {
+    let tools: Vec<Value> = available
+        .iter()
+        .map(|s| {
+            json!({
+                "name": tool_name(&s.name),
+                "description": format!("{}（风险等级：{:?}）", s.description, s.risk),
+                "input_schema": s.input_schema,
+            })
+        })
+        .collect();
+    let mut user = intent.text.clone();
+    if let Some(speaker) = &intent.speaker {
+        user = format!("[{speaker}] {user}");
+    }
+    json!({
+        "model": cfg.model,
+        "max_tokens": cfg.max_tokens,
+        "system": SYSTEM_PROMPT,
+        "output_config": { "effort": cfg.effort },
+        "fallbacks": "default",
+        "tools": tools,
+        "messages": [{ "role": "user", "content": user }],
+    })
+}
+
+/// Turn a Messages API response into a plan.
+pub fn parse_response(body: &Value) -> Plan {
+    if body.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
+        return Plan::failed("模型拒绝了这个请求。");
+    }
+    if let Some(reason) = body.get("stop_reason") {
+        if !matches!(
+            reason.as_str(),
+            Some("end_turn" | "tool_use" | "stop_sequence")
+        ) {
+            return Plan::failed("模型响应未正常完成，已放弃整个计划。");
+        }
+    }
+    let Some(content) = body.get("content").and_then(Value::as_array) else {
+        return Plan::failed("模型没有返回有效内容。");
+    };
+    let mut steps = Vec::new();
+    let mut text = Vec::new();
+    for block in content {
+        match block.get("type").and_then(Value::as_str) {
+            Some("tool_use") => {
+                let Some(name) = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.trim().is_empty())
+                else {
+                    return Plan::failed("模型返回的工具调用缺少名称，已放弃整个计划。");
+                };
+                let Some(args @ Value::Object(_)) = block.get("input") else {
+                    return Plan::failed(format!(
+                        "模型返回的工具参数无效（{name}），已放弃整个计划。"
+                    ));
+                };
+                steps.push(Step {
+                    capability: capability_name(name),
+                    args: args.clone(),
+                });
+            }
+            Some("text") => {
+                let Some(t) = block.get("text").and_then(Value::as_str) else {
+                    return Plan::failed("模型返回的文本格式无效，已放弃整个计划。");
+                };
+                if !t.trim().is_empty() {
+                    text.push(t.trim().to_string());
+                }
+            }
+            // Thinking blocks are not executable plan steps.
+            Some("thinking") if block.get("thinking").is_some_and(Value::is_string) => {}
+            Some("redacted_thinking") if block.get("data").is_some_and(Value::is_string) => {}
+            _ => return Plan::failed("模型返回的内容块格式无效，已放弃整个计划。"),
+        }
+    }
+    if body.get("stop_reason").and_then(Value::as_str) == Some("tool_use") && steps.is_empty() {
+        return Plan::failed("模型响应缺少完整的工具调用，已放弃整个计划。");
+    }
+    let reply = if text.is_empty() {
+        None
+    } else {
+        Some(text.join("\n"))
+    };
+    if steps.is_empty() && reply.is_none() {
+        return Plan::failed("模型没有返回任何内容。");
+    }
+    Plan {
+        steps,
+        reply,
+        ..Plan::default()
+    }
+}
+
+pub struct ClaudePlanner {
+    cfg: ClaudeConfig,
+    http: reqwest::Client,
+}
+
+impl ClaudePlanner {
+    pub fn new(cfg: ClaudeConfig) -> Result<Self, reqwest::Error> {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(600))
+            .build()?;
+        Ok(Self { cfg, http })
+    }
+
+    /// Use a caller-built HTTP client (custom proxy, TLS or timeout settings).
+    pub fn with_client(cfg: ClaudeConfig, http: reqwest::Client) -> Self {
+        Self { cfg, http }
+    }
+
+    pub fn model(&self) -> &str {
+        &self.cfg.model
+    }
+
+    async fn call(&self, body: &Value) -> Result<Value, String> {
+        let url = format!("{}/v1/messages", self.cfg.base_url.trim_end_matches('/'));
+        let resp = self
+            .http
+            .post(url)
+            .header("x-api-key", &self.cfg.api_key)
+            .header("anthropic-version", API_VERSION)
+            .header("anthropic-beta", FALLBACK_BETA)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| format!("无法连接 Claude API：{e}"))?;
+        let status = resp.status();
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Claude API 返回了无法解析的响应（HTTP {status}）：{e}"))?;
+        if !status.is_success() {
+            let msg = value
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .unwrap_or("未知错误");
+            return Err(format!("Claude API 错误（HTTP {status}）：{msg}"));
+        }
+        Ok(value)
+    }
+}
+
+#[async_trait]
+impl Planner for ClaudePlanner {
+    async fn plan(&self, intent: &Intent, available: &[CapabilitySpec]) -> Plan {
+        let body = build_request(&self.cfg, intent, available);
+        match self.call(&body).await {
+            Ok(resp) => parse_response(&resp),
+            Err(e) => Plan::failed(e),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_http::one_shot_server;
+    use agentos_core::{now_ms, CapabilityName, DeviceId, IntentId, RiskLevel, Urgency};
+
+    fn cfg(base_url: &str) -> ClaudeConfig {
+        ClaudeConfig {
+            api_key: "test-key".into(),
+            model: DEFAULT_MODEL.into(),
+            base_url: base_url.into(),
+            effort: "medium".into(),
+            max_tokens: 1024,
+        }
+    }
+
+    fn intent(text: &str) -> Intent {
+        Intent {
+            id: IntentId(1),
+            source: DeviceId::new("t"),
+            speaker: None,
+            text: text.into(),
+            urgency: Urgency::Normal,
+            at_ms: now_ms(),
+        }
+    }
+
+    fn specs() -> Vec<CapabilitySpec> {
+        vec![CapabilitySpec {
+            name: CapabilityName::new("notes.append"),
+            description: "追加一条笔记".into(),
+            risk: RiskLevel::Reversible,
+            input_schema: json!({"type": "object", "properties": {"text": {"type": "string"}}}),
+        }]
+    }
+
+    #[test]
+    fn request_offers_capabilities_as_tools() {
+        let body = build_request(&cfg("x"), &intent("记一下买牛奶"), &specs());
+        assert_eq!(body["model"], DEFAULT_MODEL);
+        assert_eq!(body["tools"][0]["name"], "notes__append");
+        assert_eq!(body["fallbacks"], "default");
+        assert_eq!(body["messages"][0]["content"], "记一下买牛奶");
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn tool_use_blocks_become_steps_in_order() {
+        let resp = json!({
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "text", "text": "好的，我来记下。"},
+                {"type": "tool_use", "id": "t1", "name": "notes__append", "input": {"text": "买牛奶"}},
+                {"type": "tool_use", "id": "t2", "name": "notes__list", "input": {}}
+            ]
+        });
+        let plan = parse_response(&resp);
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[0].capability.as_str(), "notes.append");
+        assert_eq!(plan.steps[0].args, json!({"text": "买牛奶"}));
+        assert_eq!(plan.steps[1].capability.as_str(), "notes.list");
+        assert_eq!(plan.reply.as_deref(), Some("好的，我来记下。"));
+    }
+
+    #[test]
+    fn refusal_yields_no_steps() {
+        let resp = json!({"stop_reason": "refusal", "content": []});
+        let plan = parse_response(&resp);
+        assert!(plan.steps.is_empty());
+        assert!(plan.reply.is_some());
+        assert!(plan.error.is_some());
+    }
+
+    #[test]
+    fn incomplete_or_malformed_blocks_never_run_a_partial_plan() {
+        let good = json!({"type": "tool_use", "id": "t1", "name": "notes__append", "input": {"text": "x"}});
+        let bad_blocks = [
+            json!({"type": "tool_use", "input": {}}),
+            json!({"type": "tool_use", "name": " ", "input": {}}),
+            json!({"type": "tool_use", "name": "notes__clear"}),
+            json!({"type": "tool_use", "name": "notes__clear", "input": []}),
+            json!({"type": "tool_use", "name": "notes__clear", "input": null}),
+            json!({"type": "text"}),
+            json!({"type": "unknown"}),
+        ];
+        for bad in bad_blocks {
+            let plan = parse_response(&json!({"stop_reason": "tool_use", "content": [good, bad]}));
+            assert!(plan.steps.is_empty());
+            assert!(plan.error.is_some());
+        }
+        for reason in [json!("max_tokens"), json!("pause_turn"), Value::Null] {
+            let plan = parse_response(&json!({"stop_reason": reason, "content": [good]}));
+            assert!(plan.steps.is_empty());
+            assert!(plan.error.is_some());
+        }
+    }
+
+    #[test]
+    fn thinking_blocks_do_not_hide_valid_tool_calls() {
+        let plan = parse_response(&json!({"stop_reason": "tool_use", "content": [
+            {"type": "thinking", "thinking": "reasoning", "signature": "test"},
+            {"type": "redacted_thinking", "data": "test"},
+            {"type": "tool_use", "name": "notes__list", "input": {}}
+        ]}));
+        assert_eq!(plan.steps.len(), 1);
+        assert!(plan.error.is_none());
+    }
+
+    fn local_planner(url: &str) -> ClaudePlanner {
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        ClaudePlanner::with_client(cfg(url), http)
+    }
+
+    #[tokio::test]
+    async fn plans_over_http_with_required_headers() {
+        let (url, server) = one_shot_server(
+            "200 OK",
+            json!({"stop_reason": "tool_use", "content": [
+                {"type": "tool_use", "id": "t1", "name": "notes__append", "input": {"text": "买牛奶"}}
+            ]}),
+        )
+        .await;
+        let planner = local_planner(&url);
+        let plan = planner.plan(&intent("记一下买牛奶"), &specs()).await;
+        assert_eq!(plan.steps[0].capability.as_str(), "notes.append");
+        let req = server.await.unwrap().to_ascii_lowercase();
+        assert!(req.starts_with("post /v1/messages"));
+        assert!(req.contains("x-api-key: test-key"));
+        assert!(req.contains(&format!("anthropic-version: {API_VERSION}")));
+        assert!(req.contains(&format!("anthropic-beta: {FALLBACK_BETA}")));
+    }
+
+    #[tokio::test]
+    async fn api_error_becomes_reply() {
+        let (url, _server) = one_shot_server(
+            "401 Unauthorized",
+            json!({"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}),
+        )
+        .await;
+        let planner = local_planner(&url);
+        let plan = planner.plan(&intent("hi"), &specs()).await;
+        assert!(plan.steps.is_empty());
+        assert!(plan.error.is_some());
+        assert!(plan.reply.unwrap().contains("invalid x-api-key"));
+    }
+}
