@@ -1,0 +1,22 @@
+[package]
+name = "agentos-services"
+description = "AgentOS system services shared by every daemon: capability registry, perception and expression hubs, agents, blackboard, judge, PIN, and the MCP, plugin and smart-home capability providers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+agentos-core.workspace = true
+agentos-audit.workspace = true
+agentos-planner.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+libc = "0.2"
+
+[dev-dependencies]
+agentos-planner = { workspace = true, features = ["test-util"] }

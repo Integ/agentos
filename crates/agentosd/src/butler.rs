@@ -28,17 +28,17 @@ use agentos_core::{
 use agentos_policy::{CallContext, Decision, PolicyEngine};
 use serde_json::{json, Value};
 
-use crate::agents::{AgentDirectory, AgentManifest};
-use crate::blackboard::Blackboard;
-use crate::expression::ExpressionHub;
-use crate::identity::PinVault;
-use crate::judge::{Judge, Review, Verdict};
-use crate::planner::{Conversation, Planner, Round, Step, ToolResult, SYSTEM_PROMPT};
-use crate::plugin_store::PluginManager;
-use crate::registry::CapabilityRegistry;
 use crate::shell_api::{risk_label, EventBus};
 use crate::tasks::{Frame, Task, TaskState, TaskStore, KEEP_FINISHED};
 use crate::voice::MIC_DEVICE;
+use agentos_planner::{Conversation, Planner, Round, Step, ToolResult, SYSTEM_PROMPT};
+use agentos_services::agents::{AgentDirectory, AgentManifest};
+use agentos_services::blackboard::Blackboard;
+use agentos_services::expression::ExpressionHub;
+use agentos_services::identity::PinVault;
+use agentos_services::judge::{Judge, Review, Verdict};
+use agentos_services::plugin_store::PluginManager;
+use agentos_services::registry::CapabilityRegistry;
 
 /// Planning rounds the butler gets per task.
 pub const BUTLER_MAX_ROUNDS: u32 = 8;
@@ -50,6 +50,10 @@ enum Flow {
     Continue,
     /// The top frame is done; its answer, if any.
     Finished(Option<String>),
+    /// The top frame's planner could not act on its request at all.
+    Unhandled(String),
+    /// The top frame's planner failed; the frame cannot continue.
+    Failed(String),
     /// Waiting for the human.
     Paused,
     /// The top frame handed its current call to a new agent.
@@ -201,7 +205,7 @@ impl Butler {
     }
 
     /// Shared memory shown to the planner. Register its capabilities with
-    /// [`crate::blackboard::register_all`] so agents can read and write it.
+    /// [`agentos_services::blackboard::register_all`] so agents can read and write it.
     pub fn with_blackboard(mut self, board: Blackboard) -> Self {
         self.board = Some(board);
         self
@@ -582,9 +586,16 @@ impl Butler {
         self.log(AuditEvent::TaskState {
             task: task.id,
             intent: task.intent.id,
-            state: format!("{state:?}").to_lowercase(),
+            state: state.name().into(),
         });
-        self.emit(json!({"type": "done", "intent": task.intent.id, "task": task.id}));
+        // `state` tells a shell how the task ended: done, unhandled, failed
+        // or cancelled. "Finished" alone must not read as "succeeded".
+        self.emit(json!({
+            "type": "done",
+            "intent": task.intent.id,
+            "task": task.id,
+            "state": state.name(),
+        }));
         self.recent.push(task);
         if self.recent.len() > KEEP_FINISHED {
             self.recent.remove(0);
@@ -610,20 +621,35 @@ impl Butler {
                     self.waiting.insert(task.id, task);
                     return;
                 }
-                Flow::Finished(answer) => {
+                flow @ (Flow::Finished(_) | Flow::Unhandled(_) | Flow::Failed(_)) => {
                     let done = task.stack.pop().expect("a finished frame");
+                    // How the frame ended: what it says, and whether it counts
+                    // as having done its work.
+                    let (answer, state) = match flow {
+                        Flow::Finished(answer) => (answer, TaskState::Done),
+                        Flow::Unhandled(reason) => (Some(reason), TaskState::Unhandled),
+                        Flow::Failed(error) => (Some(error), TaskState::Failed),
+                        _ => unreachable!("matched above"),
+                    };
                     let Some(parent) = task.stack.last_mut() else {
                         if let Some(a) = &answer {
-                            self.say(&task.intent, ExpressionKind::Report, a.clone())
-                                .await;
+                            let kind = if state == TaskState::Failed {
+                                ExpressionKind::Error
+                            } else {
+                                ExpressionKind::Report
+                            };
+                            self.say(&task.intent, kind, a.clone()).await;
                         }
                         task.answer = answer.or_else(|| Some(done.summary()));
-                        self.finish(task, TaskState::Done);
+                        self.finish(task, state);
                         return;
                     };
                     // A delegate's answer is the result of the parent's call.
-                    let ok = done.history.iter().any(|r| r.results.iter().any(|x| x.ok))
-                        || answer.is_some();
+                    // One that could not plan, or had no way to act, did not
+                    // do what it was asked, whatever it said in explanation.
+                    let ok = state == TaskState::Done
+                        && (done.history.iter().any(|r| r.results.iter().any(|x| x.ok))
+                            || answer.is_some());
                     let content = answer.unwrap_or_else(|| done.summary());
                     self.log(AuditEvent::AgentFinished {
                         intent: task.intent.id,
@@ -675,9 +701,18 @@ impl Butler {
                     .map(|s| s.capability.to_string())
                     .collect(),
             });
+            if let Some(error) = plan.error.take() {
+                // Nothing from a failed plan may run, and an error is not an
+                // answer: the frame ends as failed.
+                return Flow::Failed(error);
+            }
             if plan.steps.is_empty() {
-                if f.history.is_empty() && plan.reply.is_none() && f.is_butler() {
-                    plan.reply = Some("我还不会做这件事".into());
+                // Nothing ran yet and the planner either said it has no way to
+                // act or said nothing at all: not understood, not done.
+                if f.history.is_empty() && (plan.unhandled || plan.reply.is_none()) {
+                    return Flow::Unhandled(
+                        plan.reply.unwrap_or_else(|| "我还不会做这件事".into()),
+                    );
                 }
                 return Flow::Finished(plan.reply);
             }
@@ -991,7 +1026,7 @@ impl Butler {
             capabilities: names,
         });
         let mut system =
-            crate::planner::sub_agent_prompt(&m.name, &m.description, m.instructions.as_deref());
+            agentos_planner::sub_agent_prompt(&m.name, &m.description, m.instructions.as_deref());
         if let Some(b) = self.board.as_ref().and_then(|b| b.summary(1000)) {
             system.push_str("\n\n共享黑板（");
             system.push_str(&b);

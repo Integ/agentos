@@ -8,13 +8,13 @@ use agentos_core::{
     now_ms, AgentId, CapabilityName, DeviceId, DeviceInfo, Expression, ExpressionKind, Intent,
     IntentId, Modality, Output, OutputError, PrivacyClass, RiskLevel, Urgency,
 };
+use agentos_planner::{Conversation, Plan, Planner, RulePlanner, Step};
 use agentos_policy::PolicyEngine;
-use agentosd::agents::{AgentDirectory, AgentManifest};
+use agentos_services::agents::{AgentDirectory, AgentManifest};
+use agentos_services::expression::ExpressionHub;
+use agentos_services::registry::CapabilityRegistry;
 use agentosd::builtin::{self, NoteStore};
 use agentosd::butler::{grant_manifest, Butler};
-use agentosd::expression::ExpressionHub;
-use agentosd::planner::{Conversation, Plan, Planner, RulePlanner, Step};
-use agentosd::registry::CapabilityRegistry;
 use async_trait::async_trait;
 use serde_json::json;
 

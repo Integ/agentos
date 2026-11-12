@@ -10,10 +10,16 @@ publish = false
 agentos-core.workspace = true
 agentos-policy.workspace = true
 agentos-audit.workspace = true
+agentos-planner.workspace = true
+agentos-services.workspace = true
 agentos-runtime.workspace = true
 agentos-ipc.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+agentos-planner = { workspace = true, features = ["test-util"] }

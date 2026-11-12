@@ -37,8 +37,8 @@ const state = {
   generatedScene: null, generatedKey: '',
 };
 const sceneLabels = { overview: ['01', '此刻'], focus: ['02', '专注空间'], memory: ['03', '记忆'], activity: ['04', '任务轨迹'], clock: ['05', '时间'], help: ['06', '能力'], task: ['04', '意图执行'], note: ['03', '记忆'] };
-const stateLabels = { queued: '等待执行', planning: '正在规划', running: '正在执行', succeeded: '已完成', failed: '执行失败', awaiting_confirmation: '等待你的批准', cancelled: '已取消', interrupted: '已中断', pending: '尚未开始' };
-const terminalStates = new Set(['succeeded', 'failed', 'cancelled', 'interrupted']);
+const stateLabels = { queued: '等待执行', planning: '正在规划', running: '正在执行', succeeded: '已完成', unhandled: '没有听懂', failed: '执行失败', awaiting_confirmation: '等待你的批准', cancelled: '已取消', interrupted: '已中断', pending: '尚未开始', skipped: '未执行' };
+const terminalStates = new Set(['succeeded', 'unhandled', 'failed', 'cancelled', 'interrupted']);
 let orbFrame = 0;
 let orbResizeObserver = null;
 let orbRedraw = null;
@@ -204,14 +204,14 @@ function renderMemory(scene, withHeader = true) {
   const items = panel?.items || notes;
   return `${withHeader ? sceneHeader(scene) : ''}<div class="memory-toolbar"><span class="count-label">${String(items.length).padStart(2, '0')} 个念头 · ${state.connected ? '后台持久笔记' : '保存在这个浏览器'}</span><div><button class="text-button" data-intent="恢复笔记">恢复上次清空</button><button class="primary-button" id="new-note">${icon('spark')}记下灵感</button></div></div>${state.connected && !state.remoteNotesLoaded ? '<p class="system-mode-note">正在从后台读取笔记…</p>' : ''}<div class="notes-grid">${items.length ? items.map((text, i) => `<article class="note-card"><span class="note-index">THOUGHT ${String(i + 1).padStart(2, '0')}</span><p>${e(text)}</p><footer><span>${state.connected ? 'AgentOS · 持久记忆' : '本地 · 灵感'}</span>${state.connected ? icon('memory') : `<button data-delete-note="${e(state.notes[i]?.id)}" aria-label="删除第 ${i + 1} 条笔记">移除</button>`}</footer></article>`).join('') : `<div class="empty-state">${icon('memory')}<h3>给一个念头，留个位置。</h3><p>点击“记下灵感”，或者说“记一下 明天去散步”。<br>不需要文件夹，也不用给它取名字。</p></div>`}</div>${items.length ? '<div class="inline-note"><button class="text-button" data-intent="清空笔记">清空全部笔记（可恢复一次）</button></div>' : ''}`;
 }
-function statusIcon(task) { return icon(task.state === 'succeeded' ? 'check' : task.state === 'awaiting_confirmation' ? 'lock' : ['failed', 'cancelled', 'interrupted'].includes(task.state) ? 'close' : 'activity'); }
+function statusIcon(task) { return icon(task.state === 'succeeded' ? 'check' : task.state === 'unhandled' ? 'question' : task.state === 'awaiting_confirmation' ? 'lock' : ['failed', 'cancelled', 'interrupted'].includes(task.state) ? 'close' : 'activity'); }
 function renderTaskDetail(task) {
   if (!task) return `<div class="empty-state">${icon('orbit')}<h3>每个意图，都有来处。</h3><p>选择一条轨迹，查看它的执行过程。</p></div>`;
   const id = taskId(task);
-  const stepRows = (task.steps || []).map((step, index) => `<div class="step"><strong>${String(index + 1).padStart(2, '0')} · ${e(step.capability)}</strong><p>${e(stateLabels[step.state] || step.state)}</p><details><summary class="count-label">参数与结果</summary><pre class="json-output">${e(JSON.stringify({ args: step.args, result: step.result }, null, 2))}</pre></details></div>`).join('');
+  const stepRows = (task.steps || []).map((step, index) => `<div class="step"><strong>${String(index + 1).padStart(2, '0')} · ${step.agent ? `〔${e(step.agent)}〕` : ''}${e(step.capability)}</strong><p>${e(stateLabels[step.state] || step.state)}</p><details><summary class="count-label">参数与结果</summary><pre class="json-output">${e(JSON.stringify({ args: step.args, result: step.result }, null, 2))}</pre></details></div>`).join('');
   const noteResult = (task.steps || []).findLast(s => s.capability === 'notes.list' && s.state === 'succeeded' && Array.isArray(s.result?.notes));
   const confirmation = state.approval?.id === task.id && state.approval?.token === task.confirmation?.token && state.approval.expires_at_ms > Date.now() ? state.approval : null;
-  const approval = task.state === 'awaiting_confirmation' ? `<section class="approval-panel"><h3>这一步，需要你的明确批准。</h3><p>请查看具体能力、参数和原因。批准仅针对这一任务的这一步。</p>${confirmation ? `<pre class="json-output">${e(JSON.stringify({ capability: task.steps?.[confirmation.step]?.capability, args: task.steps?.[confirmation.step]?.args, reason: task.message }, null, 2))}</pre><button class="primary-button" id="approve-task" data-task-id="${e(id)}">批准第 ${confirmation.step + 1} 步</button><p>批准请求将在 ${e(formatTime(new Date(confirmation.expires_at_ms)))} 过期。</p>` : '<button class="secondary-button" id="refresh-approval">读取并查看当前批准请求</button>'}</section>` : '';
+  const approval = task.state === 'awaiting_confirmation' ? `<section class="approval-panel"><h3>这一步，需要你的明确批准。</h3><p>请查看具体能力、参数和原因。批准仅针对这一任务的这一步。</p>${confirmation ? `<pre class="json-output">${e(JSON.stringify({ capability: task.steps?.[confirmation.step]?.capability, args: task.steps?.[confirmation.step]?.args, reason: task.message }, null, 2))}</pre>${confirmation.verify_identity ? '<p>这一步不可逆，需要输入 PIN 才能批准。PIN 只发给本机后台核对，不会保存。</p><label class="count-label" for="approve-pin">PIN</label> <input id="approve-pin" type="password" inputmode="numeric" autocomplete="off" maxlength="12">' : ''}<button class="primary-button" id="approve-task" data-task-id="${e(id)}">批准第 ${confirmation.step + 1} 步</button><p>批准请求将在 ${e(formatTime(new Date(confirmation.expires_at_ms)))} 过期。</p>` : '<button class="secondary-button" id="refresh-approval">读取并查看当前批准请求</button>'}</section>` : '';
   return `<div class="detail-kicker">${e(id.toUpperCase())} <span> / ${e(stateLabels[task.state] || task.state)}</span></div><h2>${e(taskText(task))}</h2>${task.message ? `<p class="detail-message">${e(task.message)}</p>` : ''}${stepRows ? `<div class="steps">${stepRows}</div>` : ''}${noteResult ? `<div class="result-notes"><span class="eyebrow">返回的笔记</span>${noteResult.result.notes.length ? noteResult.result.notes.map(n => `<p>${e(n)}</p>`).join('') : '<p>笔记本是空的。</p>'}</div>` : ''}${approval}${state.connected && !terminalStates.has(task.state) ? `<div style="margin-top:20px"><button class="secondary-button" id="cancel-task" data-task-id="${e(id)}">停止后续步骤</button></div>` : ''}${task.local ? '<p class="inline-note">此操作在浏览器内完成，不属于后台任务。</p>' : ''}`;
 }
 function renderActivity(scene) {
@@ -372,7 +372,8 @@ async function navigate(kind, { load = true } = {}) {
   state.scene = kind; state.approval = null; render();
   $('#main').scrollTop = 0;
   if (kind === 'memory' && load && state.connected) {
-    try { await submitRemote('看看笔记', 'memory'); } catch (error) { handleError(error); }
+    // Opening a space is navigation, not an intent: read the notes directly.
+    try { if (await readRemoteNotes() && requestVersion === sceneRequestVersion) render(); } catch (error) { handleError(error); }
   } else if ((kind === 'activity' || kind === 'help') && state.connected) {
     try {
       if (kind === 'help') state.capabilities = (await api('/capabilities')).capabilities || [];
@@ -458,7 +459,11 @@ function processTask(task) {
   }
   else if (terminalStates.has(task.state) && `${task.id}:${task.state}` !== lastAnnouncedTask) {
     lastAnnouncedTask = `${task.id}:${task.state}`;
-    respond(task.state === 'succeeded' ? task.message || '已经完成。结果留在你的工作空间。' : task.message || stateLabels[task.state], true);
+    // Not understood is neither done nor broken: say so plainly instead of
+    // reading out the planner's list of capability names.
+    respond(task.state === 'succeeded' ? task.message || '已经完成。结果留在你的工作空间。'
+      : task.state === 'unhandled' ? '这句话我还没听懂，没有执行任何操作。换个说法，或看看我现在能做什么。'
+      : task.message || stateLabels[task.state], true);
   }
   if (!task.confirmation || state.approval?.token !== task.confirmation.token) state.approval = null;
 }
@@ -527,14 +532,29 @@ async function refreshNotebookTasks() {
     changed = observeNotebookTask(data.task) || changed;
   }
   if (state.notebookRefreshNeeded) {
-    // Clear before sending. A lost response may already have created a read
-    // task; never replay it after reconnecting. A user can explicitly refresh.
     state.notebookRefreshNeeded = false;
-    const readVersion = ++state.notebookReadVersion;
-    const data = await api('/intent', { text: '看看笔记' });
-    trackNotebookTask(data.task, readVersion);
+    try { changed = await readRemoteNotes() || changed; }
+    catch (error) {
+      // The service answered but would not serve the read: keep the session
+      // and say so. Anything else is a connection problem for the caller.
+      if (!NOTE_READ_REFUSALS.has(error.code)) throw error;
+      respond('暂时无法读取后台笔记。任务和提交不受影响。');
+    }
   }
   return changed;
+}
+// The interface never speaks for the user. Showing the notebook is a query
+// through the read-only API: it creates no task, costs no planning call and
+// leaves no intent in the history that the user did not express.
+const NOTE_READ_REFUSALS = new Set(['not_found', 'not_readable', 'capability_failed', 'invalid_request', 'invalid_argument', 'response_too_large']);
+async function readRemoteNotes() {
+  const readVersion = ++state.notebookReadVersion;
+  const data = await api('/read/notes.list');
+  // A newer read, or an explicit "看看笔记" task, supersedes this answer.
+  if (readVersion !== state.notebookReadVersion || !state.connected || !Array.isArray(data.value?.notes)) return false;
+  state.remoteNotes = data.value.notes.filter(note => typeof note === 'string');
+  state.remoteNotesLoaded = true;
+  return true;
 }
 async function submitIntent(rawText, { fromVoice = false } = {}) {
   const text = String(rawText).trim();
@@ -854,6 +874,10 @@ document.addEventListener('click', async event => {
   if (button.id === 'refresh-approval') { await selectTask(taskId(state.selected), { readApproval: true }); return; }
   if (button.id === 'approve-task') {
     const shown = state.approval; if (!shown || shown.expires_at_ms <= Date.now() || !state.connected) { state.approval = null; render(); return; }
+    // Read the PIN before anything re-renders the panel, and keep it only for this request.
+    const pinInput = $('#approve-pin'); const pin = pinInput ? pinInput.value.trim() : '';
+    if (shown.verify_identity && !pin) { toast('这一步不可逆，请先输入 PIN。'); pinInput?.focus(); return; }
+    if (pinInput) pinInput.value = '';
     button.disabled = true;
     try {
       const fresh = (await api(`/tasks/${encodeURIComponent(button.dataset.taskId)}`)).task;
@@ -861,7 +885,7 @@ document.addEventListener('click', async event => {
         state.selected = fresh; state.approval = null; render(); respond('批准请求已经变化，请重新读取并查看。'); return;
       }
       state.approval = null;
-      await api(`/tasks/${encodeURIComponent(button.dataset.taskId)}/approve`, { step: shown.step + 1, confirmation: shown.token });
+      await api(`/tasks/${encodeURIComponent(button.dataset.taskId)}/approve`, { step: shown.step + 1, confirmation: shown.token, ...(shown.verify_identity ? { pin } : {}) });
       respond('这一具体步骤的批准已入队，后台会再次校验。'); await refreshTasks(); render();
     } catch (error) { state.approval = null; handleError(error); render(); } return;
   }

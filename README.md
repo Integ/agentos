@@ -10,33 +10,38 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 ## 项目状态
 
-截至 2026-11-11：
+截至 2026-11-12：
 
-- **版本**：`main` 分支是 **v0.3.0**（[更新日志](CHANGELOG.md)），还没有打 tag、没有发布镜像。最新发布版是 **v0.2.2**（2026-11-02），[Releases](https://github.com/Integ/agentos/releases) 里的镜像是这一版。
-- **两组入口并行**：v0.3.0 在原有系统旁边加入了持久任务工作台。两组程序各有自己的协议、状态目录和审计格式，不能互相连接，也不共用数据。
+- **版本**：`main` 分支是 v0.3.0 加上[更新日志](CHANGELOG.md)里“未发布”的改动。v0.3.0 没有打 tag、没有发布镜像；最新发布版是 **v0.2.2**（2026-11-02），[Releases](https://github.com/Integ/agentos/releases) 里的镜像是这一版。
+- **一个任务内核**：任务内核是 `agentos-taskd`：持久任务、多轮规划、子 Agent、黑板、MCP、插件、智能家居、PIN 和哈希链审计都在这一个服务里，终端、Web Shell 和原生桌面都通过同一个协议连接它。镜像目前仍默认启动旧的 `agentosd`，因为按住说话的本机语音还没有迁过来；见[架构](docs/architecture.md#尚未合并的部分)。给写代码的 Agent 的说明在 [AGENTS.md](AGENTS.md)。
 
-| | 原生系统 | 持久任务工作台（v0.3 新增） |
+两个守护进程现在共用规划器、审计日志和各项能力的代码，区别只剩下面这些：
+
+| | `agentos-taskd`（任务内核） | `agentosd`（过渡期保留） |
 | --- | --- | --- |
-| 程序 | `agentosd` + `agentos-shell` | `agentos-taskd` + `agentos-web-shell` + `agentos` 命令 |
-| 能力 | 笔记、时钟、子 Agent、MCP、自我进化插件、智能家居 | 时钟、笔记（追加、读取、可恢复的清空） |
-| 规划 | 多轮：每轮结果交还规划器 | 单轮：一次给出全部步骤 |
-| 重启后 | 从检查点接着做 | 未完成的任务标为“已中断”，不自动重做 |
-| L3 操作 | 你确认后执行，可要求 PIN | 没有可信的身份核验设备，一律拒绝 |
-| 语音 | 按住说话 + 朗读，云端或本机后端 | WebRTC 实时连续对话，音频发给模型服务 |
-| 界面 | WebKit 全屏桌面（sway） | 浏览器、终端工作台、命令行 |
-| 怎么得到 | 发布镜像默认启动，可在线更新 | 从源码运行，镜像里还没有 |
-| 开发平台 | Linux | Linux、macOS |
-| 文档 | [架构](docs/architecture.md)、[桌面](docs/shell.md)、[管家与子 Agent](docs/agents.md) | [总览](docs/persistent-workspace.md)、[架构](docs/persistent-architecture.md)、[协议 v1](docs/protocol-v1.md)、[Web Shell](docs/ambient-shell.md) |
+| 定位 | 新功能加在这里 | 待删除，不再加新功能 |
+| 界面 | `agentos` 命令与终端工作台、Web Shell、原生桌面（`agentos-shell --taskd`） | 原生桌面（默认方式）、控制台 |
+| 只有它有 | 协议 v1、分页历史、变更通知、只读能力的直接查询 | 按住说话的本机语音、崩溃后在桌面上的提示 |
+| 重启后 | 未完成的任务标为“已中断”，不自动重做 | 从检查点接着做 |
+| L3 操作 | 设置 PIN 后等待批准，批准必须带 PIN；没有设置 PIN 时拒绝 | 你确认后执行；设置 PIN 后还要输入 PIN |
+| 语音 | Web Shell 的 WebRTC 实时对话，音频发给模型服务 | 按住说话 + 朗读，云端或本机后端 |
+| 怎么得到 | 从源码运行，镜像里还没有 | 发布镜像默认启动，可在线更新 |
+| 状态目录 | `~/.local/state/agentos` | `~/.local/share/agentos` |
 
-- **验证情况**：`main` 上 CI 全部通过：Ubuntu 上的格式、Clippy、全部测试和在线更新模拟测试；macOS 和 Rust 1.88 上的持久任务相关测试；Web Shell 的 49 个前端测试；cargo-deny。v0.2.2 的修复来自 Intel N100 小主机和笔记本上的真机测试。
-- **还没有在真机上验证**（v0.2.0 发布时列出，之后没有更新过）：Caps Lock 按键说话和指示灯、真实麦克风和扬声器；真实的 Home Assistant 和 MCP 服务器；从一个发布版本在线升级到下一个发布版本。
+两个状态目录之间没有数据迁移。
+
+- **CI 覆盖**：Ubuntu 上的格式、Clippy、全部测试和在线更新模拟测试；macOS 和 Rust 1.88 上任务内核一侧的测试；Web Shell 的前端测试；cargo-deny。
+- **还没有验证**：
+  - 任务服务一侧（合并时列出）：`agentos-shell --taskd` 的窗口界面没有实际打开看过；真实的模型接口、MCP server 和 Home Assistant 没有在任务服务上跑过；合并后没有跑镜像构建和 QEMU 冒烟测试。
+  - 真机（v0.2.0 发布时列出，之后没有更新过）：Caps Lock 按键说话和指示灯、真实麦克风和扬声器；真实的 Home Assistant 和 MCP 服务器；从一个发布版本在线升级到下一个发布版本。v0.2.2 的修复来自 Intel N100 小主机和笔记本上的真机测试。
 
 已知缺口：
 
-- 两组入口还没有合并。按 [v0.3 设计](docs/v0.3-design.md)，持久任务这一侧下一步是把能力放进受监督的独立进程、接入 MCP 和 Linux 资源隔离，再做多轮规划、预算和并发调度。
+- 合并还差最后一步：把本机语音和崩溃提示迁到任务服务，把镜像切到 `agentos-taskd` + `agentos-shell --taskd`，迁移数据，然后删除 `agentosd`。见[架构](docs/architecture.md#尚未合并的部分)。
 - v0.3.0 还没有发版，`agentos-taskd`、`agentos-web-shell` 和 `agentos` 命令没有进镜像和更新包。
-- 原生系统里，本机唤醒词与连续对话、把各中枢拆成独立服务还没有做；任务是轮流推进的，不是真正并行，也没有定时任务（见 [docs/agents.md](docs/agents.md#尚未实现)）。
-- Web Shell 目前是浏览器里的本地原型，不是桌面合成器；实时语音会把音频发给模型服务，不是全本地语音。
+- 任务串行执行（单 worker）；除插件在 bubblewrap 沙箱里以外，能力与服务同进程运行，没有进程隔离。见[架构](docs/architecture.md#其他边界)。
+- 没有本机唤醒词，没有定时任务（见 [docs/agents.md](docs/agents.md#尚未实现)）。
+- Web Shell 是浏览器里的本地界面，不是桌面合成器；实时语音会把音频发给模型服务，不是全本地语音。
 - 仓库里还没有 LICENSE 文件，使用和分发条款尚未声明。
 
 ## 现在能做什么
@@ -50,17 +55,16 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 - **MCP 工具**：`mcp.json` 里配置的 MCP server，工具自动成为管家的能力。见 [docs/mcp.md](docs/mcp.md)。
 - **自我进化**：让 AgentOS 给自己写新能力，以沙箱插件形式安装，可回滚。见 [docs/self-evolution.md](docs/self-evolution.md)。
 - **安全模型**：能力令牌 + 风险分级确认（L0–L3）；污点追踪（网络插件、MCP 输出会让后续有影响的操作都要确认）；L3 操作可要求 PIN；审计日志带 SHA-256 哈希链，可校验；插件有 bubblewrap 沙箱和资源上限（内存 1 GiB、CPU 10 秒等）。
-- **持久任务工作台（v0.3）**：`agentos-taskd` 把任务放在后台服务里，命令行、终端工作台和浏览器通过同一个 Unix socket 协议连接；关掉界面任务照常进行，历史可分页，变更实时通知，批准绑定到具体任务的具体步骤。见 [docs/persistent-workspace.md](docs/persistent-workspace.md)。
+- **持久任务与多个界面（v0.3）**：`agentos-taskd` 把任务放在后台服务里，命令行、终端工作台、浏览器和原生桌面通过同一个 Unix socket 协议连接；关掉界面任务照常进行，历史可分页，变更实时通知，批准绑定到具体任务的具体步骤。见 [docs/persistent-workspace.md](docs/persistent-workspace.md)。
 - **情景式 Web Shell（v0.3）**：语音优先的浏览器界面，模型根据真实任务和笔记组织画面（只能选组件、顺序和宽度）；WebRTC 实时语音可连续对话、开口打断，但语音不能代替批准。见 [docs/ambient-shell.md](docs/ambient-shell.md)。
 - **稳健性与运维**：守护进程崩溃时写入 journal 和 `crash.txt`、退避重启，并在桌面「最近活动」里提示；journal 跨重启保留；`sudo agentos-update` 在线更新，先自检再替换，可回滚。
-
-上面除标了 v0.3 的两项外，都属于原生系统（`agentosd` / `agentos-shell`）。
 
 更多文档：
 
 - 设计草案：[AgentOS 架构设计草案](https://claude.ai/artifact/RzRDjHkBbJVbnyFDRSZ4BN)
-- 原生系统的架构概要与进度：[docs/architecture.md](docs/architecture.md)
-- 持久任务工作台的架构与设计：[docs/persistent-architecture.md](docs/persistent-architecture.md)、[docs/v0.3-design.md](docs/v0.3-design.md)、[docs/v0.2-design.md](docs/v0.2-design.md)、[Unix socket 协议 v1](docs/protocol-v1.md)
+- 架构：[docs/architecture.md](docs/architecture.md)，[Unix socket 协议 v1](docs/protocol-v1.md)
+- 任务服务、命令行与工作台：[docs/persistent-workspace.md](docs/persistent-workspace.md)
+- 历史设计：[docs/v0.3-design.md](docs/v0.3-design.md)、[docs/v0.2-design.md](docs/v0.2-design.md)
 - 安装：[docs/install.md](docs/install.md)，在线更新：[docs/update.md](docs/update.md)
 
 ## 安装到 PC
@@ -87,16 +91,18 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 ```
 crates/
-  core/      核心类型：Intent、Percept、Expression、Capability，Sensor/Output trait
-  policy/    策略引擎：能力授权 + 风险分级确认 + 污点追踪
-  audit/     只追加审计日志（JSON Lines），可回放
-  agentosd/  P0 守护进程：感知中枢 → 管家 Agent → 表达中枢；插件运行时与自我进化（evolve）
-  shell/     图形界面 agentos-shell：玻璃风格桌面，通过 Unix socket 连接 agentosd
-  taskd/     独立持久任务服务 agentos-taskd（协议 v1）
-  web-shell/ 情景式浏览器界面 agentos-web-shell：模型布局与连续实时语音
-  cli/       agentos 命令与独立终端任务工作台
-  runtime/   持久任务、分页、通知、取消与中断恢复
-  ipc/       严格校验、受限帧与本机连接协议
+  core/      词汇表：Intent、Percept、Expression、Capability，Sensor/Output trait
+  runtime/   持久任务：状态、步骤、分页、通知、取消与重启中断
+  ipc/       本地控制协议 v1：严格校验、有界帧与本机路径约定
+  policy/    策略引擎：能力授权 + 风险分级确认 + 污点
+  audit/     只追加审计日志：同步落盘、单一写入者、哈希链
+  planner/   规划契约、离线规则规划器、Claude 与 OpenAI 兼容规划器
+  services/  能力注册表、子 Agent、黑板、裁判、PIN、MCP、插件与自我进化、智能家居
+  taskd/     任务内核 agentos-taskd：管家循环、内置能力、控制服务
+  cli/       agentos 命令与终端任务工作台
+  web-shell/ 浏览器界面 agentos-web-shell：情景布局与连续实时语音
+  shell/     原生桌面 agentos-shell：玻璃风格桌面与设置助理
+  agentosd/  过渡期保留的旧守护进程（本机语音、现有镜像）
 image/       可启动磁盘镜像：构建脚本、系统集成文件（设置助理、会话脚本、agentos-update）、OTA 更新包、QEMU 冒烟测试
 docs/        各部分的文档；docs/media/intro-video/ 是介绍视频的源文件
 ```
@@ -108,6 +114,8 @@ docs/        各部分的文档；docs/media/intro-video/ 是介绍视频的源�
 ```sh
 cargo run -p agentosd
 ```
+
+各程序都支持 `--help` 和 `--version`（例如 `cargo run -p agentosd -- --help`），写错的参数会报错退出，而不是被忽略。
 
 然后输入意图，例如：
 
@@ -144,7 +152,7 @@ cargo run -p agentos-cli -- --state-dir /tmp/agentos-workspace workbench
 
 ![情景式 Web Shell](docs/images/web-shell.jpg)
 
-这组入口当前提供时钟与笔记能力；MCP、插件、智能家居和多轮规划使用上面的原生桌面入口。两组服务的 socket、任务恢复语义、笔记和审计格式各自独立，不互相读取或迁移状态。现有镜像仍默认启动原生桌面。命令行用法、状态目录和批准规则见 [docs/persistent-workspace.md](docs/persistent-workspace.md)。
+任务服务提供全部能力：把 `mcp.json`、`agents/` 放进状态目录，设置 `HASS_URL` / `HASS_TOKEN`，运行 `agentos-taskd --set-pin` 设置 PIN。原生桌面用 `cargo run -p agentos-shell -- --windowed --task-socket /tmp/agentos-workspace/control.sock` 连接同一个服务。它与旧的 `agentosd` 使用不同的状态目录，数据不互相迁移。命令行用法、状态目录和批准规则见 [docs/persistent-workspace.md](docs/persistent-workspace.md)。
 
 ### 用 Claude 做规划
 
@@ -220,13 +228,13 @@ cargo deny check     # 依赖漏洞（RustSec）、许可证、来源；cargo in
 node --test crates/web-shell/assets/*.test.mjs   # Web Shell 前端测试，不需要模型密钥
 ```
 
-`cargo test --all` 里的插件沙箱测试需要 Linux 和 bubblewrap，原生桌面需要 WebKitGTK。在 macOS 上可以只跑持久任务这一组：
+`cargo test --all` 里的插件沙箱测试需要 Linux 和 bubblewrap，原生桌面需要 WebKitGTK。在 macOS 上可以只跑 CI 在 macOS 上跑的这一组：
 
 ```sh
-cargo test -p agentos-taskd -p agentos-web-shell -p agentos-cli -p agentos-ipc -p agentos-runtime -p agentos-audit -p agentos-core -p agentos-policy
+cargo test -p agentos-taskd -p agentos-web-shell -p agentos-cli -p agentos-ipc -p agentos-runtime -p agentos-audit -p agentos-planner -p agentos-core -p agentos-policy
 ```
 
-CI 每次提交都会跑上面全部检查，其中持久任务这一组在 macOS 和 Rust 1.88 上各跑一遍。`cargo deny check` 另外每周一再跑一次（配置见 [deny.toml](deny.toml)），新披露的依赖漏洞会让 CI 变红。
+CI 每次提交都会跑上面全部检查，其中这一组在 macOS 和 Rust 1.88 上各跑一遍。`cargo deny check` 另外每周一再跑一次（配置见 [deny.toml](deny.toml)），新披露的依赖漏洞会让 CI 变红。
 
 ### 介绍视频
 

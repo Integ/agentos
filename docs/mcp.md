@@ -1,5 +1,7 @@
 # MCP 工具
 
+> **在任务服务上。** `agentos-taskd` 读取状态目录里的 `mcp.json`（默认 `~/.local/state/agentos/mcp.json`），格式和行为与下文相同；修改后重启 `agentos-taskd`。下文的数据目录指旧的 `agentosd`。
+
 任何通过 stdio 通信的 [MCP](https://modelcontextprotocol.io) server 都可以把自己的工具借给管家。每个工具注册成一个能力，名字是 `mcp.<server>.<工具>`，和其他能力一样经过策略引擎、审计和确认。
 
 ## 配置

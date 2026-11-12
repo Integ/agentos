@@ -24,10 +24,10 @@ use agentos_core::{Capability, CapabilityError, CapabilityName, CapabilitySpec, 
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::llm::TextModel;
 use crate::plugin::{effective_risk, risk_label, PluginManifest, RUNTIMES};
 use crate::plugin_store::{valid_name, PluginDraft, PluginManager, TestOutcome};
 use crate::registry::CapabilityRegistry;
+use agentos_planner::llm::TextModel;
 
 /// What the generator is asked to do.
 #[derive(Debug, Clone)]

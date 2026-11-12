@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 agentos-cli = { path = "../cli" }
+agentos-core.workspace = true
 agentos-ipc.workspace = true
 agentos-runtime.workspace = true
 reqwest.workspace = true

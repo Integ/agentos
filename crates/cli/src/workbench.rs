@@ -37,10 +37,16 @@ pub fn approval_command(
     if !render::confirmation_visible(task) {
         return Err("待批准参数过长，工作台未完整展示；请用 agentos --json task 查看完整参数，再通过独立 approve 命令显式提供令牌".into());
     }
+    if confirmation.verify_identity {
+        return Err(format!(
+            "这一步不可逆，需要 PIN。工作台不读取 PIN；请在另一个终端运行：\n  agentos approve {id} {step} --confirmation <令牌> --pin-stdin\n令牌用 agentos task {id} 查看。"
+        ));
+    }
     Ok(Command::Approve {
         id,
         step,
         confirmation: confirmation.token.clone(),
+        pin: None,
     })
 }
 
@@ -365,7 +371,7 @@ pub async fn run(client: Client) -> io::Result<()> {
 mod tests {
     use super::*;
     use agentos_core::{CapabilityName, DeviceId, Intent, IntentId, Urgency};
-    use agentos_runtime::{Confirmation, StepState, TaskStep, TaskStore};
+    use agentos_runtime::{Confirmation, TaskStep, TaskStore};
     use serde_json::json;
 
     fn pending(args: serde_json::Value) -> Task {
@@ -383,16 +389,12 @@ mod tests {
         store
             .update(task.id, |task| {
                 task.state = TaskState::AwaitingConfirmation;
-                task.steps = vec![TaskStep {
-                    capability: CapabilityName::new("mail.send"),
-                    args,
-                    state: StepState::Pending,
-                    result: None,
-                }];
+                task.steps = vec![TaskStep::pending(CapabilityName::new("mail.send"), args)];
                 task.confirmation = Some(Confirmation {
                     step: 0,
                     expires_at_ms: now_ms() + 60_000,
                     token: "shown-token".into(),
+                    verify_identity: false,
                 });
             })
             .unwrap()

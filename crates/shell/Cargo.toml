@@ -11,6 +11,18 @@ name = "agentos-shell"
 path = "src/main.rs"
 
 [dependencies]
+agentos-cli = { path = "../cli" }
+agentos-core.workspace = true
+agentos-ipc.workspace = true
+agentos-runtime.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 tao = "0.37.2"
 wry = "0.57.1"
+
+[dev-dependencies]
+agentos-audit.workspace = true
+agentos-planner.workspace = true
+agentos-policy.workspace = true
+agentos-services.workspace = true
+agentos-taskd = { path = "../taskd" }

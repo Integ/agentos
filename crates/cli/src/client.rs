@@ -126,6 +126,7 @@ fn reply_matches(command: &Command, reply: &Reply) -> bool {
             )
             | (Command::Approve { .. }, Reply::ApprovalQueued { .. })
             | (Command::Capabilities {}, Reply::Capabilities { .. })
+            | (Command::Read { .. }, Reply::Value { .. })
             | (Command::Watch { .. }, Reply::Watching { .. })
     )
 }
@@ -199,6 +200,12 @@ impl Client {
                     step: actual_step,
                 },
             ) => id == actual && step == actual_step,
+            (
+                Command::Read { capability, .. },
+                Reply::Value {
+                    capability: actual, ..
+                },
+            ) => capability == actual,
             _ => true,
         };
         if !reply_matches(&request.command, &reply) || !identity_matches {

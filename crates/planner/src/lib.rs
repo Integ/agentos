@@ -12,7 +12,16 @@
 use agentos_core::{CapabilityName, CapabilitySpec, Intent};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
+
+pub mod claude;
+pub mod llm;
+pub mod openai;
+mod rule;
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_http;
+
+pub use rule::RulePlanner;
 
 /// System prompt shared by the LLM-backed planners.
 pub const SYSTEM_PROMPT: &str = "你是 AgentOS 的管家 Agent，运行在用户的桌面工作站上。\
@@ -110,6 +119,34 @@ pub struct Plan {
     pub reply: Option<String>,
     /// The plan was influenced by untrusted external content.
     pub tainted: bool,
+    /// Planning itself failed (the model could not be reached, refused, or
+    /// returned something unusable). Nothing from this plan may run, and the
+    /// agent's turn ends as failed rather than as an answer.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// The planner had no way to act on the request; `reply` says what it can
+    /// do instead. Neither a failure nor an answer: the task ends unhandled.
+    #[serde(default)]
+    pub unhandled: bool,
+}
+
+impl Plan {
+    pub fn failed(message: impl Into<String>) -> Self {
+        let message = message.into();
+        Self {
+            reply: Some(message.clone()),
+            error: Some(message),
+            ..Self::default()
+        }
+    }
+
+    pub fn unhandled(message: impl Into<String>) -> Self {
+        Self {
+            reply: Some(message.into()),
+            unhandled: true,
+            ..Self::default()
+        }
+    }
 }
 
 #[async_trait]
@@ -125,146 +162,5 @@ pub trait Planner: Send + Sync {
         } else {
             Plan::default()
         }
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct RulePlanner;
-
-fn step(name: &str, args: Value) -> Plan {
-    Plan {
-        steps: vec![Step::new(CapabilityName::new(name), args)],
-        ..Plan::default()
-    }
-}
-
-fn strip_any<'a>(text: &'a str, prefixes: &[&str]) -> Option<&'a str> {
-    prefixes.iter().find_map(|p| text.strip_prefix(p))
-}
-
-#[async_trait]
-impl Planner for RulePlanner {
-    async fn plan(&self, intent: &Intent, available: &[CapabilitySpec]) -> Plan {
-        let t = intent.text.trim();
-        let lower = t.to_lowercase();
-        let has = |keys: &[&str]| keys.iter().any(|k| lower.contains(k));
-
-        if matches!(lower.as_str(), "任务" | "看看任务" | "ps" | "tasks") {
-            return step("tasks.list", json!({}));
-        }
-        if let Some(rest) = strip_any(t, &["取消任务", "kill "]) {
-            if let Ok(n) = rest.trim().trim_start_matches('#').parse::<u64>() {
-                return step("tasks.cancel", json!({ "task": n }));
-            }
-        }
-        if has(&["黑板", "board"]) {
-            return step("board.read", json!({}));
-        }
-
-        // "@notes 记一下 买牛奶": hand the rest to that agent, if it exists.
-        if let Some(rest) = t.strip_prefix('@') {
-            let (who, task) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-            let cap = CapabilityName::new(format!("agent.{who}"));
-            if !task.trim().is_empty() && available.iter().any(|s| s.name == cap) {
-                return step(cap.as_str(), json!({ "task": task.trim() }));
-            }
-        }
-
-        if let Some(rest) = strip_any(t, &["记一下", "记住", "note "]) {
-            let text = rest.trim_start_matches([':', '：', ' ']).trim();
-            return step("notes.append", json!({ "text": text }));
-        }
-        if let Some(rest) = strip_any(t, &["学会", "学习", "进化", "learn "]) {
-            let need = rest.trim_start_matches([':', '：', ' ']).trim();
-            return step("evolve.propose", json!({ "need": need }));
-        }
-        if let Some(rest) = strip_any(t, &["回滚", "恢复", "rollback "]) {
-            return step("evolve.rollback", json!({ "name": rest.trim() }));
-        }
-        if let Some(rest) = strip_any(t, &["停用", "disable "]) {
-            return step("evolve.disable", json!({ "name": rest.trim() }));
-        }
-        if has(&["插件", "plugins", "新能力"]) {
-            return step("evolve.list", json!({}));
-        }
-        if has(&["笔记", "notes"]) && has(&["清空", "删除", "clear"]) {
-            return step("notes.clear", json!({}));
-        }
-        if has(&["笔记", "notes"]) {
-            return step("notes.list", json!({}));
-        }
-        let home = CapabilityName::new("home.list");
-        if has(&["智能家居", "家里的设备", "家里设备", "smart home"])
-            && available.iter().any(|s| s.name == home)
-        {
-            return step("home.list", json!({}));
-        }
-        if has(&["几点", "时间", "time"]) {
-            return step("clock.now", json!({}));
-        }
-        let list = available
-            .iter()
-            .map(|s| format!("- {}：{}", s.name, s.description))
-            .collect::<Vec<_>>()
-            .join("\n");
-        Plan {
-            reply: Some(format!(
-                "我还不会处理这句话。当前可用的能力：\n{list}\n试试：\"记一下 买牛奶\"、\"看看笔记\"、\"清空笔记\"、\"现在几点\"，或者\"学会：……\"让我给自己写一个新能力"
-            )),
-            ..Plan::default()
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use agentos_core::{now_ms, DeviceId, IntentId, Urgency};
-
-    fn intent(text: &str) -> Intent {
-        Intent {
-            id: IntentId(1),
-            source: DeviceId::new("t"),
-            speaker: None,
-            text: text.into(),
-            urgency: Urgency::Normal,
-            at_ms: now_ms(),
-        }
-    }
-
-    async fn first(text: &str) -> Option<String> {
-        RulePlanner
-            .plan(&intent(text), &[])
-            .await
-            .steps
-            .first()
-            .map(|s| s.capability.to_string())
-    }
-
-    #[tokio::test]
-    async fn keywords_map_to_capabilities() {
-        assert_eq!(
-            first("记一下：买牛奶").await.as_deref(),
-            Some("notes.append")
-        );
-        assert_eq!(first("清空笔记").await.as_deref(), Some("notes.clear"));
-        assert_eq!(first("看看笔记").await.as_deref(), Some("notes.list"));
-        assert_eq!(first("现在几点").await.as_deref(), Some("clock.now"));
-        assert_eq!(first("讲个笑话").await, None);
-        assert_eq!(
-            first("学会：换算温度").await.as_deref(),
-            Some("evolve.propose")
-        );
-        assert_eq!(
-            first("回滚 unit.convert").await.as_deref(),
-            Some("evolve.rollback")
-        );
-        assert_eq!(first("看看插件").await.as_deref(), Some("evolve.list"));
-    }
-
-    #[tokio::test]
-    async fn note_text_is_extracted() {
-        let p = RulePlanner.plan(&intent("记一下：买牛奶"), &[]).await;
-        assert_eq!(p.steps[0].args, json!({"text": "买牛奶"}));
     }
 }

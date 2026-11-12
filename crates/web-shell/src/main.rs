@@ -9,6 +9,13 @@ use tokio::sync::Semaphore;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    if std::env::args()
+        .skip(1)
+        .any(|argument| argument == "--version" || argument == "-V")
+    {
+        println!("agentos-web-shell {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let options = match Options::parse(std::env::args().skip(1)) {
         Ok(Some(options)) => options,
         Ok(None) => {

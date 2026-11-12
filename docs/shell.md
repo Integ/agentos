@@ -23,6 +23,7 @@ agentos-shell (WebKit 全屏窗口)  ⇄  Unix socket (JSON Lines)  ⇄  agentos
 ```
 
 - 界面整体画在一个 WebKit 窗口里（`crates/shell/ui/index.html`），所以毛玻璃效果不依赖合成器支持，sway 下也能用。
+- 也可以连接任务服务：`agentos-shell --taskd`（默认状态目录），或 `--task-socket <路径>` / 环境变量 `AGENTOS_TASK_SOCKET`。这时桌面通过[协议 v1](protocol-v1.md) 工作：订阅任务变化，读取变化的任务，把它与页面上次看到的样子之间的差别翻译成下面的页面事件；意图是 `submit`，确认是 `approve`（不可逆的步骤带上确认框里输入的 PIN），取消是 `cancel`。批准令牌留在桥里，不交给页面。这个模式下没有本机语音。
 - shell 本身没有任何权限。它只把意图和确认结果转发给 `agentosd`，所有操作仍然经过策略引擎并写入审计日志。界面能让 shell 做的本地动作只有系统菜单里固定的几项，以及设置助理的几个操作（见下文）。
 - socket 权限是 0600，只有当前用户能连接。
 
@@ -89,7 +90,7 @@ agentosd → shell：
 | `expression` | 管家说的话（`report` `error` 等） |
 | `tainted` | 这个任务读到了不可信的外部内容（例如联网插件的结果），之后有副作用的步骤都要人确认 |
 | `pin` | 随批准发来的 PIN 不对或已锁定（`message` 说明原因），这一步仍在等待确认 |
-| `done` | 这个意图处理完了 |
+| `done` | 这个意图处理完了。`state` 说明结局：`done`（做了或回答了）、`unhandled`（没有办法处理，什么也没执行）、`failed`（规划失败）、`cancelled` |
 | `voice` | 麦克风状态 `mic`（`idle` `listening` `transcribing`）、是否在朗读 `speaking`、朗读模式 `speak` |
 | `voice_level` | 录音音量（0–1），约每 100 毫秒一次 |
 | `transcript` | 识别出的文字，随后作为意图交给管家 |

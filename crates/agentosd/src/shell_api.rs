@@ -18,7 +18,8 @@
 //! - `activity`: recent capability calls and confirmations from the audit log.
 //! - `expression`: everything the butler says (`kind`: plan/report/ask_confirm/error).
 //! - `plan`, `step`, `confirm`, `done`: structured progress, so a shell can draw
-//!   the plan with risk levels instead of parsing text.
+//!   the plan with risk levels instead of parsing text. `done` carries `state`
+//!   (`done`, `unhandled`, `failed` or `cancelled`): finished is not succeeded.
 //! - `tainted`: a task read untrusted outside content; its side effects now
 //!   need confirmation.
 //! - `pin`: a PIN sent with an approval was wrong or entry is locked
@@ -43,8 +44,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::identity::{PinCheck, PinVault};
 use crate::voice::{SpeakMode, Voice, VoiceControl};
+use agentos_services::identity::{PinCheck, PinVault};
 
 /// Fan-out of structured events to every connected shell.
 pub type EventBus = broadcast::Sender<Value>;

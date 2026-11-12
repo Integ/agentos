@@ -2,7 +2,9 @@ use std::io;
 
 use agentos_cli::args::{self, Action};
 use agentos_cli::client::{Client, ClientError};
+use agentos_cli::wait::wait_for_task;
 use agentos_cli::{render, workbench};
+use agentos_ipc::{Command, Reply};
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -20,21 +22,28 @@ async fn main() -> io::Result<()> {
             Ok(())
         }
         Action::Version => {
-            println!("AgentOS {}", env!("CARGO_PKG_VERSION"));
+            println!("agentos {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         Action::Workbench => return workbench::run(client).await,
-        Action::Request(command) => match client.request(command).await {
-            Ok(reply) => {
-                if options.json {
-                    println!("{}", serde_json::to_string(&reply)?);
-                } else {
-                    println!("{}", render::reply_text(&reply));
-                }
-                Ok(())
+        Action::Request(mut command) => {
+            if let (true, Command::Approve { pin, .. }) = (options.pin_stdin, &mut command) {
+                eprint!("PIN：");
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                *pin = Some(line.trim().to_string());
             }
-            Err(error) => Err(error),
-        },
+            request(&client, command, options.json).await
+        }
+        Action::SubmitAndWait { text, timeout } => {
+            match submit_and_wait(&client, text, timeout, options.json).await {
+                Ok(0) => Ok(()),
+                // The request itself worked; the status reports how the task
+                // ended, which is not an error of this command.
+                Ok(code) => std::process::exit(code),
+                Err(error) => Err(error),
+            }
+        }
         Action::Watch(after) => watch(client, after, options.json).await,
     };
     if let Err(error) = result {
@@ -44,6 +53,68 @@ async fn main() -> io::Result<()> {
             eprintln!("{}", render::safe_text(&error.to_string()));
         }
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Submit once, then only read until the task settles. JSON mode prints one
+/// document: the final task, in the same shape as `agentos --json task`.
+async fn submit_and_wait(
+    client: &Client,
+    text: String,
+    timeout: std::time::Duration,
+    json: bool,
+) -> Result<i32, ClientError> {
+    let accepted = client.request(Command::Submit { text }).await?;
+    let Reply::Accepted { task } = &accepted else {
+        unreachable!("the client verifies that a submit is answered with an acceptance")
+    };
+    if !json {
+        eprintln!("[{}] 已接收，等待结果…", task.id);
+    }
+    match wait_for_task(client, task.id, timeout).await {
+        Ok(outcome) => {
+            if json {
+                let reply = Reply::Task {
+                    task: outcome.task().clone(),
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string(&reply).expect("a task is serializable")
+                );
+            } else {
+                println!("{}", render::wait_text(&outcome));
+            }
+            Ok(outcome.exit_code())
+        }
+        Err(error) => {
+            // The task exists and keeps running; do not lose its number just
+            // because watching it failed.
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&accepted).expect("a task is serializable")
+                );
+            } else {
+                eprintln!(
+                    "[{}] 已提交，但无法继续等待结果；任务仍由后台执行。",
+                    task.id
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn request(client: &Client, command: Command, json: bool) -> Result<(), ClientError> {
+    let reply = client.request(command).await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&reply).expect("a reply is serializable")
+        );
+    } else {
+        println!("{}", render::reply_text(&reply));
     }
     Ok(())
 }
