@@ -7,6 +7,7 @@ AgentOS 探索以人的意图为入口、以 Agent 为执行者的操作系统�
 **v0.3：后台系统服务与独立终端工作台。** Unix socket 将任务内核与交互界面分开，支持多个客户端、实时变更通知、分页历史和跨连接批准。退出工作台后，后台任务继续执行。
 
 - [v0.3 设计与实现边界](v0.3-design.md)
+- [v0.4 设计草案：让 Agent 成为一等公民](v0.4-design.md)（尚未实现）
 - [Unix socket 协议 v1](protocol-v1.md)
 - [架构概要](architecture.md) · [v0.2 审查与持久任务设计](v0.2-design.md)
 - [情景式图形 Shell：设计、启动与边界](ambient-shell.md)
