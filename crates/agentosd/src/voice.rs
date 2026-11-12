@@ -185,7 +185,7 @@ impl OpenAiVoiceConfig {
             return None;
         }
         Some(Self {
-            base_url: base_url.unwrap_or_else(|| crate::openai_planner::DEFAULT_BASE_URL.into()),
+            base_url: base_url.unwrap_or_else(|| agentos_planner::openai::DEFAULT_BASE_URL.into()),
             api_key,
         })
     }
@@ -1127,8 +1127,8 @@ pub fn mic_info() -> DeviceInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_http::{one_shot_server, one_shot_server_bytes};
     use agentos_core::{AgentId, Urgency};
+    use agentos_planner::test_http::{one_shot_server, one_shot_server_bytes};
 
     fn expr(kind: ExpressionKind, text: &str) -> Expression {
         Expression {

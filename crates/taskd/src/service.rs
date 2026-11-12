@@ -5,34 +5,39 @@ use std::future::Future;
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agentos_audit::durable::{AuditEvent, AuditLog};
-use agentos_core::{now_ms, AgentId, CapabilitySpec, DeviceId, Intent, IntentId, Urgency};
+use agentos_audit::{AuditEvent, AuditLog};
+use agentos_core::{
+    now_ms, AgentId, CapabilityError, CapabilityName, DeviceId, Intent, IntentId, Urgency,
+};
 use agentos_ipc::{
     current_uid, read_frame, write_frame, Command, Event, EventKind, ProtocolError, Reply, Request,
-    Response, TaskSummary, MAX_PAGE_SIZE, MAX_TEXT_BYTES, VERSION,
+    Response, TaskSummary, MAX_CAPABILITY_NAME_BYTES, MAX_PAGE_SIZE, MAX_TEXT_BYTES, VERSION,
 };
 use agentos_policy::PolicyEngine;
 use agentos_runtime::{Task, TaskId, TaskState, TaskStore};
+use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWrite, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
-use crate::butler::Butler;
+use crate::butler::{Butler, CapabilityView};
 use crate::control::approval_matches_with_token;
-use crate::expression::ExpressionHub;
-use crate::planner::Planner;
-use crate::registry::CapabilityRegistry;
+use agentos_planner::Planner;
+use agentos_services::expression::ExpressionHub;
+use agentos_services::identity::{PinCheck, PinVault};
+use agentos_services::registry::CapabilityRegistry;
 
 const MAX_CONNECTIONS: usize = 64;
 const QUEUE_CAPACITY: usize = 64;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct Service {
     controller: Arc<Controller>,
@@ -49,7 +54,11 @@ pub struct Server {
 struct Controller {
     tasks: Arc<TaskStore>,
     audit: Arc<AuditLog>,
-    capabilities: Vec<CapabilitySpec>,
+    /// What the butler can currently do; it keeps this current as plugins
+    /// are installed, disabled or rolled back.
+    view: Arc<Mutex<CapabilityView>>,
+    /// Proves identity for approvals of irreversible steps.
+    pins: Option<Arc<PinVault>>,
     work_tx: mpsc::Sender<Work>,
 }
 
@@ -64,6 +73,7 @@ enum Work {
 }
 
 impl Service {
+    /// A service around a plain butler: no agents, blackboard, judge or PIN.
     pub fn new(
         tasks: Arc<TaskStore>,
         audit: Arc<AuditLog>,
@@ -71,28 +81,30 @@ impl Service {
         policy: PolicyEngine,
         planner: Box<dyn Planner>,
     ) -> Self {
-        let id = AgentId::new("butler");
-        let capabilities = registry
-            .specs()
-            .into_iter()
-            .filter(|spec| policy.is_granted(&id, &spec.name))
-            .collect();
         let expr = ExpressionHub::new(audit.clone());
         let butler = Butler::with_store(
-            id,
+            AgentId::new("butler"),
             registry,
             policy,
             planner,
             audit.clone(),
             expr,
-            tasks.clone(),
+            tasks,
         );
+        Self::with_butler(butler, audit, None)
+    }
+
+    /// A service around a butler the caller has configured. `pins` must be
+    /// the vault the butler was given, so a PIN checked here vouches for the
+    /// approval the butler then carries out.
+    pub fn with_butler(butler: Butler, audit: Arc<AuditLog>, pins: Option<Arc<PinVault>>) -> Self {
         let (work_tx, work_rx) = mpsc::channel(QUEUE_CAPACITY);
         Self {
             controller: Arc::new(Controller {
-                tasks,
+                tasks: butler.tasks().clone(),
                 audit,
-                capabilities,
+                view: butler.view(),
+                pins,
                 work_tx,
             }),
             work_rx,
@@ -328,6 +340,10 @@ fn responder(uid: u32, text: String) -> Intent {
 }
 
 impl Controller {
+    fn view(&self) -> std::sync::MutexGuard<'_, CapabilityView> {
+        self.view.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     fn task(&self, id: TaskId) -> Result<Task, ProtocolError> {
         self.tasks
             .get(id)
@@ -403,6 +419,7 @@ impl Controller {
                 id,
                 step,
                 confirmation,
+                pin,
             } => {
                 let index = step
                     .checked_sub(1)
@@ -411,6 +428,31 @@ impl Controller {
                 let responder = responder(uid, format!("approve {id} {step}"));
                 if !approval_matches_with_token(&task, index, &responder, now_ms(), &confirmation) {
                     return Err(protocol_error("invalid_confirmation", "approval must match the current task, step, OS user, token and five-minute validity period"));
+                }
+                // An irreversible step needs proof of who approves it. The
+                // PIN is checked here and never leaves this function; a
+                // correct one vouches for this task's next approval only.
+                if task
+                    .confirmation
+                    .as_ref()
+                    .is_some_and(|c| c.verify_identity)
+                {
+                    let Some(pins) = &self.pins else {
+                        return Err(protocol_error(
+                            "identity_unavailable",
+                            "this step needs identity verification, which is not configured",
+                        ));
+                    };
+                    let Some(pin) = pin else {
+                        return Err(protocol_error(
+                            "identity_required",
+                            "this step is irreversible; approve it with the PIN",
+                        ));
+                    };
+                    match pins.verify_for(Some(id.0), &pin) {
+                        PinCheck::Ok => {}
+                        other => return Err(protocol_error("identity_rejected", other.message())),
+                    }
                 }
                 let permit = self.work_tx.try_reserve().map_err(|_| {
                     protocol_error(
@@ -427,9 +469,58 @@ impl Controller {
                 Ok(Reply::ApprovalQueued { id, step })
             }
             Command::Capabilities {} => Ok(Reply::Capabilities {
-                capabilities: self.capabilities.clone(),
+                capabilities: self.view().specs.clone(),
             }),
-            Command::Watch { .. } => unreachable!("watch is handled at the connection boundary"),
+            Command::Read { .. } | Command::Watch { .. } => {
+                unreachable!("read and watch are handled at the connection boundary")
+            }
+        }
+    }
+
+    /// Serve a client's query of local state. This is not an agent acting: no
+    /// task, no planner, no approval and no audit record, like `get`/`list`.
+    /// Only capabilities that cannot have a side effect are reachable here.
+    async fn read(&self, capability: CapabilityName, args: Value) -> Result<Reply, ProtocolError> {
+        if capability.as_str().is_empty() || capability.as_str().len() > MAX_CAPABILITY_NAME_BYTES {
+            return Err(protocol_error(
+                "invalid_argument",
+                "capability name must be 1 to 128 bytes",
+            ));
+        }
+        if !args.is_object() {
+            return Err(protocol_error(
+                "invalid_argument",
+                "capability arguments must be a JSON object",
+            ));
+        }
+        let target = {
+            let view = self.view();
+            match view.readable.get(&capability) {
+                Some(target) => target.clone(),
+                None if view.specs.iter().any(|spec| spec.name == capability) => {
+                    return Err(protocol_error(
+                        "not_readable",
+                        format!("{capability} is not a read-only capability; submit an intent"),
+                    ));
+                }
+                None => {
+                    return Err(protocol_error(
+                        "not_found",
+                        format!("no capability {capability}"),
+                    ));
+                }
+            }
+        };
+        match timeout(READ_TIMEOUT, target.invoke(args)).await {
+            Ok(Ok(value)) => Ok(Reply::Value { capability, value }),
+            Ok(Err(CapabilityError::InvalidArgs(message))) => {
+                Err(protocol_error("invalid_argument", message))
+            }
+            Ok(Err(error)) => Err(protocol_error("capability_failed", error.to_string())),
+            Err(_) => Err(protocol_error(
+                "capability_failed",
+                format!("{capability} did not answer within 10 seconds"),
+            )),
         }
     }
 }
@@ -448,7 +539,7 @@ async fn send_response<W: AsyncWrite + Unpin>(
                     &Response::error(
                         response.id,
                         "response_too_large",
-                        "task detail exceeds the 1 MiB protocol limit; use the paged task list",
+                        "response exceeds the 1 MiB protocol limit; use the paged task list or a narrower read",
                     ),
                 )
                 .await
@@ -528,7 +619,11 @@ async fn serve_connection(stream: UnixStream, controller: Arc<Controller>) -> io
                 }
             }
         }
-        let response = match controller.handle(request.command, uid) {
+        let result = match request.command {
+            Command::Read { capability, args } => controller.read(capability, args).await,
+            command => controller.handle(command, uid),
+        };
+        let response = match result {
             Ok(reply) => Response::ok(request.id, reply),
             Err(error) => Response {
                 version: VERSION,

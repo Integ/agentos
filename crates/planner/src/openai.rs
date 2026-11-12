@@ -14,9 +14,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::llm::{send_with_retry, Retry, TextModel};
-use crate::planner::{
-    capability_name, tool_name, Conversation, Plan, Planner, Step, SYSTEM_PROMPT,
-};
+use crate::{capability_name, tool_name, Conversation, Plan, Planner, Step, SYSTEM_PROMPT};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -122,32 +120,57 @@ pub fn build_turn_request(cfg: &OpenAiConfig, conv: &Conversation<'_>) -> Value 
 }
 
 pub fn parse_response(body: &Value) -> Plan {
-    let Some(msg) = body.pointer("/choices/0/message") else {
-        return Plan {
-            reply: Some("模型没有返回任何内容。".into()),
-            ..Plan::default()
+    let Some(choice) = body.pointer("/choices/0").and_then(Value::as_object) else {
+        return Plan::failed("模型没有返回任何内容。");
+    };
+    // Legacy compatible servers may omit finish_reason. If supplied, it must
+    // indicate a complete response; a truncated plan must never run a subset.
+    if let Some(reason) = choice.get("finish_reason") {
+        if !matches!(reason.as_str(), Some("stop" | "tool_calls")) {
+            return Plan::failed("模型响应未正常完成，已放弃整个计划。");
+        }
+    }
+    let Some(msg) = choice.get("message").and_then(Value::as_object) else {
+        return Plan::failed("模型没有返回有效消息。");
+    };
+    if let Some(refusal) = msg.get("refusal").filter(|value| !value.is_null()) {
+        let Some(refusal) = refusal.as_str() else {
+            return Plan::failed("模型返回了无效的拒绝消息。");
         };
+        if !refusal.is_empty() {
+            return Plan::failed(format!("模型拒绝了这个请求：{refusal}"));
+        }
+    }
+    let calls = match msg.get("tool_calls") {
+        None | Some(Value::Null) => &[][..],
+        Some(Value::Array(calls)) => calls.as_slice(),
+        Some(_) => return Plan::failed("模型返回的工具调用格式无效，已放弃整个计划。"),
     };
     let mut steps = Vec::new();
-    let mut bad = Vec::new();
-    for call in msg
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let Some(name) = call.pointer("/function/name").and_then(Value::as_str) else {
-            continue;
+    for call in calls {
+        if call.get("type").is_some_and(|kind| kind != "function") {
+            return Plan::failed("模型返回了不支持的工具调用，已放弃整个计划。");
+        }
+        let Some(name) = call
+            .pointer("/function/name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+        else {
+            return Plan::failed("模型返回的工具调用缺少名称，已放弃整个计划。");
         };
         // `arguments` is a JSON-encoded string; tolerate servers that send an object.
         let args = match call.pointer("/function/arguments") {
             Some(Value::String(s)) if s.trim().is_empty() => Ok(json!({})),
             Some(Value::String(s)) => serde_json::from_str::<Value>(s),
             Some(v @ Value::Object(_)) => Ok(v.clone()),
-            _ => Ok(json!({})),
+            _ => {
+                return Plan::failed(format!(
+                    "模型返回的工具参数无效（{name}），已放弃整个计划。"
+                ));
+            }
         };
         match args {
-            Ok(args) => steps.push(Step {
+            Ok(args) if args.is_object() => steps.push(Step {
                 id: call
                     .get("id")
                     .and_then(Value::as_str)
@@ -156,34 +179,36 @@ pub fn parse_response(body: &Value) -> Plan {
                 capability: capability_name(name),
                 args,
             }),
-            Err(_) => bad.push(name.to_string()),
+            _ => {
+                return Plan::failed(format!(
+                    "模型返回的工具参数无法解析为对象（{name}），已放弃整个计划。"
+                ));
+            }
         }
     }
-    if !bad.is_empty() {
-        // A half-parsed plan could run the wrong subset of steps; run none.
-        return Plan {
-            reply: Some(format!(
-                "模型返回的工具参数无法解析（{}），已放弃整个计划。",
-                bad.join("、")
-            )),
-            ..Plan::default()
-        };
+    if choice.get("finish_reason").and_then(Value::as_str) == Some("tool_calls") && steps.is_empty()
+    {
+        return Plan::failed("模型响应缺少完整的工具调用，已放弃整个计划。");
+    }
+    if msg
+        .get("content")
+        .is_some_and(|content| !content.is_null() && !content.is_string())
+    {
+        return Plan::failed("模型返回的消息内容格式无效，已放弃整个计划。");
     }
     let reply = msg
         .get("content")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|t| !t.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            msg.get("refusal")
-                .and_then(Value::as_str)
-                .map(|r| format!("模型拒绝了这个请求：{r}"))
-        });
+        .map(str::to_string);
+    // A complete response with neither calls nor text is left to the agent:
+    // after earlier rounds it simply ends the turn; as a first answer it
+    // means the request went unhandled.
     Plan {
         steps,
         reply,
-        tainted: false,
+        ..Plan::default()
     }
 }
 
@@ -295,10 +320,7 @@ impl Planner for OpenAiPlanner {
         let body = build_turn_request(&self.cfg, conv);
         match self.call(&body).await {
             Ok(resp) => parse_response(&resp),
-            Err(e) => Plan {
-                reply: Some(e),
-                ..Plan::default()
-            },
+            Err(e) => Plan::failed(e),
         }
     }
 }
@@ -355,7 +377,7 @@ mod tests {
 
     #[test]
     fn history_is_replayed_as_tool_calls_and_tool_messages() {
-        use crate::planner::{Round, ToolResult};
+        use crate::{Round, ToolResult};
         let i = intent("记一下 x");
         let history = vec![Round {
             text: None,
@@ -480,5 +502,54 @@ mod tests {
             .await;
         assert!(plan.steps.is_empty());
         assert!(plan.reply.unwrap().contains("model not found"));
+    }
+
+    #[test]
+    fn incomplete_or_malformed_tool_responses_never_run_a_partial_plan() {
+        let good = json!({"type": "function", "function": {
+            "name": "notes__append", "arguments": "{\"text\":\"x\"}"
+        }});
+        let bad_calls = [
+            json!({"type": "function", "function": {"arguments": "{}"}}),
+            json!({"type": "function", "function": {"name": " ", "arguments": "{}"}}),
+            json!({"type": "function", "function": {"name": "notes__clear"}}),
+            json!({"type": "function", "function": {"name": "notes__clear", "arguments": []}}),
+            json!({"type": "function", "function": {"name": "notes__clear", "arguments": "[]"}}),
+            json!({"type": "function", "function": {"name": "notes__clear", "arguments": "null"}}),
+            json!({"type": "other", "function": {"name": "notes__clear", "arguments": "{}"}}),
+        ];
+        for bad in bad_calls {
+            let plan = parse_response(&json!({"choices": [{"message": {
+                "tool_calls": [good, bad]
+            }}]}));
+            assert!(plan.steps.is_empty());
+            assert!(plan.error.is_some());
+        }
+        for reason in [json!("length"), json!("content_filter"), Value::Null] {
+            let plan = parse_response(&json!({"choices": [{
+                "finish_reason": reason,
+                "message": {"tool_calls": [good]}
+            }]}));
+            assert!(plan.steps.is_empty());
+            assert!(plan.error.is_some());
+        }
+    }
+
+    #[test]
+    fn complete_response_may_run_but_a_refusal_cannot() {
+        let plan = parse_response(&json!({"choices": [{
+            "finish_reason": "tool_calls",
+            "message": {"tool_calls": [{"type": "function", "function": {
+                "name": "notes__list", "arguments": "{}"
+            }}]}
+        }]}));
+        assert_eq!(plan.steps.len(), 1);
+        assert!(plan.error.is_none());
+        let plan = parse_response(&json!({"choices": [{"message": {
+            "refusal": "cannot do this",
+            "tool_calls": [{"function": {"name": "notes__clear", "arguments": "{}"}}]
+        }}]}));
+        assert!(plan.steps.is_empty());
+        assert!(plan.error.is_some());
     }
 }

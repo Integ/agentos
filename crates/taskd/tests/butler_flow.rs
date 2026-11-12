@@ -2,19 +2,19 @@
 
 use std::sync::{Arc, Mutex};
 
-use agentos_audit::durable::{AuditEntry, AuditEvent, AuditLog};
+use agentos_audit::{AuditEntry, AuditEvent, AuditLog};
 use agentos_core::{
     now_ms, AgentId, Capability, CapabilityError, CapabilityName, CapabilitySpec, DeviceId,
     DeviceInfo, Expression, ExpressionKind, Intent, IntentId, Modality, Output, OutputError,
     PrivacyClass, RiskLevel, Urgency,
 };
+use agentos_planner::{Plan, Planner, RulePlanner, Step};
 use agentos_policy::PolicyEngine;
 use agentos_runtime::{StepState, Task, TaskId, TaskState};
+use agentos_services::expression::ExpressionHub;
+use agentos_services::registry::CapabilityRegistry;
 use agentos_taskd::builtin::{self, NoteStore};
 use agentos_taskd::butler::{grant_manifest, Butler};
-use agentos_taskd::expression::ExpressionHub;
-use agentos_taskd::planner::{Plan, Planner, RulePlanner, Step};
-use agentos_taskd::registry::CapabilityRegistry;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
@@ -77,10 +77,7 @@ fn plan(names: &[&str]) -> Plan {
     Plan {
         steps: names
             .iter()
-            .map(|name| Step {
-                capability: CapabilityName::new(*name),
-                args: json!({}),
-            })
+            .map(|name| Step::new(CapabilityName::new(*name), json!({})))
             .collect(),
         ..Plan::default()
     }
@@ -362,7 +359,9 @@ async fn awaiting_confirmation_does_not_consume_new_intents_or_implicit_yes() {
     assert_eq!(h.butler.tasks().list().len(), 3);
     assert_eq!(h.task(1).state, TaskState::AwaitingConfirmation);
     assert_eq!(h.task(2).state, TaskState::Succeeded);
-    assert_eq!(h.task(3).state, TaskState::Succeeded);
+    // A bare "y" is a new intent nobody can act on, not an approval and not
+    // completed work.
+    assert_eq!(h.task(3).state, TaskState::Unhandled);
     assert_eq!(external.count(), 0);
 }
 
@@ -430,7 +429,8 @@ async fn capability_failure_stops_the_remaining_plan() {
     h.say("测试计划").await;
     assert_eq!(h.task(1).state, TaskState::Failed);
     assert_eq!(h.task(1).steps[0].state, StepState::Failed);
-    assert_eq!(h.task(1).steps[1].state, StepState::Pending);
+    // Never started, and recorded as such rather than left looking pending.
+    assert_eq!(h.task(1).steps[1].state, StepState::Skipped);
     assert_eq!(first.count(), 1);
     assert_eq!(second.count(), 0);
     assert_eq!(h.out.last().kind, ExpressionKind::Error);
@@ -531,6 +531,36 @@ async fn unknown_request_lists_capabilities() {
     let r = h.say("讲个笑话").await;
     assert_eq!(r.kind, ExpressionKind::Report);
     assert!(r.text.contains("notes.list"));
-    assert_eq!(h.task(1).state, TaskState::Succeeded);
-    assert!(h.task(1).message.unwrap().contains("notes.list"));
+    // Explaining what is possible is not the same as having done something.
+    let task = h.task(1);
+    assert_eq!(task.state, TaskState::Unhandled);
+    assert!(task.steps.is_empty());
+    assert!(task.message.unwrap().contains("notes.list"));
+}
+
+#[tokio::test]
+async fn a_direct_answer_succeeds_but_silence_or_inability_does_not() {
+    for (label, plan, expected) in [
+        (
+            "answer",
+            Plan {
+                reply: Some("二加二等于四。".into()),
+                ..Plan::default()
+            },
+            TaskState::Succeeded,
+        ),
+        (
+            "inability",
+            Plan::unhandled("我做不到这件事。"),
+            TaskState::Unhandled,
+        ),
+        ("silence", Plan::default(), TaskState::Unhandled),
+        ("failure", Plan::failed("无法连接模型"), TaskState::Failed),
+    ] {
+        let mut h = Harness::with_plan(label, plan, vec![]);
+        h.say("测试计划").await;
+        let task = h.task(1);
+        assert_eq!(task.state, expected, "{label}");
+        assert!(task.steps.is_empty() && task.message.is_some(), "{label}");
+    }
 }

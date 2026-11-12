@@ -42,6 +42,12 @@ test('normalization respects daemon status, step results, and confirmation index
   assert.equal(task.state, 'awaiting_confirmation');
   assert.deepEqual(task.confirmation, confirmation);
   assert.equal(normalizeTask({ id: 1, state: 'invented' }).state, 'unknown');
+  // "Not understood" is a real daemon outcome and must not collapse into
+  // unknown, or worse, be drawn as completed work.
+  const unhandled = normalizeTask({ id: 2, text: '讲个笑话', state: 'unhandled', message: '我还不会处理这句话。', steps: [] });
+  assert.equal(unhandled.state, 'unhandled');
+  assert.deepEqual(unhandled.steps, []);
+  assert.equal(validateScene(composeScene({ kind: 'task', task: unhandled })).panels[0].task.state, 'unhandled');
   assert.equal(normalizeTask({ id: -1 }), null);
 });
 

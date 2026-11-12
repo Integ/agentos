@@ -1,6 +1,6 @@
 # AgentOS
 
-本文介绍 `agentos-taskd`、`agentos-web-shell` 和 `agentos` CLI 组成的持久任务工作台。原有 `agentosd` 与原生 `agentos-shell` 继续提供多轮规划、MCP、插件和智能家居，参见[主项目说明](../README.md)。两组入口使用独立的 socket、状态和审计格式，不能互换连接或共用数据目录。镜像默认保留原生桌面。
+本文介绍任务内核 `agentos-taskd` 以及它的客户端：`agentos` CLI、`agentos-web-shell` 和原生桌面 `agentos-shell --taskd`。多轮规划、子 Agent、黑板、MCP、插件、智能家居和 PIN 都由这个服务提供。旧的 `agentosd` 只为本机语音和现有镜像保留，使用另一个状态目录，参见[架构](architecture.md#尚未合并的部分)。
 
 AgentOS 探索以人的意图为入口、以 Agent 为执行者的操作系统：人交付目标，系统协调模型、能力、设备和权限，并持续解释执行状态。目标架构是 **Linux 内核 + Rust 用户态 Agent OS 层**；当前是可运行的单用户本地任务服务。
 
@@ -37,6 +37,8 @@ cargo run -p agentos-cli -- --state-dir /tmp/agentos-demo workbench
 /task task-1
 ```
 
+规则规划器只认识这些固定说法。听不懂的句子会成为“未能处理”的任务，并列出当前能做的事；它不会被记成“已完成”。问时间得到的是本机时区的日期和时间。
+
 笔记与任务立即持久保存。清空保留一份恢复快照，恢复会保留清空后新增的笔记；恢复之前不能再次清空非空笔记，以免覆盖唯一备份。正常输入下，这些 L1 可恢复动作自动执行。
 
 工作台控制命令：
@@ -67,7 +69,7 @@ Shell 读取当前进程的 `OPENAI_API_KEY`，通过服务端 Responses API 生
 
 实时语音独立读取 `AGENTOS_VOICE_MODEL`，默认使用 `gpt-realtime-2.1`；`AGENTOS_VOICE_MODEL=off` 可禁用，`AGENTOS_VOICE_VOICE` 可选择声音，默认为 `marin`。它复用 Shell 进程的 `OPENAI_API_KEY`，不把项目密钥传给浏览器。结束或隐藏页面会关闭麦克风，连接中断后不自动重连。
 
-未连接后台时可体验本地笔记与专注计时；浏览器笔记与后台笔记独立，不自动同步。`/` 聚焦输入，`Alt+V` 连接或结束实时对话，`Esc` 打断回应，`Shift+Esc` 结束对话，`Alt+1–4` 切换空间。打断声音不取消已接收任务，待批准动作仍需在界面明确批准。完整行为与实现边界见[图形 Shell 设计](ambient-shell.md)。
+连接后台后，界面通过只读接口直接读取后台笔记；打开“记忆”空间或在笔记变化后刷新都不会替你提交任务，任务轨迹里只有你自己表达过的意图。未连接后台时可体验本地笔记与专注计时；浏览器笔记与后台笔记独立，不自动同步。`/` 聚焦输入，`Alt+V` 连接或结束实时对话，`Esc` 打断回应，`Shift+Esc` 结束对话，`Alt+1–4` 切换空间。打断声音不取消已接收任务，待批准动作仍需在界面明确批准。完整行为与实现边界见[图形 Shell 设计](ambient-shell.md)。
 
 ## 独立 CLI 与脚本
 
@@ -75,6 +77,8 @@ Shell 读取当前进程的 `OPENAI_API_KEY`，通过服务端 Responses API 生
 
 ```sh
 agentos submit 记一下 买牛奶
+agentos submit --wait --timeout 60 现在几点
+agentos read notes.list
 agentos tasks --limit 10
 agentos tasks --before task-20 --state succeeded
 agentos task task-1
@@ -85,13 +89,34 @@ agentos watch
 
 默认连接相同的状态目录；可在命令前指定 `--state-dir` 或 `--socket`。`--json` 适合脚本，`watch --after <revision>` 接收实时变更与重新同步通知。
 
+`submit` 默认只返回“已接收”。加上 `--wait` 会等到任务结束再返回，并打印最终任务（`--json` 时与 `agentos --json task` 的结构相同）；`--timeout 秒` 设置最长等待时间，默认 300 秒。这两个选项要写在意图之前，意图里出现的同名文字不会被当成选项。等待只读取任务，不会重发、批准或取消；放弃等待后任务仍在后台继续。
+
+| 退出码 | 含义 |
+| --- | --- |
+| 0 | 成功；`submit --wait` 时表示任务 `succeeded` |
+| 1 | 连接、协议或后台返回的错误 |
+| 2 | 命令行用法错误 |
+| 3 | `submit --wait`：任务结束但没有成功（`unhandled`、`failed`、`cancelled`、`interrupted`） |
+| 4 | `submit --wait`：任务在等待批准，需要人来处理 |
+| 5 | `submit --wait`：等待超时，任务仍在后台继续 |
+
+`read <能力> [JSON 参数]` 直接查询一个只读（L0）能力，例如 `notes.list`、`clock.now`。它不创建任务、不经过规划器；有副作用的能力会被拒绝，需要用 `submit` 提交意图。`capabilities` 列出的风险等级写作 L0–L3。
+
 独立批准命令要求先读取任务详情，再显式提供其中的确认令牌：
 
 ```sh
 agentos approve task-3 1 --confirmation <令牌>
 ```
 
-批准绑定任务、步骤、随机令牌、同一系统用户和五分钟有效期；入队及执行时都校验，随后仍重新检查能力授权。普通 `y` 只会产生新任务。没有可信身份核验设备的 L3 操作继续拒绝执行。
+批准绑定任务、步骤、随机令牌、同一系统用户和五分钟有效期；入队及执行时都校验，随后仍重新检查能力授权。普通 `y` 只会产生新任务。
+
+不可逆（L3）的步骤还需要 PIN 来证明是谁在批准。先用 `agentos-taskd --state-dir <目录> --set-pin` 设置；没有设置 PIN 时，L3 步骤直接拒绝执行。批准时加 `--pin-stdin`，PIN 从标准输入读取，不会出现在命令行里：
+
+```sh
+agentos approve task-3 1 --confirmation <令牌> --pin-stdin
+```
+
+工作台不读取 PIN，会提示改用上面的命令；Web Shell 和原生桌面在批准面板里输入。连续输错 5 次锁定 5 分钟，每次核对都记入审计（不含 PIN 本身）。
 
 工作台断线后自动重连并重新获取视图，**不会自动重发提交或批准**。若发送请求后没有收到响应，操作可能已经生效，请先检查历史与实际结果。
 
@@ -105,11 +130,15 @@ agentos approve task-3 1 --confirmation <令牌>
 | `tasks.json` | 稳定任务 ID、持久 revision、生命周期、步骤与结果 |
 | `notes.json` | 笔记与清空恢复快照 |
 | `audit.jsonl` | 意图、策略、调用开始、结果和表达记录 |
+| `blackboard.json` | 所有任务和 Agent 共享的黑板 |
+| `pin.json` | PIN 的加盐哈希（0600） |
+| `evolve/` | 系统自己生成的插件及其版本 |
+| `mcp.json`、`agents/*.json` | 可选配置：MCP server、自定义子 Agent |
 | `.lock` | 状态目录的进程独占锁 |
 
 服务及客户端通过内核 peer credentials 校验本机 UID。多个相同用户的终端共享同一任务空间，来源身份跨连接稳定；同一 UID 下的进程属于同一信任域。自定义 socket 应放在本人拥有、其他用户不可写的目录，不能直接放在共享可写的 `/tmp` 根目录；路径也需符合系统 Unix socket 长度限制。
 
-任务与笔记原子替换并同步落盘，审计同步只追加。能力调用前保存调用开始与运行状态；关键持久化失败停止后续执行。坏数据拒绝加载且保留原文件。系统不承诺跨任务、日志和能力数据的原子事务，以中断态表达结果不确定性。
+任务与笔记原子替换并同步落盘，审计同步只追加并带哈希链（`agentos-taskd --verify-audit` 校验）。能力调用前保存调用开始与运行状态；关键持久化失败停止后续执行。损坏的任务或笔记文件拒绝加载且保留原文件；无法续写的审计日志会被改名保留，另开一份新日志并在第一条说明原因。系统不承诺跨任务、日志和能力数据的原子事务，以中断态表达结果不确定性。
 
 审计路径可用 `--audit` 或 `AGENTOS_TASK_AUDIT` 指定。状态目录与审计文件都限制单一写入者；不同状态目录应使用独立审计文件。
 
@@ -133,21 +162,11 @@ cargo run -p agentos-taskd -- --planner openai
 | OpenAI 兼容 | `OPENAI_MODEL`，以及 `OPENAI_API_KEY` 或 `OPENAI_BASE_URL`；本地兼容服务可不设 key |
 | Rule | 无需配置，支持上面的笔记和时间示例 |
 
-模型一次返回顺序工具列表，所有调用仍经过运行时校验与策略。网络失败、截断或畸形工具响应形成失败任务，不执行半个计划。当前不支持依赖上一步结果的多轮规划。
+规划是多轮的：模型每轮返回一组工具调用，执行结果交还给它，由它决定下一轮或给出回答，最多 8 轮。所有调用仍经过运行时校验与策略。网络失败、截断或畸形工具响应使任务失败，不执行半个计划。
 
 ## 仓库结构与开发
 
-```text
-crates/
-  core/      意图、表达、能力和设备类型
-  runtime/   持久任务、变更序号、分页、通知、取消与恢复
-  ipc/       协议 v1、受限帧读写与本机路径约定
-  policy/    能力授权、风险与污点标记策略
-  audit/     严格校验与同步落盘的只追加日志
-  taskd/  Unix socket 服务、单执行 worker、规划器与持久笔记
-  cli/       独立 agentos 命令与实时终端任务工作台
-  web-shell/     语音优先情景画布与本地 HTTP / IPC 桥
-```
+仓库结构见 [README](../README.md#仓库结构)，各 crate 的职责见[架构](architecture.md#一个内核)。
 
 ```sh
 cargo fmt --all --check
@@ -158,4 +177,4 @@ node --test crates/web-shell/assets/*.test.mjs
 
 测试覆盖持久化、快照迁移、取消竞态、批准与撤权、审计故障、协议帧限制、真实 Unix socket 交互和客户端断线行为。CI 配置 Linux/macOS 检查及 Rust 1.88 最低版本编译。
 
-当前为单用户、单 worker 的用户态服务，能力仍在守护进程内运行。下一阶段推进能力进程监督、MCP 与 Linux 资源隔离，再发展多轮规划、预算和并发调度。
+当前为单用户、单 worker 的用户态服务，能力仍在守护进程内运行（插件在沙箱里）。完整的结构与尚未合并的部分见[架构](architecture.md)。

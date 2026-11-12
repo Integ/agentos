@@ -80,6 +80,7 @@ pub fn state_label(state: TaskState) -> &'static str {
         TaskState::Running => "执行中",
         TaskState::AwaitingConfirmation => "等待批准",
         TaskState::Succeeded => "已完成",
+        TaskState::Unhandled => "未能处理",
         TaskState::Failed => "失败",
         TaskState::Cancelled => "已取消",
         TaskState::Interrupted => "已中断",
@@ -123,7 +124,7 @@ pub fn task_detail(task: &Task) -> String {
 mod tests {
     use super::*;
     use agentos_core::{DeviceId, IntentId, Urgency};
-    use agentos_runtime::{Confirmation, StepState, TaskStep, TaskStore};
+    use agentos_runtime::{Confirmation, TaskStep, TaskStore};
     use serde_json::json;
 
     #[test]
@@ -172,16 +173,15 @@ mod tests {
         let task = store
             .update(task.id, |task| {
                 task.state = TaskState::AwaitingConfirmation;
-                task.steps = vec![TaskStep {
-                    capability: agentos_core::CapabilityName::new("mail.send"),
-                    args: json!({"to":"alice"}),
-                    state: StepState::Pending,
-                    result: None,
-                }];
+                task.steps = vec![TaskStep::pending(
+                    agentos_core::CapabilityName::new("mail.send"),
+                    json!({"to":"alice"}),
+                )];
                 task.confirmation = Some(Confirmation {
                     step: 0,
                     expires_at_ms: now_ms() + 1_000,
                     token: "test-token".into(),
+                    verify_identity: false,
                 });
             })
             .unwrap();

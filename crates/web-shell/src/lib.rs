@@ -10,7 +10,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use agentos_cli::client::Client;
-use agentos_ipc::{default_socket_path, default_state_dir, Command, MAX_PAGE_SIZE, MAX_TEXT_BYTES};
+use agentos_core::CapabilityName;
+use agentos_ipc::{
+    default_socket_path, default_state_dir, Command, MAX_CAPABILITY_NAME_BYTES, MAX_PAGE_SIZE,
+    MAX_TEXT_BYTES,
+};
 use agentos_runtime::{TaskId, TaskState};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -31,7 +35,7 @@ const LAYOUT_CLIENT_JS: &str = include_str!("../assets/layout-client.js");
 const REALTIME_VOICE_JS: &str = include_str!("../assets/realtime-voice.js");
 const VOICE_TOOLS_JS: &str = include_str!("../assets/voice-tools.js");
 
-pub const HELP: &str = "AgentOS · 语音优先情景工作台\n\n用法：cargo run -p agentos-web-shell -- [--state-dir 路径 | --socket 路径] [--port 4317]\n\n仅绑定 127.0.0.1。打开启动时显示的完整链接连接本地服务。\n未启动 agentos-taskd 时可体验界面演示；真实任务需要后台服务。";
+pub const HELP: &str = "AgentOS · 语音优先情景工作台\n\n用法：agentos-web-shell [--state-dir 路径 | --socket 路径] [--port 4317]\n\n仅绑定 127.0.0.1。打开启动时显示的完整链接连接本地服务。\n未启动 agentos-taskd 时可体验界面演示；真实任务需要后台服务。\n--help, -h 查看帮助；--version, -V 查看版本。";
 
 pub struct Options {
     pub socket: PathBuf,
@@ -366,6 +370,9 @@ struct Intent {
 struct Approval {
     step: usize,
     confirmation: String,
+    /// The PIN, for an irreversible step. Passed through, never kept.
+    #[serde(default)]
+    pin: Option<String>,
 }
 
 fn command(request: &Request) -> Result<Command, HttpError> {
@@ -408,6 +415,24 @@ fn command(request: &Request) -> Result<Command, HttpError> {
                 state,
             })
         }
+        // Reading state is a query, not an intent: the browser may refresh
+        // what it shows without submitting a task on the user's behalf. The
+        // service only serves granted read-only capabilities this way.
+        ("GET", path) if path.starts_with("/api/read/") && parameters.is_empty() => {
+            let name = &path["/api/read/".len()..];
+            if name.is_empty()
+                || name.len() > MAX_CAPABILITY_NAME_BYTES
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            {
+                return Err(HttpError::bad("无效的能力名称"));
+            }
+            Ok(Command::Read {
+                capability: CapabilityName::new(name),
+                args: json!({}),
+            })
+        }
         ("POST", "/api/intent") if parameters.is_empty() => {
             let intent: Intent = serde_json::from_slice(&request.body)
                 .map_err(|_| HttpError::bad("需要仅包含 text 字符串的 JSON 对象"))?;
@@ -439,10 +464,14 @@ fn command(request: &Request) -> Result<Command, HttpError> {
                     {
                         return Err(HttpError::bad("批准步骤从 1 开始，并需要有效的确认令牌"));
                     }
+                    if approval.pin.as_ref().is_some_and(|pin| pin.len() > 64) {
+                        return Err(HttpError::bad("PIN 无效"));
+                    }
                     Ok(Command::Approve {
                         id,
                         step: approval.step,
                         confirmation: approval.confirmation,
+                        pin: approval.pin,
                     })
                 }
                 _ => Err(HttpError::new(404, "not_found", "没有此接口")),
@@ -731,13 +760,44 @@ mod tests {
     }
 
     #[test]
+    fn reads_are_side_effect_free_queries_that_never_become_intents() {
+        assert!(matches!(
+            command(&request("GET", "/api/read/notes.list", Value::Null)).unwrap(),
+            Command::Read { capability, args }
+                if capability.as_str() == "notes.list" && args == json!({})
+        ));
+        for (method, path) in [
+            ("GET", "/api/read/"),
+            ("GET", "/api/read/notes.list?text=x"),
+            ("GET", "/api/read/notes/list"),
+            ("GET", "/api/read/notes%2Eclear"),
+            ("GET", "/api/read/笔记"),
+            ("POST", "/api/read/notes.list"),
+        ] {
+            assert!(
+                command(&request(method, path, json!({}))).is_err(),
+                "{method} {path}"
+            );
+        }
+        let long = format!("/api/read/{}", "n".repeat(129));
+        assert!(command(&request("GET", &long, Value::Null)).is_err());
+    }
+
+    #[test]
     fn bounded_queries_and_exact_approval_tokens_map_to_protocol() {
+        assert!(matches!(
+            command(&request("GET", "/api/tasks?state=unhandled", Value::Null)).unwrap(),
+            Command::List {
+                state: Some(TaskState::Unhandled),
+                ..
+            }
+        ));
         assert!(command(&request("GET", "/api/tasks?limit=51", Value::Null)).is_err());
         assert!(command(&request("GET", "/api/tasks?limit=1&limit=2", Value::Null)).is_err());
         assert!(command(&request("GET", "/api/tasks?before=task-0", Value::Null)).is_err());
         assert!(
             matches!(command(&request("POST", "/api/tasks/task-9/approve", json!({"step":2,"confirmation":"opaque"}))).unwrap(),
-            Command::Approve { id: TaskId(9), step: 2, confirmation } if confirmation == "opaque")
+            Command::Approve { id: TaskId(9), step: 2, confirmation, pin: None } if confirmation == "opaque")
         );
         assert!(command(&request(
             "POST",

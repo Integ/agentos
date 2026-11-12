@@ -9,7 +9,7 @@ use agentos_core::{Capability, CapabilityError, CapabilityName, CapabilitySpec, 
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::registry::CapabilityRegistry;
+use agentos_services::registry::CapabilityRegistry;
 
 fn spec(name: &str, description: &str, risk: RiskLevel, input_schema: Value) -> CapabilitySpec {
     CapabilitySpec {

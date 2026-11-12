@@ -11,14 +11,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use agentos_core::{
-    now_ms, Capability, CapabilityError, CapabilityName, CapabilitySpec, RiskLevel,
-};
+use agentos_core::{Capability, CapabilityError, CapabilityName, CapabilitySpec, RiskLevel};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::registry::CapabilityRegistry;
+use agentos_services::registry::CapabilityRegistry;
 
 const MAX_NOTE_CHARS: usize = 16_384;
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -57,7 +55,7 @@ impl Default for ClockNow {
         Self {
             spec: spec(
                 "clock.now",
-                "当前时间（UTC）",
+                "当前日期和时间（本机时区）",
                 RiskLevel::ReadOnly,
                 empty_schema(),
             ),
@@ -73,11 +71,38 @@ impl Capability for ClockNow {
 
     async fn invoke(&self, args: Value) -> Result<Value, CapabilityError> {
         validate_args(&args, &[])?;
-        let ms = now_ms();
-        let secs = ms / 1000 % 86_400;
-        let hms = format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60);
-        Ok(json!({"unix_ms": ms, "message": format!("现在是 UTC {hms}")}))
+        Ok(clock_reading(chrono::Local::now()))
     }
+}
+
+/// What `clock.now` says for a moment in some time zone. Someone asking the
+/// time means the time where they are, so the reading is local and carries its
+/// offset. The shape matches `agentosd`'s `clock.now`; `unix_ms` stays for
+/// clients that render the time themselves.
+fn clock_reading<Tz: chrono::TimeZone>(t: chrono::DateTime<Tz>) -> Value
+where
+    Tz::Offset: std::fmt::Display,
+{
+    use chrono::{Datelike, Offset};
+    const WEEKDAYS: [&str; 7] = ["一", "二", "三", "四", "五", "六", "日"];
+    let secs = t.offset().fix().local_minus_utc();
+    let utc_offset = format!(
+        "UTC{}{:02}:{:02}",
+        if secs < 0 { '-' } else { '+' },
+        secs.abs() / 3600,
+        secs.abs() / 60 % 60
+    );
+    let weekday = WEEKDAYS[t.weekday().num_days_from_monday() as usize];
+    json!({
+        "unix_ms": t.timestamp_millis(),
+        "local": t.to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+        "utc_offset": utc_offset,
+        "message": format!(
+            "现在是 {} 星期{weekday} {}（{utc_offset}）",
+            t.format("%Y-%m-%d"),
+            t.format("%H:%M:%S")
+        ),
+    })
 }
 
 pub type NoteStore = Arc<Mutex<Vec<String>>>;
@@ -518,5 +543,49 @@ mod tests {
                 .is_err());
         }
         assert!(notes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn clock_reports_local_time_with_offset() {
+        use chrono::TimeZone;
+        let tz = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let t = tz.with_ymd_and_hms(2026, 11, 1, 22, 30, 5).unwrap();
+        let v = clock_reading(t);
+        assert_eq!(v["utc_offset"], "UTC+08:00");
+        assert_eq!(v["local"], "2026-11-01T22:30:05+08:00");
+        assert_eq!(
+            v["message"],
+            "现在是 2026-11-01 星期日 22:30:05（UTC+08:00）"
+        );
+        // The instant is unchanged; only its presentation is local.
+        assert_eq!(v["unix_ms"], t.timestamp_millis());
+        let west = chrono::FixedOffset::west_opt(7 * 3600).unwrap();
+        let v = clock_reading(west.with_ymd_and_hms(2026, 11, 11, 11, 24, 50).unwrap());
+        assert_eq!(
+            v["message"],
+            "现在是 2026-11-11 星期三 11:24:50（UTC-07:00）"
+        );
+    }
+
+    #[tokio::test]
+    async fn clock_capability_answers_in_the_machine_time_zone() {
+        let mut reg = CapabilityRegistry::new();
+        register_all(&mut reg);
+        let before = chrono::Local::now().timestamp_millis();
+        let v = invoke(&reg, "clock.now", json!({})).await;
+        let after = chrono::Local::now().timestamp_millis();
+        let unix_ms = v["unix_ms"].as_i64().unwrap();
+        assert!((before..=after).contains(&unix_ms));
+        let local = chrono::DateTime::parse_from_rfc3339(v["local"].as_str().unwrap()).unwrap();
+        assert_eq!(local.timestamp(), unix_ms / 1000);
+        // Compare offsets for the same instant, so a DST change cannot race.
+        use chrono::TimeZone;
+        let expected = chrono::Local
+            .timestamp_millis_opt(unix_ms)
+            .unwrap()
+            .offset()
+            .local_minus_utc();
+        assert_eq!(local.offset().local_minus_utc(), expected);
+        assert!(!v["message"].as_str().unwrap().contains("UTC "));
     }
 }

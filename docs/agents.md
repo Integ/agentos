@@ -6,6 +6,8 @@
 
 设计讨论：[管家调度多 Agent 设计](https://claude.ai/artifact/53iWC7jjzJ1syP4MPfb2g8)
 
+> **在任务服务上。** 子 Agent、黑板、裁判和跨任务上下文同样由 `agentos-taskd` 提供，行为与下文一致，区别只有三点：自定义 Agent 清单放在状态目录的 `agents/`（默认 `~/.local/state/agentos/agents/`），黑板是状态目录里的 `blackboard.json`；任务用 `agentos` 命令或界面查看和取消，没有 `tasks.list` / `tasks.cancel` 这两个能力；重启后未完成的任务标为“已中断”，不会接着做。子 Agent 的步骤记在同一个任务里、委派那一步之后，并标上它的 id。下文的路径和“重启后恢复”描述的是旧的 `agentosd`。
+
 ## OS 概念 → Agent
 
 思路来自 [pi-durable](https://github.com/earendil-works/pi/blob/main/packages/durable/README.md)（可恢复的 Agent 运行时）、[jev](https://github.com/disler/durable-pi)（执行前的快速裁判）和黑板（blackboard）架构。
@@ -29,6 +31,7 @@
 - 任务中的某一步要你确认时，任务挂起（"等待确认"），你可以继续说别的事，新的任务照常执行。
 - 确认问题都带着任务编号。回复 `y` / `n` 回答最新的那个；回复 `y #3` 回答指定任务。图形界面的确认弹窗会自动带上编号。
 - "任务"列出等待中和最近完成的任务；"取消任务 3"取消一个等待中的任务。
+- 任务结束时记录的是结局，而不只是“结束了”：`done`（已完成：做了事或直接回答了）、`unhandled`（未能处理：管家没有办法做这件事，什么也没执行）、`failed`（失败：规划器出错，例如模型接口不可达或拒绝）、`cancelled`（已取消）。规划器出错时管家报告的是错误而不是普通回复；子 Agent 规划失败或无法处理时，交还给管家的结果标记为失败。
 
 ## 持久化与恢复
 

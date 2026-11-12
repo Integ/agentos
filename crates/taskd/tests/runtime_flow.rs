@@ -6,18 +6,18 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentos_audit::durable::{AuditEvent, AuditLog};
+use agentos_audit::{AuditEvent, AuditLog};
 use agentos_core::{
     now_ms, AgentId, Capability, CapabilityError, CapabilityName, CapabilitySpec, DeviceId, Intent,
     IntentId, RiskLevel, Urgency,
 };
+use agentos_planner::{Plan, Planner, RulePlanner, Step};
 use agentos_policy::PolicyEngine;
 use agentos_runtime::{StepState, TaskId, TaskState, TaskStore};
+use agentos_services::expression::ExpressionHub;
+use agentos_services::registry::CapabilityRegistry;
 use agentos_taskd::builtin::{self, NoteStore};
 use agentos_taskd::butler::{grant_manifest, Butler};
-use agentos_taskd::expression::ExpressionHub;
-use agentos_taskd::planner::{Plan, Planner, RulePlanner, Step};
-use agentos_taskd::registry::CapabilityRegistry;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::Notify;
@@ -158,10 +158,7 @@ fn capability_spec(name: &str) -> CapabilitySpec {
 }
 
 fn step(name: &str) -> Step {
-    Step {
-        capability: CapabilityName::new(name),
-        args: json!({}),
-    }
+    Step::new(CapabilityName::new(name), json!({}))
 }
 
 #[derive(Clone)]

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/policy", "crates/audit", "crates/agentosd", "crates/shell", "crates/runtime", "crates/ipc", "crates/cli", "crates/taskd", "crates/web-shell"]
+members = ["crates/core", "crates/policy", "crates/audit", "crates/planner", "crates/services", "crates/agentosd", "crates/shell", "crates/runtime", "crates/ipc", "crates/cli", "crates/taskd", "crates/web-shell"]
 
 [workspace.package]
 version = "0.3.0"
@@ -14,7 +14,10 @@ agentos-policy = { path = "crates/policy" }
 agentos-audit = { path = "crates/audit" }
 agentos-runtime = { path = "crates/runtime" }
 agentos-ipc = { path = "crates/ipc" }
+agentos-planner = { path = "crates/planner" }
+agentos-services = { path = "crates/services" }
 async-trait = "0.1.92"
+chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.10.9"

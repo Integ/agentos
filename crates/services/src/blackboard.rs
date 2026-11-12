@@ -206,7 +206,7 @@ impl Blackboard {
     }
 }
 
-pub(crate) fn save<T: Serialize>(path: &Path, v: &T) -> std::io::Result<()> {
+pub fn save<T: Serialize>(path: &Path, v: &T) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }

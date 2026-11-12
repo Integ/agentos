@@ -45,6 +45,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentos-planner"
+version = "0.3.0"
+dependencies = [
+ "agentos-core",
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "agentos-policy"
 version = "0.3.0"
 dependencies = [
@@ -63,11 +75,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentos-services"
+version = "0.3.0"
+dependencies = [
+ "agentos-audit",
+ "agentos-core",
+ "agentos-planner",
+ "async-trait",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "agentos-shell"
 version = "0.3.0"
 dependencies = [
+ "agentos-audit",
+ "agentos-cli",
+ "agentos-core",
+ "agentos-ipc",
+ "agentos-planner",
+ "agentos-policy",
+ "agentos-runtime",
+ "agentos-services",
+ "agentos-taskd",
  "serde_json",
  "tao",
+ "tokio",
  "wry",
 ]
 
@@ -78,9 +116,12 @@ dependencies = [
  "agentos-audit",
  "agentos-core",
  "agentos-ipc",
+ "agentos-planner",
  "agentos-policy",
  "agentos-runtime",
+ "agentos-services",
  "async-trait",
+ "chrono",
  "reqwest",
  "serde",
  "serde_json",
@@ -92,6 +133,7 @@ name = "agentos-web-shell"
 version = "0.3.0"
 dependencies = [
  "agentos-cli",
+ "agentos-core",
  "agentos-ipc",
  "agentos-runtime",
  "reqwest",
@@ -106,7 +148,9 @@ version = "0.3.0"
 dependencies = [
  "agentos-audit",
  "agentos-core",
+ "agentos-planner",
  "agentos-policy",
+ "agentos-services",
  "async-trait",
  "chrono",
  "libc",

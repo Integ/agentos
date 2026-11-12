@@ -55,7 +55,7 @@ impl PinCheck {
             PinCheck::Locked { seconds } => {
                 format!("PIN 输错太多次，请 {seconds} 秒后再试")
             }
-            PinCheck::NotSet => "还没有设置 PIN（运行 agentosd --set-pin）".into(),
+            PinCheck::NotSet => "还没有设置 PIN（运行 agentos-taskd --set-pin）".into(),
         }
     }
 }

@@ -1,0 +1,19 @@
+[package]
+name = "agentos-planner"
+description = "AgentOS planners: the planning contract, the offline rule planner and the Claude / OpenAI-compatible model planners"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+# One-request HTTP servers for tests of crates that talk to model or device APIs.
+test-util = []
+
+[dependencies]
+agentos-core.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

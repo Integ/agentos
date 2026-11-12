@@ -9,15 +9,21 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use agentos_core::CapabilitySpec;
+use agentos_core::{CapabilityName, CapabilitySpec};
 use agentos_runtime::{StepState, Task, TaskId, TaskState};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const VERSION: u32 = 1;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_TEXT_BYTES: usize = 65_536;
 pub const MAX_PAGE_SIZE: usize = 50;
+pub const MAX_CAPABILITY_NAME_BYTES: usize = 128;
+
+fn empty_object() -> Value {
+    Value::Object(serde_json::Map::new())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -55,8 +61,20 @@ pub enum Command {
         step: usize,
         /// Exact token received with this task's concrete confirmation prompt.
         confirmation: String,
+        /// Proof of identity for an irreversible step: the PIN. Checked by
+        /// the service and never stored, logged or echoed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pin: Option<String>,
     },
     Capabilities {},
+    /// Query a granted read-only (L0) capability directly. A client reading
+    /// state is not an intent: no task is created, nothing is planned and no
+    /// side effect is possible. Anything else must be submitted as an intent.
+    Read {
+        capability: CapabilityName,
+        #[serde(default = "empty_object")]
+        args: Value,
+    },
     Watch {
         #[serde(default)]
         after: Option<u64>,
@@ -128,6 +146,11 @@ pub enum Reply {
     },
     Capabilities {
         capabilities: Vec<CapabilitySpec>,
+    },
+    /// What a read-only capability returned to a direct `Read`.
+    Value {
+        capability: CapabilityName,
+        value: Value,
     },
     ApprovalQueued {
         id: TaskId,
@@ -310,6 +333,7 @@ mod tests {
                 id: TaskId(3),
                 step: 2,
                 confirmation: "nonce".into(),
+                pin: None,
             },
         };
         let value = serde_json::to_value(&request).unwrap();
@@ -373,6 +397,8 @@ mod tests {
             json!({"method":"get","id":1}),
             json!({"method":"cancel","id":1}),
             json!({"method":"approve","id":1,"step":1,"confirmation":"nonce"}),
+            json!({"method":"read","capability":"notes.list"}),
+            json!({"method":"read","capability":"notes.list","args":{}}),
             json!({"method":"watch"}),
         ] {
             let request = json!({"version":VERSION,"id":7,"command":command});
@@ -404,6 +430,74 @@ mod tests {
             let decoded: Command = serde_json::from_value(expected.clone()).unwrap();
             assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn direct_reads_default_to_empty_arguments_and_echo_the_capability() {
+        let command: Command =
+            serde_json::from_value(json!({"method":"read","capability":"notes.list"})).unwrap();
+        let Command::Read { capability, args } = &command else {
+            panic!("not a read")
+        };
+        assert_eq!((capability.as_str(), args), ("notes.list", &json!({})));
+        assert_eq!(
+            serde_json::to_value(&command).unwrap(),
+            json!({"method":"read","capability":"notes.list","args":{}})
+        );
+        // A read names exactly one capability; it cannot smuggle an intent.
+        for invalid in [
+            json!({"method":"read"}),
+            json!({"method":"read","capability":7}),
+            json!({"method":"read","capability":"notes.list","text":"清空笔记"}),
+        ] {
+            assert!(serde_json::from_value::<Command>(invalid).is_err());
+        }
+        let reply = Reply::Value {
+            capability: CapabilityName::new("notes.list"),
+            value: json!({"notes":["牛奶"]}),
+        };
+        let wire = serde_json::to_value(Response::ok(3, reply)).unwrap();
+        assert_eq!(
+            wire["body"]["data"],
+            json!({"type":"value","capability":"notes.list","value":{"notes":["牛奶"]}})
+        );
+        assert!(serde_json::from_value::<Response>(wire).is_ok());
+    }
+
+    #[test]
+    fn unhandled_is_a_wire_state_that_filters_and_summaries_understand() {
+        let command: Command =
+            serde_json::from_value(json!({"method":"list","limit":5,"state":"unhandled"})).unwrap();
+        assert!(matches!(
+            command,
+            Command::List {
+                state: Some(TaskState::Unhandled),
+                ..
+            }
+        ));
+        let store = TaskStore::memory();
+        let task = store
+            .create(Intent {
+                id: IntentId(0),
+                source: DeviceId::new("test"),
+                speaker: None,
+                text: "讲个笑话".into(),
+                urgency: Urgency::Normal,
+                at_ms: now_ms(),
+            })
+            .unwrap();
+        let task = store
+            .update(task.id, |task| task.state = TaskState::Unhandled)
+            .unwrap();
+        let summary = serde_json::to_value(TaskSummary::from(&task)).unwrap();
+        assert_eq!(summary["state"], "unhandled");
+        assert_eq!(
+            (
+                summary["completed_steps"].as_u64(),
+                summary["total_steps"].as_u64()
+            ),
+            (Some(0), Some(0))
+        );
     }
 
     #[tokio::test]
