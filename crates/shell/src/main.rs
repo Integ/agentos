@@ -35,6 +35,46 @@ const READY: &str = "__ready";
 /// The daemon connection, shared by the reader thread and the IPC handler.
 type Conn = Arc<Mutex<Option<UnixStream>>>;
 
+const HELP: &str = "\
+用法：agentos-shell [--socket 路径] [--windowed | --fullscreen]
+
+  --socket 路径   agentosd 的 Unix socket（或 AGENTOS_SOCKET；
+                  默认 $XDG_RUNTIME_DIR/agentos.sock）
+  --windowed      以 1440×900 的窗口运行，便于开发
+  --fullscreen    无边框全屏
+  --help, -h      查看帮助
+  --version, -V   查看版本
+
+需要先启动后台：agentosd --listen <同一个 socket 路径>。";
+
+/// What the command line asks for other than opening the desktop: text to
+/// print before exiting, or a usage error. Checked before any window exists,
+/// so `--help` or a mistyped flag never takes over the screen.
+fn command_line(args: impl IntoIterator<Item = String>) -> Result<Option<String>, String> {
+    let mut args = args.into_iter();
+    while let Some(name) = args.next() {
+        match name.as_str() {
+            "--help" | "-h" => {
+                return Ok(Some(format!(
+                    "AgentOS v{} · 图形桌面\n\n{HELP}",
+                    env!("CARGO_PKG_VERSION")
+                )))
+            }
+            "--version" | "-V" => {
+                return Ok(Some(format!("agentos-shell {}", env!("CARGO_PKG_VERSION"))))
+            }
+            "--socket" => {
+                if args.next().is_none_or(|value| value.starts_with("--")) {
+                    return Err("--socket 缺少路径，使用 --help 查看用法".into());
+                }
+            }
+            "--windowed" | "--fullscreen" => {}
+            _ => return Err(format!("未知参数：{name}，使用 --help 查看用法")),
+        }
+    }
+    Ok(None)
+}
+
 fn arg(name: &str) -> Option<String> {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -218,6 +258,17 @@ fn launch_terminal() {
 }
 
 fn main() -> wry::Result<()> {
+    match command_line(std::env::args().skip(1)) {
+        Ok(Some(text)) => {
+            println!("{text}");
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+    }
     let path = socket_path();
     let event_loop = EventLoopBuilder::<Value>::with_user_event().build();
 
@@ -303,6 +354,34 @@ fn main() -> wry::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_version_and_mistakes_never_open_a_window() {
+        let parse = |args: &[&str]| command_line(args.iter().map(|a| a.to_string()));
+        assert!(parse(&["--help"])
+            .unwrap()
+            .unwrap()
+            .contains("用法：agentos-shell"));
+        assert_eq!(
+            parse(&["-V"]).unwrap().unwrap(),
+            format!("agentos-shell {}", env!("CARGO_PKG_VERSION"))
+        );
+        assert!(parse(&["--windowed", "--help"]).unwrap().is_some());
+        for args in [
+            vec![],
+            vec!["--windowed"],
+            vec!["--socket", "/tmp/agentos.sock", "--fullscreen"],
+        ] {
+            assert_eq!(parse(&args), Ok(None), "{args:?}");
+        }
+        for args in [
+            vec!["--window"],
+            vec!["--socket"],
+            vec!["--socket", "--windowed"],
+        ] {
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
+    }
 
     #[test]
     fn only_known_system_actions_are_accepted() {

@@ -1,5 +1,19 @@
 # 更新日志
 
+## 未发布
+
+让结果可信：任务的结局、时间和任务历史都如实反映发生了什么。
+
+- **“没听懂”不再记成“已完成”**：规划器没有办法处理的意图现在以独立的结局结束。`agentos-taskd` 新增任务终态 `unhandled`（CLI 显示“未能处理”，Web Shell 显示“没有听懂”）；`agentosd` 的任务新增 `unhandled` 和 `failed`，`done` 事件带上 `state`。规划器直接给出回答的任务仍是成功。
+- **规划失败是错误，不是回复**：`agentosd` 的 Claude 和 OpenAI 兼容规划器在接口不可达、被拒绝或响应无效时，任务记为失败并以错误报告；此前会被当成普通回复、任务记为完成。子 Agent 规划失败或无法处理时，交还给管家的结果标记为失败。
+- **`agentos-taskd` 的 `clock.now` 返回本机时区的日期和时间**，带星期和 UTC 偏移；此前只返回 UTC 时刻。结果里保留 `unix_ms`。
+- **协议 v1 新增 `read`**：直接查询已授权的只读（L0）能力，不创建任务、不经过规划器。有副作用的能力和输出不可信的能力会被拒绝。新增错误码 `not_readable`、`capability_failed`。见 [docs/protocol-v1.md](docs/protocol-v1.md#直接读取)。
+- **Web Shell 不再替用户提交意图**：读取后台笔记改走 `read`。此前连接后台、打开“记忆”空间或笔记变化后，界面会自动提交一条“看看笔记”任务，留在任务历史和审计日志里，接入模型规划器时还会多一次模型调用。
+- **CLI**：`agentos submit --wait [--timeout 秒]` 等到任务结束再返回，退出码区分成功、未成功、等待批准和超时；`agentos read <能力>` 直接读取；`tasks --state unhandled` 可筛选；`capabilities` 的风险等级写作 L0–L3。
+- **`--help` 和 `--version`**：`agentosd`、`agentos-shell`、`agentos-taskd`、`agentos-web-shell` 都支持。此前 `agentosd --help` 会直接启动守护进程，`agentos-shell --help` 会直接打开桌面窗口。`agentosd` 和 `agentos-shell` 遇到不认识的参数现在报错退出，不再忽略。
+
+**兼容性**：`unhandled` 是协议 v1 任务状态的新增取值，`read` 是新增方法。严格解析状态的旧客户端需要升级后才能读取含 `unhandled` 的任务；新快照不保证旧程序可读。
+
 ## v0.3.0
 
 - 新增 `agentos-taskd` 持久任务服务、协议 v1、独立 `agentos` CLI 和终端工作台。

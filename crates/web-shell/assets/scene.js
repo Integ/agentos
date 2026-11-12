@@ -10,7 +10,7 @@
 const KINDS = new Set(['overview', 'focus', 'memory', 'activity', 'clock', 'help', 'note', 'task']);
 const LAYOUTS = new Set(['ambient', 'split', 'focused', 'stack']);
 const PANEL_TYPES = new Set(['welcome', 'insight', 'suggestions', 'notes', 'task', 'activity', 'clock', 'focus', 'capabilities']);
-const TASK_STATES = new Set(['queued', 'planning', 'running', 'awaiting_confirmation', 'succeeded', 'failed', 'cancelled', 'interrupted', 'unknown']);
+const TASK_STATES = new Set(['queued', 'planning', 'running', 'awaiting_confirmation', 'succeeded', 'unhandled', 'failed', 'cancelled', 'interrupted', 'unknown']);
 const STEP_STATES = new Set(['pending', 'running', 'succeeded', 'failed', 'unknown']);
 const SCENE_KEYS = new Set(['kind', 'eyebrow', 'title', 'description', 'layout', 'panels']);
 const PANEL_KEYS = new Set(['type', 'priority', 'span', 'title', 'description', 'items', 'task', 'active', 'duration', 'unix_ms']);

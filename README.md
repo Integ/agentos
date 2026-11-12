@@ -76,6 +76,8 @@ image/       可启动磁盘镜像：构建脚本、系统集成文件（设置�
 cargo run -p agentosd
 ```
 
+各程序都支持 `--help` 和 `--version`（例如 `cargo run -p agentosd -- --help`），写错的参数会报错退出，而不是被忽略。
+
 然后输入意图，例如：
 
 ```

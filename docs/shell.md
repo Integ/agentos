@@ -89,7 +89,7 @@ agentosd → shell：
 | `expression` | 管家说的话（`report` `error` 等） |
 | `tainted` | 这个任务读到了不可信的外部内容（例如联网插件的结果），之后有副作用的步骤都要人确认 |
 | `pin` | 随批准发来的 PIN 不对或已锁定（`message` 说明原因），这一步仍在等待确认 |
-| `done` | 这个意图处理完了 |
+| `done` | 这个意图处理完了。`state` 说明结局：`done`（做了或回答了）、`unhandled`（没有办法处理，什么也没执行）、`failed`（规划失败）、`cancelled` |
 | `voice` | 麦克风状态 `mic`（`idle` `listening` `transcribing`）、是否在朗读 `speaking`、朗读模式 `speak` |
 | `voice_level` | 录音音量（0–1），约每 100 毫秒一次 |
 | `transcript` | 识别出的文字，随后作为意图交给管家 |

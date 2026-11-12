@@ -67,7 +67,8 @@ pub enum AuditEvent {
         ok: bool,
         summary: String,
     },
-    /// A task (one intent's work) changed state: running, waiting, done, cancelled.
+    /// A task (one intent's work) changed state: running, waiting, done,
+    /// unhandled, failed, cancelled.
     TaskState {
         task: u64,
         intent: IntentId,

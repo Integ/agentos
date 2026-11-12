@@ -80,6 +80,7 @@ pub fn state_label(state: TaskState) -> &'static str {
         TaskState::Running => "执行中",
         TaskState::AwaitingConfirmation => "等待批准",
         TaskState::Succeeded => "已完成",
+        TaskState::Unhandled => "未能处理",
         TaskState::Failed => "失败",
         TaskState::Cancelled => "已取消",
         TaskState::Interrupted => "已中断",

@@ -29,7 +29,11 @@ fn options() -> io::Result<Option<Options>> {
     let mut args = std::env::args().skip(1);
     while let Some(name) = args.next() {
         if name == "--help" || name == "-h" {
-            println!("AgentOS v{} · 后台任务服务\n用法：agentos-taskd [--planner rule|claude|openai] [--state-dir 路径] [--socket 路径] [--audit 路径]\n\n在另一终端运行 agentos workbench 连接工作台。\n服务不读取 stdin；客户端退出后任务继续。SIGINT/SIGTERM 停止服务。", env!("CARGO_PKG_VERSION"));
+            println!("AgentOS v{} · 后台任务服务\n用法：agentos-taskd [--planner rule|claude|openai] [--state-dir 路径] [--socket 路径] [--audit 路径]\n\n在另一终端运行 agentos workbench 连接工作台。\n服务不读取 stdin；客户端退出后任务继续。SIGINT/SIGTERM 停止服务。\n--help, -h 查看帮助；--version, -V 查看版本。", env!("CARGO_PKG_VERSION"));
+            return Ok(None);
+        }
+        if name == "--version" || name == "-V" {
+            println!("agentos-taskd {}", env!("CARGO_PKG_VERSION"));
             return Ok(None);
         }
         if !matches!(

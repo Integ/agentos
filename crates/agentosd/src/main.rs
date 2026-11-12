@@ -34,6 +34,51 @@ use agentosd::tasks::TaskStore;
 use agentosd::voice::{SpeechOutput, Voice, VoiceConfig, MIC_DEVICE};
 use tokio::sync::mpsc;
 
+const HELP: &str = "\
+用法：agentosd [选项]
+
+  --planner claude|openai|rule  规划器（或环境变量 AGENTOS_PLANNER）
+  --home 路径                   数据目录（或 AGENTOS_HOME；默认 ~/.local/share/agentos）
+  --audit 路径                  审计日志（或 AGENTOS_AUDIT；默认在数据目录下）
+  --listen 路径                 在这个 Unix socket 上为图形界面 agentos-shell 提供服务
+                                （或 AGENTOS_SOCKET）
+  --set-pin                     设置不可逆操作的 PIN，然后退出
+  --clear-pin                   取消 PIN，然后退出
+  --verify-audit                校验审计日志的哈希链，然后退出
+  --help, -h                    查看帮助
+  --version, -V                 查看版本
+
+启动后从标准输入读取意图，Ctrl-D 退出。
+持久任务服务是另一个程序：agentos-taskd（客户端为 agentos）。";
+
+/// What the command line asks for other than running the daemon: text to
+/// print before exiting, or a usage error. Checked before anything is created
+/// on disk, so `--help` or a mistyped flag never starts a daemon.
+fn command_line(args: impl IntoIterator<Item = String>) -> Result<Option<String>, String> {
+    let mut args = args.into_iter();
+    while let Some(name) = args.next() {
+        match name.as_str() {
+            "--help" | "-h" => {
+                return Ok(Some(format!(
+                    "AgentOS v{} · 管家守护进程\n\n{HELP}",
+                    env!("CARGO_PKG_VERSION")
+                )))
+            }
+            "--version" | "-V" => {
+                return Ok(Some(format!("agentosd {}", env!("CARGO_PKG_VERSION"))))
+            }
+            "--planner" | "--home" | "--audit" | "--listen" => {
+                if args.next().is_none_or(|value| value.starts_with("--")) {
+                    return Err(format!("{name} 缺少值，使用 --help 查看用法"));
+                }
+            }
+            "--set-pin" | "--clear-pin" | "--verify-audit" => {}
+            _ => return Err(format!("未知参数：{name}，使用 --help 查看用法")),
+        }
+    }
+    Ok(None)
+}
+
 fn arg(name: &str) -> Option<String> {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -248,6 +293,17 @@ fn verify_audit(path: &std::path::Path) -> std::io::Result<()> {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    match command_line(std::env::args().skip(1)) {
+        Ok(Some(text)) => {
+            println!("{text}");
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+    }
     let home = home_dir();
     std::fs::create_dir_all(&home)?;
     if let Some(r) = pin_command(&home) {
@@ -454,4 +510,67 @@ async fn main() -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::command_line;
+
+    fn parse(args: &[&str]) -> Result<Option<String>, String> {
+        command_line(args.iter().map(|a| a.to_string()))
+    }
+
+    #[test]
+    fn help_and_version_print_instead_of_starting_the_daemon() {
+        for flag in ["--help", "-h"] {
+            let text = parse(&[flag]).unwrap().unwrap();
+            assert!(text.contains("用法：agentosd") && text.contains("--listen"));
+        }
+        for flag in ["--version", "-V"] {
+            assert_eq!(
+                parse(&[flag]).unwrap().unwrap(),
+                format!("agentosd {}", env!("CARGO_PKG_VERSION"))
+            );
+        }
+        // Wherever it appears, asking for help wins over starting up.
+        assert!(parse(&["--planner", "rule", "--help"]).unwrap().is_some());
+    }
+
+    #[test]
+    fn the_flags_the_image_uses_still_start_the_daemon() {
+        for args in [
+            vec![],
+            vec![
+                "--listen",
+                "/run/user/1000/agentos.sock",
+                "--audit",
+                "/var/lib/agentos/audit.jsonl",
+            ],
+            vec![
+                "--planner",
+                "rule",
+                "--home",
+                "/run/agentos-selfcheck",
+                "--audit",
+                "/run/a.jsonl",
+            ],
+            vec!["--home", "/home/agent/.local/share/agentos", "--set-pin"],
+            vec!["--clear-pin"],
+            vec!["--verify-audit"],
+        ] {
+            assert_eq!(parse(&args), Ok(None), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn mistyped_flags_are_usage_errors_not_silently_ignored() {
+        for args in [
+            vec!["--plannr", "rule"],
+            vec!["rule"],
+            vec!["--planner"],
+            vec!["--home", "--listen", "/tmp/a.sock"],
+        ] {
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
+    }
 }

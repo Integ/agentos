@@ -37,8 +37,8 @@ const state = {
   generatedScene: null, generatedKey: '',
 };
 const sceneLabels = { overview: ['01', '此刻'], focus: ['02', '专注空间'], memory: ['03', '记忆'], activity: ['04', '任务轨迹'], clock: ['05', '时间'], help: ['06', '能力'], task: ['04', '意图执行'], note: ['03', '记忆'] };
-const stateLabels = { queued: '等待执行', planning: '正在规划', running: '正在执行', succeeded: '已完成', failed: '执行失败', awaiting_confirmation: '等待你的批准', cancelled: '已取消', interrupted: '已中断', pending: '尚未开始' };
-const terminalStates = new Set(['succeeded', 'failed', 'cancelled', 'interrupted']);
+const stateLabels = { queued: '等待执行', planning: '正在规划', running: '正在执行', succeeded: '已完成', unhandled: '没有听懂', failed: '执行失败', awaiting_confirmation: '等待你的批准', cancelled: '已取消', interrupted: '已中断', pending: '尚未开始' };
+const terminalStates = new Set(['succeeded', 'unhandled', 'failed', 'cancelled', 'interrupted']);
 let orbFrame = 0;
 let orbResizeObserver = null;
 let orbRedraw = null;
@@ -204,7 +204,7 @@ function renderMemory(scene, withHeader = true) {
   const items = panel?.items || notes;
   return `${withHeader ? sceneHeader(scene) : ''}<div class="memory-toolbar"><span class="count-label">${String(items.length).padStart(2, '0')} 个念头 · ${state.connected ? '后台持久笔记' : '保存在这个浏览器'}</span><div><button class="text-button" data-intent="恢复笔记">恢复上次清空</button><button class="primary-button" id="new-note">${icon('spark')}记下灵感</button></div></div>${state.connected && !state.remoteNotesLoaded ? '<p class="system-mode-note">正在从后台读取笔记…</p>' : ''}<div class="notes-grid">${items.length ? items.map((text, i) => `<article class="note-card"><span class="note-index">THOUGHT ${String(i + 1).padStart(2, '0')}</span><p>${e(text)}</p><footer><span>${state.connected ? 'AgentOS · 持久记忆' : '本地 · 灵感'}</span>${state.connected ? icon('memory') : `<button data-delete-note="${e(state.notes[i]?.id)}" aria-label="删除第 ${i + 1} 条笔记">移除</button>`}</footer></article>`).join('') : `<div class="empty-state">${icon('memory')}<h3>给一个念头，留个位置。</h3><p>点击“记下灵感”，或者说“记一下 明天去散步”。<br>不需要文件夹，也不用给它取名字。</p></div>`}</div>${items.length ? '<div class="inline-note"><button class="text-button" data-intent="清空笔记">清空全部笔记（可恢复一次）</button></div>' : ''}`;
 }
-function statusIcon(task) { return icon(task.state === 'succeeded' ? 'check' : task.state === 'awaiting_confirmation' ? 'lock' : ['failed', 'cancelled', 'interrupted'].includes(task.state) ? 'close' : 'activity'); }
+function statusIcon(task) { return icon(task.state === 'succeeded' ? 'check' : task.state === 'unhandled' ? 'question' : task.state === 'awaiting_confirmation' ? 'lock' : ['failed', 'cancelled', 'interrupted'].includes(task.state) ? 'close' : 'activity'); }
 function renderTaskDetail(task) {
   if (!task) return `<div class="empty-state">${icon('orbit')}<h3>每个意图，都有来处。</h3><p>选择一条轨迹，查看它的执行过程。</p></div>`;
   const id = taskId(task);
@@ -372,7 +372,8 @@ async function navigate(kind, { load = true } = {}) {
   state.scene = kind; state.approval = null; render();
   $('#main').scrollTop = 0;
   if (kind === 'memory' && load && state.connected) {
-    try { await submitRemote('看看笔记', 'memory'); } catch (error) { handleError(error); }
+    // Opening a space is navigation, not an intent: read the notes directly.
+    try { if (await readRemoteNotes() && requestVersion === sceneRequestVersion) render(); } catch (error) { handleError(error); }
   } else if ((kind === 'activity' || kind === 'help') && state.connected) {
     try {
       if (kind === 'help') state.capabilities = (await api('/capabilities')).capabilities || [];
@@ -458,7 +459,11 @@ function processTask(task) {
   }
   else if (terminalStates.has(task.state) && `${task.id}:${task.state}` !== lastAnnouncedTask) {
     lastAnnouncedTask = `${task.id}:${task.state}`;
-    respond(task.state === 'succeeded' ? task.message || '已经完成。结果留在你的工作空间。' : task.message || stateLabels[task.state], true);
+    // Not understood is neither done nor broken: say so plainly instead of
+    // reading out the planner's list of capability names.
+    respond(task.state === 'succeeded' ? task.message || '已经完成。结果留在你的工作空间。'
+      : task.state === 'unhandled' ? '这句话我还没听懂，没有执行任何操作。换个说法，或看看我现在能做什么。'
+      : task.message || stateLabels[task.state], true);
   }
   if (!task.confirmation || state.approval?.token !== task.confirmation.token) state.approval = null;
 }
@@ -527,14 +532,29 @@ async function refreshNotebookTasks() {
     changed = observeNotebookTask(data.task) || changed;
   }
   if (state.notebookRefreshNeeded) {
-    // Clear before sending. A lost response may already have created a read
-    // task; never replay it after reconnecting. A user can explicitly refresh.
     state.notebookRefreshNeeded = false;
-    const readVersion = ++state.notebookReadVersion;
-    const data = await api('/intent', { text: '看看笔记' });
-    trackNotebookTask(data.task, readVersion);
+    try { changed = await readRemoteNotes() || changed; }
+    catch (error) {
+      // The service answered but would not serve the read: keep the session
+      // and say so. Anything else is a connection problem for the caller.
+      if (!NOTE_READ_REFUSALS.has(error.code)) throw error;
+      respond('暂时无法读取后台笔记。任务和提交不受影响。');
+    }
   }
   return changed;
+}
+// The interface never speaks for the user. Showing the notebook is a query
+// through the read-only API: it creates no task, costs no planning call and
+// leaves no intent in the history that the user did not express.
+const NOTE_READ_REFUSALS = new Set(['not_found', 'not_readable', 'capability_failed', 'invalid_request', 'invalid_argument', 'response_too_large']);
+async function readRemoteNotes() {
+  const readVersion = ++state.notebookReadVersion;
+  const data = await api('/read/notes.list');
+  // A newer read, or an explicit "看看笔记" task, supersedes this answer.
+  if (readVersion !== state.notebookReadVersion || !state.connected || !Array.isArray(data.value?.notes)) return false;
+  state.remoteNotes = data.value.notes.filter(note => typeof note === 'string');
+  state.remoteNotesLoaded = true;
+  return true;
 }
 async function submitIntent(rawText, { fromVoice = false } = {}) {
   const text = String(rawText).trim();

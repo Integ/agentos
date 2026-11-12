@@ -29,7 +29,13 @@ pub enum TaskState {
     Running,
     /// Waiting for the human to confirm a step.
     Waiting,
+    /// The butler acted on the request or answered it.
     Done,
+    /// The butler had no way to act on the request; nothing ran.
+    Unhandled,
+    /// Planning failed (the model was unreachable, refused, or unusable), so
+    /// the task stopped. Steps that already ran stay in its history.
+    Failed,
     Cancelled,
 }
 
@@ -39,7 +45,21 @@ impl TaskState {
             TaskState::Running => "进行中",
             TaskState::Waiting => "等待确认",
             TaskState::Done => "已完成",
+            TaskState::Unhandled => "未能处理",
+            TaskState::Failed => "失败",
             TaskState::Cancelled => "已取消",
+        }
+    }
+
+    /// The name used in audit records and shell events.
+    pub fn name(self) -> &'static str {
+        match self {
+            TaskState::Running => "running",
+            TaskState::Waiting => "waiting",
+            TaskState::Done => "done",
+            TaskState::Unhandled => "unhandled",
+            TaskState::Failed => "failed",
+            TaskState::Cancelled => "cancelled",
         }
     }
 

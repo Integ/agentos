@@ -123,10 +123,7 @@ pub fn build_turn_request(cfg: &OpenAiConfig, conv: &Conversation<'_>) -> Value 
 
 pub fn parse_response(body: &Value) -> Plan {
     let Some(msg) = body.pointer("/choices/0/message") else {
-        return Plan {
-            reply: Some("模型没有返回任何内容。".into()),
-            ..Plan::default()
-        };
+        return Plan::failed("模型没有返回任何内容。");
     };
     let mut steps = Vec::new();
     let mut bad = Vec::new();
@@ -161,29 +158,31 @@ pub fn parse_response(body: &Value) -> Plan {
     }
     if !bad.is_empty() {
         // A half-parsed plan could run the wrong subset of steps; run none.
-        return Plan {
-            reply: Some(format!(
-                "模型返回的工具参数无法解析（{}），已放弃整个计划。",
-                bad.join("、")
-            )),
-            ..Plan::default()
-        };
+        return Plan::failed(format!(
+            "模型返回的工具参数无法解析（{}），已放弃整个计划。",
+            bad.join("、")
+        ));
     }
     let reply = msg
         .get("content")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|t| !t.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            msg.get("refusal")
-                .and_then(Value::as_str)
-                .map(|r| format!("模型拒绝了这个请求：{r}"))
-        });
+        .map(str::to_string);
+    // A refusal with nothing else is the model declining, not an answer.
+    if steps.is_empty() && reply.is_none() {
+        if let Some(r) = msg
+            .get("refusal")
+            .and_then(Value::as_str)
+            .filter(|r| !r.trim().is_empty())
+        {
+            return Plan::failed(format!("模型拒绝了这个请求：{r}"));
+        }
+    }
     Plan {
         steps,
         reply,
-        tainted: false,
+        ..Plan::default()
     }
 }
 
@@ -295,10 +294,7 @@ impl Planner for OpenAiPlanner {
         let body = build_turn_request(&self.cfg, conv);
         match self.call(&body).await {
             Ok(resp) => parse_response(&resp),
-            Err(e) => Plan {
-                reply: Some(e),
-                ..Plan::default()
-            },
+            Err(e) => Plan::failed(e),
         }
     }
 }

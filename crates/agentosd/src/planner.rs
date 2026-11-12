@@ -110,6 +110,34 @@ pub struct Plan {
     pub reply: Option<String>,
     /// The plan was influenced by untrusted external content.
     pub tainted: bool,
+    /// Planning itself failed (the model could not be reached, refused, or
+    /// returned something unusable). Nothing from this plan may run, and the
+    /// agent's turn ends as failed rather than as an answer.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// The planner had no way to act on the request; `reply` says what it can
+    /// do instead. Neither a failure nor an answer: the task ends unhandled.
+    #[serde(default)]
+    pub unhandled: bool,
+}
+
+impl Plan {
+    pub fn failed(message: impl Into<String>) -> Self {
+        let message = message.into();
+        Self {
+            reply: Some(message.clone()),
+            error: Some(message),
+            ..Self::default()
+        }
+    }
+
+    pub fn unhandled(message: impl Into<String>) -> Self {
+        Self {
+            reply: Some(message.into()),
+            unhandled: true,
+            ..Self::default()
+        }
+    }
 }
 
 #[async_trait]
@@ -207,12 +235,9 @@ impl Planner for RulePlanner {
             .map(|s| format!("- {}：{}", s.name, s.description))
             .collect::<Vec<_>>()
             .join("\n");
-        Plan {
-            reply: Some(format!(
-                "我还不会处理这句话。当前可用的能力：\n{list}\n试试：\"记一下 买牛奶\"、\"看看笔记\"、\"清空笔记\"、\"现在几点\"，或者\"学会：……\"让我给自己写一个新能力"
-            )),
-            ..Plan::default()
-        }
+        Plan::unhandled(format!(
+            "我还不会处理这句话。当前可用的能力：\n{list}\n试试：\"记一下 买牛奶\"、\"看看笔记\"、\"清空笔记\"、\"现在几点\"，或者\"学会：……\"让我给自己写一个新能力"
+        ))
     }
 }
 

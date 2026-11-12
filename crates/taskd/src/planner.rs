@@ -38,6 +38,10 @@ pub struct Plan {
     pub reply: Option<String>,
     /// Planning failed; no step from this plan may execute.
     pub error: Option<String>,
+    /// The planner had no way to act on the intent. `reply` explains what it
+    /// can do instead. This is neither a failure nor an answer: the task ends
+    /// as unhandled rather than succeeded.
+    pub unhandled: bool,
     /// The plan was influenced by untrusted external content.
     pub tainted: bool,
 }
@@ -48,6 +52,14 @@ impl Plan {
         Self {
             reply: Some(message.clone()),
             error: Some(message),
+            ..Self::default()
+        }
+    }
+
+    pub fn unhandled(message: impl Into<String>) -> Self {
+        Self {
+            reply: Some(message.into()),
+            unhandled: true,
             ..Self::default()
         }
     }
@@ -118,12 +130,9 @@ impl Planner for RulePlanner {
             .map(|s| format!("- {}：{}", s.name, s.description))
             .collect::<Vec<_>>()
             .join("\n");
-        Plan {
-            reply: Some(format!(
-                "我还不会处理这句话。当前可用的能力：\n{list}\n试试：\"记一下 买牛奶\"、\"看看笔记\"、\"清空笔记\"、\"恢复笔记\"、\"现在几点\""
-            )),
-            ..Plan::default()
-        }
+        Plan::unhandled(format!(
+            "我还不会处理这句话。当前可用的能力：\n{list}\n试试：\"记一下 买牛奶\"、\"看看笔记\"、\"清空笔记\"、\"恢复笔记\"、\"现在几点\""
+        ))
     }
 }
 
@@ -234,8 +243,23 @@ mod tests {
                 "unexpected action for {text}: {:?}",
                 p.steps
             );
+            // Not understood is reported as such, never as an answer or an error.
+            assert!(p.unhandled && p.error.is_none(), "{text}");
             assert!(p.reply.unwrap().contains("恢复笔记"));
         }
+    }
+
+    #[tokio::test]
+    async fn only_the_fallback_is_marked_unhandled() {
+        for text in ["记一下 买牛奶", "看看笔记", "现在几点", "清空笔记"] {
+            assert!(
+                !RulePlanner.plan(&intent(text), &[]).await.unhandled,
+                "{text}"
+            );
+        }
+        let plan = RulePlanner.plan(&intent("讲个笑话"), &[]).await;
+        assert!(plan.unhandled && plan.steps.is_empty() && plan.error.is_none());
+        assert!(!Plan::failed("网络错误").unhandled);
     }
 
     #[tokio::test]

@@ -125,10 +125,7 @@ pub fn build_turn_request(cfg: &ClaudeConfig, conv: &Conversation<'_>) -> Value 
 /// Turn a Messages API response into a plan.
 pub fn parse_response(body: &Value) -> Plan {
     if body.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
-        return Plan {
-            reply: Some("模型拒绝了这个请求。".into()),
-            ..Plan::default()
-        };
+        return Plan::failed("模型拒绝了这个请求。");
     }
     let mut steps = Vec::new();
     let mut text = Vec::new();
@@ -170,7 +167,7 @@ pub fn parse_response(body: &Value) -> Plan {
     Plan {
         steps,
         reply,
-        tainted: false,
+        ..Plan::default()
     }
 }
 
@@ -278,10 +275,7 @@ impl Planner for ClaudePlanner {
         let body = build_turn_request(&self.cfg, conv);
         match self.call(&body).await {
             Ok(resp) => parse_response(&resp),
-            Err(e) => Plan {
-                reply: Some(e),
-                ..Plan::default()
-            },
+            Err(e) => Plan::failed(e),
         }
     }
 }

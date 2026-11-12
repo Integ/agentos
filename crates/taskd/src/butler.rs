@@ -223,8 +223,16 @@ impl Butler {
         }
         self.log_state(&task)?;
         if task.steps.is_empty() {
+            // A plan without steps is an answer only when the planner said
+            // something and did not flag the intent as beyond it. "I cannot do
+            // this" must never be recorded as work that succeeded.
+            let state = if plan.unhandled || plan.reply.is_none() {
+                TaskState::Unhandled
+            } else {
+                TaskState::Succeeded
+            };
             let reply = plan.reply.unwrap_or_else(|| "我还不会做这件事".into());
-            let task = self.transition(id, TaskState::Succeeded, Some(reply.clone()))?;
+            let task = self.transition(id, state, Some(reply.clone()))?;
             self.say(&task, ExpressionKind::Report, reply).await;
             return Ok(());
         }

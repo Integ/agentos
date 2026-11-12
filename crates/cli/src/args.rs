@@ -1,9 +1,17 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
-use agentos_ipc::{default_socket_path, default_state_dir, Command, MAX_PAGE_SIZE};
+use agentos_core::CapabilityName;
+use agentos_ipc::{
+    default_socket_path, default_state_dir, Command, MAX_CAPABILITY_NAME_BYTES, MAX_PAGE_SIZE,
+};
 use agentos_runtime::{TaskId, TaskState};
 
-pub const HELP: &str = "AgentOS · 独立任务工作台\n\n用法：agentos [--socket 路径 | --state-dir 路径] [--json] <命令>\n\n  workbench                         实时终端工作台（默认）\n  submit <意图>                     提交任务，客户端退出后仍继续\n  tasks [--before task-N] [--limit N] [--state 状态]\n  task task-N                       查看计划、结果与批准令牌\n  cancel task-N                     取消任务的后续步骤\n  approve task-N 步骤 --confirmation 令牌\n  capabilities                      查看能力与风险\n  watch [--after revision]           持续接收变更/重新同步通知\n  --help                            查看帮助\n  --version                         查看版本\n\n--json 应放在命令前，输出结构化 JSON。批准步骤从 1 开始。\n工作台 /quit 只关闭客户端，不停止后台服务。";
+/// How long `submit --wait` waits when `--timeout` is not given.
+pub const DEFAULT_WAIT: Duration = Duration::from_secs(300);
+const MAX_WAIT_SECONDS: u64 = 86_400;
+
+pub const HELP: &str = "AgentOS · 独立任务工作台\n\n用法：agentos [--socket 路径 | --state-dir 路径] [--json] <命令>\n\n  workbench                         实时终端工作台（默认）\n  submit [--wait] [--timeout 秒] <意图>\n                                    提交任务，客户端退出后仍继续；--wait 等到任务结束再返回\n  tasks [--before task-N] [--limit N] [--state 状态]\n  task task-N                       查看计划、结果与批准令牌\n  cancel task-N                     取消任务的后续步骤\n  approve task-N 步骤 --confirmation 令牌\n  capabilities                      查看能力与风险\n  read <能力> [JSON 参数]           直接读取只读（L0）能力，不创建任务\n  watch [--after revision]           持续接收变更/重新同步通知\n  --help                            查看帮助\n  --version                         查看版本\n\n--json 应放在命令前，输出结构化 JSON。批准步骤从 1 开始。\n工作台 /quit 只关闭客户端，不停止后台服务。\n\n退出码：0 成功；1 连接、协议或后台错误；2 用法错误。\nsubmit --wait 另有：3 任务结束但未成功（未能处理、失败、已取消或已中断）；\n4 任务在等待批准；5 等待超时（任务仍在后台继续）。";
 
 pub const WORKBENCH_HELP: &str = "普通输入：提交意图；任务在后台继续\n/tasks 或 /refresh：刷新当前页　/next：更早任务　/prev：返回上一页\n/latest：最近任务　/task task-N：选中并展示完整计划与结果\n/cancel task-N：取消后续步骤　/approve task-N 步骤：批准当前已展示的确认请求\n/capabilities：查看能力　/help：帮助　/quit：退出工作台";
 
@@ -17,6 +25,11 @@ pub struct Options {
 #[derive(Debug)]
 pub enum Action {
     Request(Command),
+    /// Submit, then wait until the task settles, needs approval, or `timeout`.
+    SubmitAndWait {
+        text: String,
+        timeout: Duration,
+    },
     Watch(Option<u64>),
     Workbench,
     Help,
@@ -32,7 +45,7 @@ fn task_id(text: &str) -> Result<TaskId, String> {
 
 fn state(text: &str) -> Result<TaskState, String> {
     serde_json::from_value(serde_json::Value::String(text.into())).map_err(|_| {
-        "状态应为 queued/planning/running/awaiting_confirmation/succeeded/failed/cancelled/interrupted".into()
+        "状态应为 queued/planning/running/awaiting_confirmation/succeeded/unhandled/failed/cancelled/interrupted".into()
     })
 }
 
@@ -92,11 +105,50 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
         None => Action::Workbench,
         Some("workbench") if rest.len() == 1 => Action::Workbench,
         Some("submit") if rest.len() > 1 => {
-            let text = rest[1..].join(" ");
+            // Options are only recognised before the intent, so the intent's
+            // own words are never mistaken for flags. `--` ends the options.
+            let mut wait = false;
+            let mut timeout = None;
+            let mut index = 1;
+            while let Some(word) = rest.get(index) {
+                match word.as_str() {
+                    "--wait" => {
+                        wait = true;
+                        index += 1;
+                    }
+                    "--timeout" => {
+                        let seconds = rest
+                            .get(index + 1)
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .filter(|seconds| (1..=MAX_WAIT_SECONDS).contains(seconds))
+                            .ok_or_else(|| {
+                                format!("--timeout 需要 1–{MAX_WAIT_SECONDS} 之间的秒数")
+                            })?;
+                        timeout = Some(Duration::from_secs(seconds));
+                        index += 2;
+                    }
+                    "--" => {
+                        index += 1;
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+            if timeout.is_some() && !wait {
+                return Err("--timeout 需要与 --wait 一起使用".into());
+            }
+            let text = rest[index..].join(" ");
             if text.trim().is_empty() {
                 return Err("提交意图不能为空".into());
             }
-            Action::Request(Command::Submit { text })
+            if wait {
+                Action::SubmitAndWait {
+                    text,
+                    timeout: timeout.unwrap_or(DEFAULT_WAIT),
+                }
+            } else {
+                Action::Request(Command::Submit { text })
+            }
         }
         Some("tasks") => {
             let mut before = None;
@@ -149,6 +201,23 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             })
         }
         Some("capabilities") if rest.len() == 1 => Action::Request(Command::Capabilities {}),
+        Some("read") if rest.len() == 2 || rest.len() == 3 => {
+            let name = rest[1].trim();
+            if name.is_empty() || name.len() > MAX_CAPABILITY_NAME_BYTES || name.starts_with("--") {
+                return Err("read 需要能力名称，例如 notes.list".into());
+            }
+            let args = match rest.get(2) {
+                Some(text) => serde_json::from_str::<serde_json::Value>(text)
+                    .ok()
+                    .filter(serde_json::Value::is_object)
+                    .ok_or("能力参数必须是 JSON 对象，例如 '{}'")?,
+                None => serde_json::json!({}),
+            };
+            Action::Request(Command::Read {
+                capability: CapabilityName::new(name),
+                args,
+            })
+        }
         Some("ping") if rest.len() == 1 => Action::Request(Command::Ping {}),
         Some("watch") if rest.len() == 1 => Action::Watch(None),
         Some("watch") if rest.len() == 3 && rest[1] == "--after" => Action::Watch(Some(
@@ -243,6 +312,82 @@ mod tests {
     }
 
     #[test]
+    fn waiting_options_are_only_read_before_the_intent() {
+        let Action::SubmitAndWait { text, timeout } =
+            argv(&["submit", "--wait", "记一下", "买牛奶"])
+                .unwrap()
+                .action
+        else {
+            panic!("not a waiting submission")
+        };
+        assert_eq!((text.as_str(), timeout), ("记一下 买牛奶", DEFAULT_WAIT));
+        let Action::SubmitAndWait { text, timeout } =
+            argv(&["submit", "--timeout", "9", "--wait", "现在几点"])
+                .unwrap()
+                .action
+        else {
+            panic!("not a waiting submission")
+        };
+        assert_eq!(
+            (text.as_str(), timeout),
+            ("现在几点", Duration::from_secs(9))
+        );
+        // Words after the intent starts, or after `--`, stay part of the intent.
+        for (args, expected) in [
+            (
+                vec!["submit", "记一下", "--wait", "的用法"],
+                "记一下 --wait 的用法",
+            ),
+            (vec!["submit", "--", "--wait"], "--wait"),
+        ] {
+            let Action::Request(Command::Submit { text }) = argv(&args).unwrap().action else {
+                panic!("not a plain submission: {args:?}")
+            };
+            assert_eq!(text, expected);
+        }
+        for args in [
+            vec!["submit", "--wait"],
+            vec!["submit", "--timeout", "5", "现在几点"],
+            vec!["submit", "--wait", "--timeout", "0", "现在几点"],
+            vec!["submit", "--wait", "--timeout", "soon", "现在几点"],
+            vec!["submit", "--wait", "--timeout"],
+        ] {
+            assert!(argv(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn direct_reads_name_one_capability_with_object_arguments() {
+        let Action::Request(Command::Read { capability, args }) =
+            argv(&["read", "notes.list"]).unwrap().action
+        else {
+            panic!("not a read")
+        };
+        assert_eq!(
+            (capability.as_str(), args),
+            ("notes.list", serde_json::json!({}))
+        );
+        let Action::Request(Command::Read { args, .. }) =
+            argv(&["read", "notes.search", r#"{"q":"牛奶"}"#])
+                .unwrap()
+                .action
+        else {
+            panic!("not a read")
+        };
+        assert_eq!(args, serde_json::json!({"q":"牛奶"}));
+        for args in [
+            vec!["read"],
+            vec!["read", ""],
+            vec!["read", "--json"],
+            vec!["read", "notes.list", "[]"],
+            vec!["read", "notes.list", "not json"],
+            vec!["read", "notes.list", "{}", "extra"],
+        ] {
+            assert!(argv(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
     fn invalid_slash_commands_never_become_task_submissions() {
         for input in [
             "/approve task-1",
@@ -291,10 +436,18 @@ mod tests {
             (before, limit, state),
             (Some(TaskId(9)), 5, Some(TaskState::Running))
         );
+        assert!(matches!(
+            argv(&["tasks", "--state", "unhandled"]).unwrap().action,
+            Action::Request(Command::List {
+                state: Some(TaskState::Unhandled),
+                ..
+            })
+        ));
         for args in [
             vec!["tasks", "--limit", "0"],
             vec!["tasks", "--limit", "51"],
             vec!["tasks", "--state", "typo"],
+            vec!["tasks", "--state", "done"],
             vec!["--socket", "a", "--state-dir", "b", "tasks"],
             vec!["task", "task-0"],
         ] {

@@ -106,7 +106,16 @@ async fn shell_drives_the_butler_over_the_socket() {
     assert_eq!(step["status"], "running");
     let step = next_of(&mut lines, "step").await;
     assert_eq!(step["status"], "done");
-    next_of(&mut lines, "done").await;
+    assert_eq!(next_of(&mut lines, "done").await["state"], "done");
+
+    // Finishing is not succeeding: a shell is told when nothing could be done.
+    write
+        .write_all(send(json!({"type": "intent", "text": "讲个笑话"})).as_bytes())
+        .await
+        .unwrap();
+    let said = next_of(&mut lines, "expression").await;
+    assert_eq!(said["kind"], "report");
+    assert_eq!(next_of(&mut lines, "done").await["state"], "unhandled");
 
     // An irreversible step pauses for a confirmation the shell answers.
     write

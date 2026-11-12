@@ -37,6 +37,8 @@ cargo run -p agentos-cli -- --state-dir /tmp/agentos-demo workbench
 /task task-1
 ```
 
+规则规划器只认识这些固定说法。听不懂的句子会成为“未能处理”的任务，并列出当前能做的事；它不会被记成“已完成”。问时间得到的是本机时区的日期和时间。
+
 笔记与任务立即持久保存。清空保留一份恢复快照，恢复会保留清空后新增的笔记；恢复之前不能再次清空非空笔记，以免覆盖唯一备份。正常输入下，这些 L1 可恢复动作自动执行。
 
 工作台控制命令：
@@ -67,7 +69,7 @@ Shell 读取当前进程的 `OPENAI_API_KEY`，通过服务端 Responses API 生
 
 实时语音独立读取 `AGENTOS_VOICE_MODEL`，默认使用 `gpt-realtime-2.1`；`AGENTOS_VOICE_MODEL=off` 可禁用，`AGENTOS_VOICE_VOICE` 可选择声音，默认为 `marin`。它复用 Shell 进程的 `OPENAI_API_KEY`，不把项目密钥传给浏览器。结束或隐藏页面会关闭麦克风，连接中断后不自动重连。
 
-未连接后台时可体验本地笔记与专注计时；浏览器笔记与后台笔记独立，不自动同步。`/` 聚焦输入，`Alt+V` 连接或结束实时对话，`Esc` 打断回应，`Shift+Esc` 结束对话，`Alt+1–4` 切换空间。打断声音不取消已接收任务，待批准动作仍需在界面明确批准。完整行为与实现边界见[图形 Shell 设计](ambient-shell.md)。
+连接后台后，界面通过只读接口直接读取后台笔记；打开“记忆”空间或在笔记变化后刷新都不会替你提交任务，任务轨迹里只有你自己表达过的意图。未连接后台时可体验本地笔记与专注计时；浏览器笔记与后台笔记独立，不自动同步。`/` 聚焦输入，`Alt+V` 连接或结束实时对话，`Esc` 打断回应，`Shift+Esc` 结束对话，`Alt+1–4` 切换空间。打断声音不取消已接收任务，待批准动作仍需在界面明确批准。完整行为与实现边界见[图形 Shell 设计](ambient-shell.md)。
 
 ## 独立 CLI 与脚本
 
@@ -75,6 +77,8 @@ Shell 读取当前进程的 `OPENAI_API_KEY`，通过服务端 Responses API 生
 
 ```sh
 agentos submit 记一下 买牛奶
+agentos submit --wait --timeout 60 现在几点
+agentos read notes.list
 agentos tasks --limit 10
 agentos tasks --before task-20 --state succeeded
 agentos task task-1
@@ -84,6 +88,19 @@ agentos watch
 ```
 
 默认连接相同的状态目录；可在命令前指定 `--state-dir` 或 `--socket`。`--json` 适合脚本，`watch --after <revision>` 接收实时变更与重新同步通知。
+
+`submit` 默认只返回“已接收”。加上 `--wait` 会等到任务结束再返回，并打印最终任务（`--json` 时与 `agentos --json task` 的结构相同）；`--timeout 秒` 设置最长等待时间，默认 300 秒。这两个选项要写在意图之前，意图里出现的同名文字不会被当成选项。等待只读取任务，不会重发、批准或取消；放弃等待后任务仍在后台继续。
+
+| 退出码 | 含义 |
+| --- | --- |
+| 0 | 成功；`submit --wait` 时表示任务 `succeeded` |
+| 1 | 连接、协议或后台返回的错误 |
+| 2 | 命令行用法错误 |
+| 3 | `submit --wait`：任务结束但没有成功（`unhandled`、`failed`、`cancelled`、`interrupted`） |
+| 4 | `submit --wait`：任务在等待批准，需要人来处理 |
+| 5 | `submit --wait`：等待超时，任务仍在后台继续 |
+
+`read <能力> [JSON 参数]` 直接查询一个只读（L0）能力，例如 `notes.list`、`clock.now`。它不创建任务、不经过规划器；有副作用的能力会被拒绝，需要用 `submit` 提交意图。`capabilities` 列出的风险等级写作 L0–L3。
 
 独立批准命令要求先读取任务详情，再显式提供其中的确认令牌：
 

@@ -87,7 +87,7 @@ impl Planner for FetchThenWrite {
                 ),
             ],
             reply: None,
-            tainted: false,
+            ..Plan::default()
         }
     }
 }

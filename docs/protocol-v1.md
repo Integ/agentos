@@ -26,7 +26,7 @@
 {"version":1,"id":7,"body":{"status":"error","error":{"code":"not_found","message":"no task task-99"}}}
 ```
 
-`version` 是协议版本，与程序的语义版本号分开。v0.3 实现支持协议 `1`；未知版本得到 `unsupported_version`。字段、方法、枚举值或类型错误得到 `invalid_request`，不会交给模型重新解释。无效 JSON 若不能提取无符号整数请求编号，错误响应使用 `id: 0`。
+`version` 是协议版本，与程序的语义版本号分开。v0.3 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加：`read` 方法和 `unhandled` 状态晚于最初的 v0.3.0 加入，旧服务会以 `invalid_request` 拒绝 `read`，严格解析状态枚举的旧客户端需要升级后才能读取含 `unhandled` 的任务。字段、方法、枚举值或类型错误得到 `invalid_request`，不会交给模型重新解释。无效 JSON 若不能提取无符号整数请求编号，错误响应使用 `id: 0`。
 
 `id` 是客户端选择的无符号整数，仅用于关联响应，**不是幂等键**。重复发送同一个 `submit` 请求编号仍可能创建第二个任务。收到完整响应前连接断开时，结果可能已经落盘；客户端必须查询任务，不能自动重发变更请求。
 
@@ -43,6 +43,7 @@
 | `cancel` | `id: integer` | `task` | 停止后续步骤，返回持久任务 |
 | `approve` | `id: integer`、`step: integer`、`confirmation: string` | `approval_queued` | 校验当前具体确认请求后，将批准排入执行队列 |
 | `capabilities` | 无 | `capabilities` | 已授权能力的名称、输入 schema、风险和描述 |
+| `read` | `capability: string`，可选 `args: object` | `value` | 直接查询一个已授权的只读（L0）能力，不创建任务 |
 | `watch` | 可选 `after: integer/null` | `watching`，随后事件 | 持续接收任务变更提示与重新同步通知 |
 
 `accepted` 表示任务已保存并接收执行；不表示任务已经成功。`approval_queued` 同样只表示批准请求已入队，执行 worker 仍会再次检查 token、来源、期限与 grant。
@@ -57,7 +58,19 @@
 
 上面表示三条独立请求，每条都有自己的响应。提交响应的 `data` 形如 `{"type":"accepted","task":{...}}`，读取与取消形如 `{"type":"task","task":{...}}`；省略号仅用于本文解释，不是有效线上 JSON。
 
-一个 task 包含 `id`、原始 `intent`、`state`、顺序 `steps`、`tainted`、可选 `confirmation`、`message`、`created_at_ms` 与 `updated_at_ms`。时间戳是 Unix 毫秒。状态为 `queued`、`planning`、`running`、`awaiting_confirmation`、`succeeded`、`failed`、`cancelled`、`interrupted`。单个步骤包含 `capability`、`args`、`state` 与可选 `result`。
+一个 task 包含 `id`、原始 `intent`、`state`、顺序 `steps`、`tainted`、可选 `confirmation`、`message`、`created_at_ms` 与 `updated_at_ms`。时间戳是 Unix 毫秒。状态为 `queued`、`planning`、`running`、`awaiting_confirmation`、`succeeded`、`unhandled`、`failed`、`cancelled`、`interrupted`。单个步骤包含 `capability`、`args`、`state` 与可选 `result`。
+
+终态各自表示不同的结局，客户端不应只看“任务结束了”：
+
+| 终态 | 含义 |
+| --- | --- |
+| `succeeded` | 计划的每一步都已执行成功；或规划器不需要工具，直接给出了回答（`steps` 为空，`message` 是回答） |
+| `unhandled` | 规划器没有办法处理这个意图。没有执行任何步骤，也没有出错；`message` 说明当前能做什么。`steps` 必为空 |
+| `failed` | 规划失败（模型不可达、拒绝或响应无效）、计划无效、被策略拒绝，或某一步执行失败 |
+| `cancelled` | 被取消；已经开始的步骤可能仍产生了结果 |
+| `interrupted` | 服务停止或重启时尚未完成；不会自动重复执行 |
+
+`unhandled` 不能显示成“已完成”，也不应被脚本当作成功。
 
 ### 分页与筛选
 
@@ -78,6 +91,24 @@
 ```
 
 `state` 是当前状态筛选。每一页及其 `revision` 在同一存储锁内读取；跨多个请求没有冻结整段历史的 snapshot。任务状态可能在翻页期间改变，筛选结果因而也可能变化。需要最新完整视图时，响应变更通知并从第一页重新读取。
+
+### 直接读取
+
+界面刷新自己要展示的数据不是用户的意图。`read` 直接调用一个只读能力并返回结果：
+
+```json
+{"version":1,"id":9,"command":{"method":"read","capability":"notes.list","args":{}}}
+```
+
+```json
+{"version":1,"id":9,"body":{"status":"ok","data":{"type":"value","capability":"notes.list","value":{"notes":["买牛奶"],"message":"1. 买牛奶"}}}}
+```
+
+`args` 省略时为 `{}`，必须是 JSON 对象。`value` 是能力自己的返回值，结构由能力决定。
+
+`read` 不创建任务，不经过规划器，不推进 revision，不产生变更事件，也不写审计记录：它和 `get`、`list` 一样，是同一系统用户对本机状态的查询，不是 Agent 的行为。因此它只对同时满足以下条件的能力开放：已授权给管家、风险为 L0 `read_only`、输出不属于不可信的外部内容（后者需要任务来承载污点）。其余能力返回 `not_readable`，必须通过 `submit` 提交意图，走规划、策略和审计。可读集合在服务启动时确定，与 `capabilities` 的结果一致。
+
+客户端不要用 `submit` 一条固定文字来代替读取：那会在用户的任务历史和审计日志里留下一条用户没有表达过的意图，接入模型规划器时还会多一次模型调用。
 
 ### 明确批准
 
@@ -135,6 +166,7 @@ token 每次确认请求重新生成，客户端应将它视为不透明字符�
 | 单帧 | 最多 1,048,576 字节，不含末尾换行；接收和响应序列化均有界 |
 | 意图文本 | 非空，最多 65,536 字节，按解码后的 UTF-8 字节数计算 |
 | 分页 | 每页 1–50 条，任务摘要最多 120 个字符 |
+| 直接读取 | 能力名 1–128 字节；单次调用最多等待 10 秒，超时返回 `capability_failed` |
 | 并发连接 | 最多 64 条，含 watch；超额新连接直接关闭 |
 | 执行队列 | 最多 64 个等待项，worker 串行执行；满时拒绝，不先创建任务 |
 | 变更通知 | 每个 store 使用 256 条有界广播缓冲，落后触发重新同步 |
@@ -142,7 +174,7 @@ token 每次确认请求重新生成，客户端应将它视为不透明字符�
 | 响应/事件写出 | 每帧最多等待 5 秒；不读取的客户端被断开 |
 | 服务停止排空 | 停止接受和关闭客户端后，给已接收执行队列最多 5 秒 |
 
-超长或没有换行的残帧不作为请求执行，连接关闭。有效 JSON 请求若无法生成限额内的响应，返回 `response_too_large`；任务本身仍可存在，应使用分页摘要查询。客户端收到 EOF、超时或其他传输错误，应按“变更结果可能未知”处理。
+超长或没有换行的残帧不作为请求执行，连接关闭。有效 JSON 请求若无法生成限额内的响应，返回 `response_too_large`；任务本身仍可存在，应使用分页摘要查询，直接读取则应改用范围更小的查询。客户端收到 EOF、超时或其他传输错误，应按“变更结果可能未知”处理。
 
 ## 错误码
 
@@ -150,13 +182,15 @@ token 每次确认请求重新生成，客户端应将它视为不透明字符�
 | --- | --- |
 | `invalid_request` | JSON、字段、方法或字段类型不合法；纠正协议请求 |
 | `unsupported_version` | `version` 不受支持；不要以另一种格式盲目重试变更 |
-| `invalid_argument` | 空/超长意图、分页数量越界、步骤从 0 开始等参数问题 |
-| `not_found` | 任务不存在 |
+| `invalid_argument` | 空/超长意图、分页数量越界、步骤从 0 开始、`read` 的参数不是对象或不被能力接受等参数问题 |
+| `not_found` | 任务不存在；或 `read` 指定的能力不存在、未授权 |
+| `not_readable` | `read` 指定的能力不是只读能力，或其输出属于不可信的外部内容；改为提交意图 |
+| `capability_failed` | `read` 调用的能力返回了错误或超时；没有副作用，可以明确决定是否重试 |
 | `queue_unavailable` | 执行/批准队列满或 worker 不可用；此次未入队，明确决定是否稍后重试 |
 | `invalid_confirmation` | 未处于等待确认、步骤/token/来源不匹配，或批准过期；重新读取和展示详情 |
 | `storage_unavailable` | 状态读写失败；检查本地存储与任务实际状态 |
 | `audit_unavailable` | 取消已保存，但记录取消审计失败；先查询任务，不假定取消没发生 |
-| `response_too_large` | 完整响应超过 1 MiB；使用精简任务页 |
+| `response_too_large` | 完整响应超过 1 MiB；使用精简任务页或范围更小的读取 |
 
 帧超限、读写超时、UID 不匹配和连接数超限可能直接关闭连接，不保证存在结构化错误帧。
 

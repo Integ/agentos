@@ -397,3 +397,104 @@ async fn the_judge_can_only_ask_for_confirmation() {
     let r = h.say("现在几点").await;
     assert_eq!(r.kind, ExpressionKind::Report);
 }
+
+fn stored_states(home: &Home) -> Vec<(u64, agentosd::tasks::TaskState)> {
+    let (tasks, notes) = TaskStore::open(home.0.join("tasks")).unwrap().load();
+    assert!(notes.is_empty(), "{notes:?}");
+    tasks.iter().map(|t| (t.id, t.state)).collect()
+}
+
+#[tokio::test]
+async fn not_understood_and_planner_failure_are_not_recorded_as_done() {
+    use agentosd::tasks::TaskState;
+    let home = Home::new("outcomes");
+    let script: Arc<Script> = Arc::new(|seen: &Seen| match (seen.task.as_str(), seen.rounds) {
+        ("问个问题", _) => answer("二加二等于四。"),
+        ("沉默", _) => Plan::default(),
+        ("网络断了", _) => Plan::failed("无法连接 Claude API：connection refused"),
+        ("做到一半", 0) => call("notes.append", json!({"text": "第一步"})),
+        ("做到一半", _) => Plan::failed("Claude API 错误（HTTP 529）：overloaded"),
+        (other, _) => Plan::unhandled(format!("我还不会处理：{other}")),
+    });
+    let planner = Scripted {
+        script,
+        seen: Arc::default(),
+    };
+    let mut h = Harness::new(&home, Box::new(planner), None);
+
+    // An answer is a completed task.
+    let r = h.say("问个问题").await;
+    assert_eq!(
+        (r.kind, r.text.as_str()),
+        (ExpressionKind::Report, "二加二等于四。")
+    );
+    // Saying nothing, or saying "I cannot", is not.
+    let r = h.say("沉默").await;
+    assert_eq!(r.kind, ExpressionKind::Report);
+    assert!(r.text.contains("我还不会做这件事"));
+    let r = h.say("讲个笑话").await;
+    assert!(r.text.contains("我还不会处理：讲个笑话"));
+    // A planner that failed is an error, not a reply.
+    let r = h.say("网络断了").await;
+    assert_eq!(r.kind, ExpressionKind::Error);
+    assert!(r.text.contains("connection refused"));
+    // Failing after a step ran keeps the step and still fails the task.
+    let r = h.say("做到一半").await;
+    assert_eq!(r.kind, ExpressionKind::Error);
+    assert_eq!(h.notes(), vec!["第一步"]);
+
+    assert_eq!(
+        stored_states(&home),
+        vec![
+            (1, TaskState::Done),
+            (2, TaskState::Unhandled),
+            (3, TaskState::Unhandled),
+            (4, TaskState::Failed),
+            (5, TaskState::Failed),
+        ]
+    );
+    assert!(!h.butler.awaiting_confirmation());
+}
+
+#[tokio::test]
+async fn the_task_list_and_planner_memory_tell_outcomes_apart() {
+    let home = Home::new("outcome-memory");
+    let mut h = Harness::new(&home, Box::new(RulePlanner), None);
+    h.say("记一下 买牛奶").await;
+    h.say("讲个笑话").await;
+    let r = h.say("任务").await;
+    assert!(r.text.contains("#1 已完成"), "{}", r.text);
+    assert!(r.text.contains("#2 未能处理"), "{}", r.text);
+    assert!(!r.text.contains("#2 已完成"));
+}
+
+#[tokio::test]
+async fn a_delegate_that_could_not_plan_reports_failure_to_the_butler() {
+    let home = Home::new("delegate-failure");
+    let script: Arc<Script> = Arc::new(|seen: &Seen| {
+        let delegate = !seen.system.contains("管家 Agent，运行在");
+        match (delegate, seen.rounds) {
+            (false, 0) => call("agent.notes", json!({"task": "记下：买牛奶"})),
+            (false, _) => answer(&format!("子 Agent 的结果：{}", seen.last_results.join("|"))),
+            (true, _) => Plan::failed("无法连接模型"),
+        }
+    });
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let planner = Scripted {
+        script,
+        seen: seen.clone(),
+    };
+    let mut h = Harness::new(&home, Box::new(planner), None);
+    let r = h.say("帮我记一下买牛奶").await;
+    // The butler was told the delegation failed and could say so.
+    assert!(r.text.contains("无法连接模型"), "{}", r.text);
+    assert!(h.notes().is_empty());
+    let audit = std::fs::read_to_string(home.0.join("audit.jsonl")).unwrap();
+    let finished: Vec<Value> = audit
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|entry| entry["event"] == "agent_finished")
+        .collect();
+    assert_eq!(finished.len(), 1, "{audit}");
+    assert_eq!(finished[0]["ok"], false);
+}

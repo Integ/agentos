@@ -1,6 +1,8 @@
-use agentos_core::now_ms;
+use agentos_core::{now_ms, RiskLevel};
 use agentos_ipc::{Event, EventKind, Reply, TaskSummary};
 use agentos_runtime::{StepState, Task, TaskId, TaskState};
+
+use crate::wait::WaitOutcome;
 
 /// Treat terminal output as a device boundary: data cannot contain escape
 /// sequences, carriage returns, C1 controls, or invisible direction overrides.
@@ -40,9 +42,20 @@ pub fn state_label(state: TaskState) -> &'static str {
         TaskState::Running => "执行中",
         TaskState::AwaitingConfirmation => "等待批准",
         TaskState::Succeeded => "已完成",
+        TaskState::Unhandled => "未能处理",
         TaskState::Failed => "失败",
         TaskState::Cancelled => "已取消",
         TaskState::Interrupted => "已中断",
+    }
+}
+
+/// `L0`..`L3`, the same labels the documentation and confirmations use.
+pub fn risk_label(risk: RiskLevel) -> &'static str {
+    match risk {
+        RiskLevel::ReadOnly => "L0 只读",
+        RiskLevel::Reversible => "L1 可恢复",
+        RiskLevel::External => "L2 对外",
+        RiskLevel::Irreversible => "L3 不可逆",
     }
 }
 
@@ -104,7 +117,16 @@ pub fn task_detail(task: &Task, include_token: bool) -> String {
         }
     }
     if task.steps.is_empty() {
-        lines.push("  尚无工具步骤".into());
+        lines.push(
+            if task.state == TaskState::Unhandled {
+                "  没有执行任何步骤：这句话没有对应的能力"
+            } else if task.state.is_terminal() {
+                "  没有执行工具步骤"
+            } else {
+                "  尚无工具步骤"
+            }
+            .into(),
+        );
     }
     for (i, step) in task.steps.iter().enumerate() {
         lines.push(format!(
@@ -208,7 +230,12 @@ pub fn dashboard(
         .count();
     let attention = tasks
         .iter()
-        .filter(|t| matches!(t.state, TaskState::Failed | TaskState::Interrupted))
+        .filter(|t| {
+            matches!(
+                t.state,
+                TaskState::Failed | TaskState::Interrupted | TaskState::Unhandled
+            )
+        })
         .count();
     let mut out = format!("\n╭─ AgentOS v{} · 任务工作台 ─────────────────────────────\n│ {}  · 快照 #{revision} · 第 {page_number} 页\n│ 本页 {} 项  进行中 {active}  待批准 {waiting}  已完成 {done}  需查看 {attention}\n╰────────────────────────────────────────────────────────\n  任务       状态     步骤  意图\n{}\n",env!("CARGO_PKG_VERSION"),if connected { "● 已连接后台" } else { "○ 连接中断，正在重连视图" },tasks.len(),task_rows(tasks,selected.map(|t|t.id)));
     out.push_str(&format!(
@@ -259,14 +286,23 @@ pub fn reply_text(reply: &Reply) -> String {
             .iter()
             .map(|s| {
                 format!(
-                    "{} · {:?} · {}",
+                    "{} · {} · {}",
                     one_line(s.name.as_str(), 100),
-                    s.risk,
+                    risk_label(s.risk),
                     one_line(&s.description, 300)
                 )
             })
             .collect::<Vec<_>>()
             .join("\n"),
+        Reply::Value { value, .. } => {
+            // Capabilities describe their own result in `message`; anything
+            // else is shown as data. Either way it is untrusted for a terminal.
+            let text = match value.get("message").and_then(|m| m.as_str()) {
+                Some(message) => message.to_string(),
+                None => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+            };
+            bounded(&safe_text(&text), 16_000)
+        }
         Reply::ApprovalQueued { id, step } => {
             format!("{id} 第 {step} 步的批准请求已排队；执行前仍会校验权限与有效期。")
         }
@@ -274,6 +310,23 @@ pub fn reply_text(reply: &Reply) -> String {
             format!("已订阅任务变更 · 快照 #{revision}；断线后需重新同步任务视图。")
         }
     }
+}
+
+/// The closing line of `submit --wait`: what happened, and what to do next.
+pub fn wait_text(outcome: &WaitOutcome) -> String {
+    let task = outcome.task();
+    let detail = task_detail(task, true);
+    let note = match outcome {
+        WaitOutcome::Settled(_) => return detail,
+        WaitOutcome::NeedsApproval(_) => {
+            "任务在等待批准，不会自行继续；核对上面的步骤与参数后再批准或取消。".to_string()
+        }
+        WaitOutcome::TimedOut(_) => format!(
+            "等待超时；任务仍在后台继续。稍后使用 agentos task {} 查看。",
+            task.id
+        ),
+    };
+    format!("{detail}\n{note}")
 }
 
 pub fn event_text(event: &Event) -> String {
@@ -328,5 +381,65 @@ mod tests {
         );
         assert!(view.contains("/quit（后台任务继续）"));
         assert!(!view.contains('\x1b'));
+    }
+
+    #[test]
+    fn an_unhandled_intent_is_never_shown_as_completed() {
+        let store = TaskStore::memory();
+        let task = store
+            .create(Intent {
+                id: IntentId(0),
+                source: DeviceId::new("test"),
+                speaker: None,
+                text: "讲个笑话".into(),
+                urgency: Urgency::Normal,
+                at_ms: now_ms(),
+            })
+            .unwrap();
+        let task = store
+            .update(task.id, |t| {
+                t.state = TaskState::Unhandled;
+                t.message = Some("我还不会处理这句话。".into());
+            })
+            .unwrap();
+        let detail = task_detail(&task, true);
+        assert!(detail.contains("未能处理") && detail.contains("没有对应的能力"));
+        assert!(!detail.contains("已完成"));
+        let view = dashboard(&[TaskSummary::from(&task)], Some(&task), 2, true, 1, false);
+        assert!(view.contains("已完成 0") && view.contains("需查看 1"));
+        assert_eq!(WaitOutcome::Settled(task.clone()).exit_code(), 3);
+        let done = store
+            .create(Intent {
+                id: IntentId(0),
+                source: DeviceId::new("test"),
+                speaker: None,
+                text: "现在几点".into(),
+                urgency: Urgency::Normal,
+                at_ms: now_ms(),
+            })
+            .unwrap();
+        let done = store
+            .update(done.id, |t| t.state = TaskState::Succeeded)
+            .unwrap();
+        assert_eq!(WaitOutcome::Settled(done.clone()).exit_code(), 0);
+        assert_eq!(WaitOutcome::TimedOut(done).exit_code(), 5);
+        assert!(wait_text(&WaitOutcome::TimedOut(task)).contains("仍在后台继续"));
+    }
+
+    #[test]
+    fn direct_read_results_and_risk_levels_are_rendered_for_people() {
+        let reply = Reply::Value {
+            capability: agentos_core::CapabilityName::new("notes.list"),
+            value: serde_json::json!({"notes":["牛奶"],"message":"1. 牛奶\x1b[2J"}),
+        };
+        let text = reply_text(&reply);
+        assert!(text.starts_with("1. 牛奶") && !text.contains('\x1b'));
+        let raw = Reply::Value {
+            capability: agentos_core::CapabilityName::new("x.read"),
+            value: serde_json::json!({"count":2}),
+        };
+        assert!(reply_text(&raw).contains("\"count\": 2"));
+        assert_eq!(risk_label(RiskLevel::ReadOnly), "L0 只读");
+        assert_eq!(risk_label(RiskLevel::Irreversible), "L3 不可逆");
     }
 }

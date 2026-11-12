@@ -1,5 +1,6 @@
 //! A bounded, local control service. Connections never own task lifetimes.
 
+use std::collections::BTreeMap;
 use std::fs::{self, DirBuilder};
 use std::future::Future;
 use std::io;
@@ -9,13 +10,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agentos_audit::durable::{AuditEvent, AuditLog};
-use agentos_core::{now_ms, AgentId, CapabilitySpec, DeviceId, Intent, IntentId, Urgency};
+use agentos_core::{
+    now_ms, AgentId, Capability, CapabilityError, CapabilityName, CapabilitySpec, DeviceId, Intent,
+    IntentId, RiskLevel, Urgency,
+};
 use agentos_ipc::{
     current_uid, read_frame, write_frame, Command, Event, EventKind, ProtocolError, Reply, Request,
-    Response, TaskSummary, MAX_PAGE_SIZE, MAX_TEXT_BYTES, VERSION,
+    Response, TaskSummary, MAX_CAPABILITY_NAME_BYTES, MAX_PAGE_SIZE, MAX_TEXT_BYTES, VERSION,
 };
 use agentos_policy::PolicyEngine;
 use agentos_runtime::{Task, TaskId, TaskState, TaskStore};
+use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWrite, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, Semaphore};
@@ -33,6 +38,7 @@ const QUEUE_CAPACITY: usize = 64;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct Service {
     controller: Arc<Controller>,
@@ -50,6 +56,9 @@ struct Controller {
     tasks: Arc<TaskStore>,
     audit: Arc<AuditLog>,
     capabilities: Vec<CapabilitySpec>,
+    /// Granted capabilities a client may query directly: read-only, and with
+    /// output the user controls. Fixed at startup, like `capabilities`.
+    readable: BTreeMap<CapabilityName, Arc<dyn Capability>>,
     work_tx: mpsc::Sender<Work>,
 }
 
@@ -72,10 +81,19 @@ impl Service {
         planner: Box<dyn Planner>,
     ) -> Self {
         let id = AgentId::new("butler");
-        let capabilities = registry
+        let capabilities: Vec<CapabilitySpec> = registry
             .specs()
             .into_iter()
             .filter(|spec| policy.is_granted(&id, &spec.name))
+            .collect();
+        // Untrusted output would need a task to carry its taint, so such a
+        // capability is never served outside one.
+        let readable = capabilities
+            .iter()
+            .filter(|spec| spec.risk == RiskLevel::ReadOnly)
+            .filter_map(|spec| registry.get(&spec.name))
+            .filter(|capability| !capability.untrusted_output())
+            .map(|capability| (capability.spec().name.clone(), capability.clone()))
             .collect();
         let expr = ExpressionHub::new(audit.clone());
         let butler = Butler::with_store(
@@ -93,6 +111,7 @@ impl Service {
                 tasks,
                 audit,
                 capabilities,
+                readable,
                 work_tx,
             }),
             work_rx,
@@ -429,7 +448,50 @@ impl Controller {
             Command::Capabilities {} => Ok(Reply::Capabilities {
                 capabilities: self.capabilities.clone(),
             }),
-            Command::Watch { .. } => unreachable!("watch is handled at the connection boundary"),
+            Command::Read { .. } | Command::Watch { .. } => {
+                unreachable!("read and watch are handled at the connection boundary")
+            }
+        }
+    }
+
+    /// Serve a client's query of local state. This is not an agent acting: no
+    /// task, no planner, no approval and no audit record, like `get`/`list`.
+    /// Only capabilities that cannot have a side effect are reachable here.
+    async fn read(&self, capability: CapabilityName, args: Value) -> Result<Reply, ProtocolError> {
+        if capability.as_str().is_empty() || capability.as_str().len() > MAX_CAPABILITY_NAME_BYTES {
+            return Err(protocol_error(
+                "invalid_argument",
+                "capability name must be 1 to 128 bytes",
+            ));
+        }
+        if !args.is_object() {
+            return Err(protocol_error(
+                "invalid_argument",
+                "capability arguments must be a JSON object",
+            ));
+        }
+        let Some(target) = self.readable.get(&capability) else {
+            return Err(
+                if self.capabilities.iter().any(|spec| spec.name == capability) {
+                    protocol_error(
+                        "not_readable",
+                        format!("{capability} is not a read-only capability; submit an intent"),
+                    )
+                } else {
+                    protocol_error("not_found", format!("no capability {capability}"))
+                },
+            );
+        };
+        match timeout(READ_TIMEOUT, target.invoke(args)).await {
+            Ok(Ok(value)) => Ok(Reply::Value { capability, value }),
+            Ok(Err(CapabilityError::InvalidArgs(message))) => {
+                Err(protocol_error("invalid_argument", message))
+            }
+            Ok(Err(error)) => Err(protocol_error("capability_failed", error.to_string())),
+            Err(_) => Err(protocol_error(
+                "capability_failed",
+                format!("{capability} did not answer within 10 seconds"),
+            )),
         }
     }
 }
@@ -448,7 +510,7 @@ async fn send_response<W: AsyncWrite + Unpin>(
                     &Response::error(
                         response.id,
                         "response_too_large",
-                        "task detail exceeds the 1 MiB protocol limit; use the paged task list",
+                        "response exceeds the 1 MiB protocol limit; use the paged task list or a narrower read",
                     ),
                 )
                 .await
@@ -528,7 +590,11 @@ async fn serve_connection(stream: UnixStream, controller: Arc<Controller>) -> io
                 }
             }
         }
-        let response = match controller.handle(request.command, uid) {
+        let result = match request.command {
+            Command::Read { capability, args } => controller.read(capability, args).await,
+            command => controller.handle(command, uid),
+        };
+        let response = match result {
             Ok(reply) => Response::ok(request.id, reply),
             Err(error) => Response {
                 version: VERSION,

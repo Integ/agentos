@@ -47,7 +47,11 @@ pub enum TaskState {
     Planning,
     Running,
     AwaitingConfirmation,
+    /// Every planned step ran, or the planner answered without needing tools.
     Succeeded,
+    /// The planner had no way to act on the intent. Nothing ran and nothing
+    /// went wrong; clients must not present this as work that was done.
+    Unhandled,
     Failed,
     Cancelled,
     Interrupted,
@@ -57,7 +61,7 @@ impl TaskState {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Interrupted
+            Self::Succeeded | Self::Unhandled | Self::Failed | Self::Cancelled | Self::Interrupted
         )
     }
 }
@@ -442,6 +446,9 @@ fn validate_snapshot(snapshot: &Snapshot) -> io::Result<()> {
         if task.state == TaskState::Succeeded && incomplete {
             return Err(invalid_data("succeeded task has incomplete steps"));
         }
+        if task.state == TaskState::Unhandled && !task.steps.is_empty() {
+            return Err(invalid_data("unhandled task has planned steps"));
+        }
         match (&task.confirmation, task.state) {
             (Some(confirmation), TaskState::AwaitingConfirmation) => {
                 if confirmation.expires_at_ms <= task.created_at_ms
@@ -705,6 +712,40 @@ mod tests {
             })
             .is_err());
         assert_eq!(store.get(task.id).unwrap().state, TaskState::Queued);
+    }
+
+    #[test]
+    fn an_unhandled_intent_is_a_terminal_outcome_distinct_from_success() {
+        let dir = TempDir::new();
+        let store = TaskStore::open(&dir.0).unwrap();
+        let task = store.create(intent()).unwrap();
+        // "Nothing could be done" never carries steps that look like work.
+        assert!(store
+            .update(task.id, |task| {
+                task.state = TaskState::Unhandled;
+                task.steps = vec![step(StepState::Succeeded)];
+            })
+            .is_err());
+        let unhandled = store
+            .update(task.id, |task| {
+                task.state = TaskState::Unhandled;
+                task.message = Some("我还不会处理这句话".into());
+            })
+            .unwrap();
+        assert!(unhandled.state.is_terminal());
+        assert_eq!(
+            serde_json::to_value(unhandled.state).unwrap(),
+            json!("unhandled")
+        );
+        // Terminal: neither cancellation nor a restart rewrites the outcome.
+        assert_eq!(store.cancel(task.id).unwrap().state, TaskState::Unhandled);
+        let (page, _, _) = store.page(None, 10, Some(TaskState::Succeeded));
+        assert!(page.is_empty());
+        drop(store);
+        let store = TaskStore::open(&dir.0).unwrap();
+        let reloaded = store.get(task.id).unwrap();
+        assert_eq!(reloaded.state, TaskState::Unhandled);
+        assert_eq!(reloaded.message.as_deref(), Some("我还不会处理这句话"));
     }
 
     #[test]
