@@ -7,12 +7,12 @@ use agentos_core::{
     now_ms, AgentId, CapabilityName, DeviceId, DeviceInfo, Expression, ExpressionKind, Intent,
     IntentId, Modality, Output, OutputError, PrivacyClass, Urgency,
 };
+use agentos_planner::RulePlanner;
 use agentos_policy::PolicyEngine;
+use agentos_services::expression::ExpressionHub;
+use agentos_services::registry::CapabilityRegistry;
 use agentosd::builtin::{self, NoteStore};
 use agentosd::butler::{grant_manifest, Butler};
-use agentosd::expression::ExpressionHub;
-use agentosd::planner::RulePlanner;
-use agentosd::registry::CapabilityRegistry;
 use async_trait::async_trait;
 
 #[derive(Default)]

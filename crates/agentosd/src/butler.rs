@@ -28,17 +28,17 @@ use agentos_core::{
 use agentos_policy::{CallContext, Decision, PolicyEngine};
 use serde_json::{json, Value};
 
-use crate::agents::{AgentDirectory, AgentManifest};
-use crate::blackboard::Blackboard;
-use crate::expression::ExpressionHub;
-use crate::identity::PinVault;
-use crate::judge::{Judge, Review, Verdict};
-use crate::planner::{Conversation, Planner, Round, Step, ToolResult, SYSTEM_PROMPT};
-use crate::plugin_store::PluginManager;
-use crate::registry::CapabilityRegistry;
 use crate::shell_api::{risk_label, EventBus};
 use crate::tasks::{Frame, Task, TaskState, TaskStore, KEEP_FINISHED};
 use crate::voice::MIC_DEVICE;
+use agentos_planner::{Conversation, Planner, Round, Step, ToolResult, SYSTEM_PROMPT};
+use agentos_services::agents::{AgentDirectory, AgentManifest};
+use agentos_services::blackboard::Blackboard;
+use agentos_services::expression::ExpressionHub;
+use agentos_services::identity::PinVault;
+use agentos_services::judge::{Judge, Review, Verdict};
+use agentos_services::plugin_store::PluginManager;
+use agentos_services::registry::CapabilityRegistry;
 
 /// Planning rounds the butler gets per task.
 pub const BUTLER_MAX_ROUNDS: u32 = 8;
@@ -205,7 +205,7 @@ impl Butler {
     }
 
     /// Shared memory shown to the planner. Register its capabilities with
-    /// [`crate::blackboard::register_all`] so agents can read and write it.
+    /// [`agentos_services::blackboard::register_all`] so agents can read and write it.
     pub fn with_blackboard(mut self, board: Blackboard) -> Self {
         self.board = Some(board);
         self
@@ -1026,7 +1026,7 @@ impl Butler {
             capabilities: names,
         });
         let mut system =
-            crate::planner::sub_agent_prompt(&m.name, &m.description, m.instructions.as_deref());
+            agentos_planner::sub_agent_prompt(&m.name, &m.description, m.instructions.as_deref());
         if let Some(b) = self.board.as_ref().and_then(|b| b.summary(1000)) {
             system.push_str("\n\n共享黑板（");
             system.push_str(&b);

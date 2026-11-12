@@ -13,12 +13,12 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use agentos_core::{now_ms, CapabilityName, Intent, IntentId};
+use agentos_core::{now_ms, AgentId, CapabilityName, Intent, IntentId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const STATE_FILE: &str = "tasks.json";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -73,15 +73,48 @@ pub enum StepState {
     Running,
     Succeeded,
     Failed,
+    /// Planned in the same round as a step that failed, and therefore never
+    /// started: later steps of a round may depend on earlier ones.
+    Skipped,
 }
 
+impl StepState {
+    /// The step is over: it will neither start nor change again.
+    pub fn is_settled(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Skipped)
+    }
+}
+
+/// One capability call of a task. Planning is a loop, so a task's steps grow
+/// round by round; a step delegated to another agent is followed by the steps
+/// that agent took on its behalf.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskStep {
+    /// Unique within the task. Empty in tasks stored before steps had ids.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    /// The agent that made the call when it is not the butler itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentId>,
     pub capability: CapabilityName,
     pub args: Value,
     pub state: StepState,
     pub result: Option<Value>,
+}
+
+impl TaskStep {
+    /// A planned step of the butler that has not started.
+    pub fn pending(capability: CapabilityName, args: Value) -> Self {
+        Self {
+            id: String::new(),
+            agent: None,
+            capability,
+            args,
+            state: StepState::Pending,
+            result: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +125,10 @@ pub struct Confirmation {
     /// A fresh opaque token identifying the concrete confirmation request.
     #[serde(default)]
     pub token: String,
+    /// The step is irreversible: approval must come with proof of identity
+    /// (the PIN), not only from the right OS user.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub verify_identity: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -406,13 +443,13 @@ fn invalid_data(error: impl fmt::Display) -> io::Error {
 }
 
 fn validate_snapshot(snapshot: &Snapshot) -> io::Result<()> {
-    if snapshot.schema_version != 1 && snapshot.schema_version != SCHEMA_VERSION {
+    if !(1..=SCHEMA_VERSION).contains(&snapshot.schema_version) {
         return Err(invalid_data("unsupported task snapshot schema_version"));
     }
     if snapshot.next_id == 0 {
         return Err(invalid_data("next_id must be positive"));
     }
-    if snapshot.schema_version == SCHEMA_VERSION && snapshot.revision < snapshot.next_id - 1 {
+    if snapshot.schema_version >= 2 && snapshot.revision < snapshot.next_id - 1 {
         return Err(invalid_data("task revision precedes allocated task ids"));
     }
     let mut ids = BTreeSet::new();
@@ -430,20 +467,21 @@ fn validate_snapshot(snapshot: &Snapshot) -> io::Result<()> {
         {
             return Err(invalid_data("task step capability must not be empty"));
         }
-        let mut incomplete = false;
-        for step in &task.steps {
-            match step.state {
-                StepState::Succeeded if incomplete => {
-                    return Err(invalid_data("task steps completed out of order"));
-                }
-                StepState::Running | StepState::Failed if incomplete => {
-                    return Err(invalid_data("task steps started out of order"));
-                }
-                StepState::Succeeded => {}
-                _ => incomplete = true,
-            }
+        // Steps are not strictly sequential: a failed step may be followed by
+        // another round, and a delegating step stays running while its agent's
+        // steps are recorded after it. What must hold is that step ids are
+        // distinct, and that a task that succeeded left nothing unsettled.
+        let mut step_ids = BTreeSet::new();
+        if task
+            .steps
+            .iter()
+            .any(|step| !step.id.is_empty() && !step_ids.insert(step.id.as_str()))
+        {
+            return Err(invalid_data("duplicate task step id"));
         }
-        if task.state == TaskState::Succeeded && incomplete {
+        if task.state == TaskState::Succeeded
+            && task.steps.iter().any(|step| !step.state.is_settled())
+        {
             return Err(invalid_data("succeeded task has incomplete steps"));
         }
         if task.state == TaskState::Unhandled && !task.steps.is_empty() {
@@ -454,9 +492,6 @@ fn validate_snapshot(snapshot: &Snapshot) -> io::Result<()> {
                 if confirmation.expires_at_ms <= task.created_at_ms
                     || confirmation.step >= task.steps.len()
                     || task.steps[confirmation.step].state != StepState::Pending
-                    || task.steps[..confirmation.step]
-                        .iter()
-                        .any(|step| step.state != StepState::Succeeded)
                 {
                     return Err(invalid_data("invalid pending confirmation"));
                 }
@@ -581,10 +616,11 @@ mod tests {
 
     fn step(state: StepState) -> TaskStep {
         TaskStep {
-            capability: CapabilityName::new("notes.append"),
-            args: json!({"text": "买牛奶"}),
             state,
-            result: None,
+            ..TaskStep::pending(
+                CapabilityName::new("notes.append"),
+                json!({"text": "买牛奶"}),
+            )
         }
     }
 
@@ -632,6 +668,7 @@ mod tests {
                             step: 0,
                             expires_at_ms: now_ms() + 60_000,
                             token: "test-confirmation".into(),
+                            verify_identity: false,
                         });
                     }
                 })
@@ -895,6 +932,7 @@ mod tests {
                     step: 0,
                     expires_at_ms: now_ms() + 60_000,
                     token: "old".into(),
+                    verify_identity: false,
                 });
             })
             .unwrap();
@@ -915,7 +953,7 @@ mod tests {
         let revision = store.revision();
         assert_eq!(revision, 2);
         let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(saved["schema_version"], 2);
+        assert_eq!(saved["schema_version"], 3);
         assert_eq!(saved["revision"], revision);
         drop(store);
         let store = TaskStore::open(&dir.0).unwrap();

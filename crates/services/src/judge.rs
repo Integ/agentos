@@ -15,7 +15,7 @@ use agentos_core::CapabilitySpec;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::llm::TextModel;
+use agentos_planner::llm::TextModel;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {

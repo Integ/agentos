@@ -61,6 +61,10 @@ pub enum Command {
         step: usize,
         /// Exact token received with this task's concrete confirmation prompt.
         confirmation: String,
+        /// Proof of identity for an irreversible step: the PIN. Checked by
+        /// the service and never stored, logged or echoed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pin: Option<String>,
     },
     Capabilities {},
     /// Query a granted read-only (L0) capability directly. A client reading
@@ -329,6 +333,7 @@ mod tests {
                 id: TaskId(3),
                 step: 2,
                 confirmation: "nonce".into(),
+                pin: None,
             },
         };
         let value = serde_json::to_value(&request).unwrap();

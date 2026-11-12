@@ -12,15 +12,15 @@ use agentos_core::{
     DeviceInfo, Expression, ExpressionKind, Intent, IntentId, Modality, Output, OutputError,
     PrivacyClass, RiskLevel, Urgency,
 };
+use agentos_planner::{Conversation, Plan, Planner, RulePlanner, Step};
 use agentos_policy::PolicyEngine;
-use agentosd::agents::AgentDirectory;
-use agentosd::blackboard::{self, Blackboard};
+use agentos_services::agents::AgentDirectory;
+use agentos_services::blackboard::{self, Blackboard};
+use agentos_services::expression::ExpressionHub;
+use agentos_services::judge::{Judge, Review, Verdict};
+use agentos_services::registry::CapabilityRegistry;
 use agentosd::builtin::{self, NoteStore};
 use agentosd::butler::{grant_manifest, Butler};
-use agentosd::expression::ExpressionHub;
-use agentosd::judge::{Judge, Review, Verdict};
-use agentosd::planner::{Conversation, Plan, Planner, RulePlanner, Step};
-use agentosd::registry::CapabilityRegistry;
 use agentosd::tasks::TaskStore;
 use async_trait::async_trait;
 use serde_json::{json, Value};

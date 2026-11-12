@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentos_audit::durable::AuditLog;
+use agentos_audit::AuditLog;
 use agentos_core::{
     AgentId, Capability, CapabilityError, CapabilityName, CapabilitySpec, Intent, RiskLevel,
 };
@@ -18,12 +18,12 @@ use agentos_ipc::{
     current_uid, read_frame, write_frame, Command, Event, EventKind, Reply, Request, Response,
     ResponseBody, MAX_FRAME_BYTES, MAX_TEXT_BYTES, VERSION,
 };
+use agentos_planner::{Plan, Planner, RulePlanner, Step};
 use agentos_policy::PolicyEngine;
 use agentos_runtime::{Task, TaskId, TaskState, TaskStore};
+use agentos_services::registry::CapabilityRegistry;
 use agentos_taskd::builtin;
 use agentos_taskd::butler::grant_manifest;
-use agentos_taskd::planner::{Plan, Planner, RulePlanner, Step};
-use agentos_taskd::registry::CapabilityRegistry;
 use agentos_taskd::service::Service;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -235,10 +235,10 @@ impl Planner for SlowPlanner {
             self.0.entered.notify_one();
             self.0.release.notified().await;
             Plan {
-                steps: vec![Step {
-                    capability: CapabilityName::new("notes.append"),
-                    args: json!({"text": intent.text}),
-                }],
+                steps: vec![Step::new(
+                    CapabilityName::new("notes.append"),
+                    json!({"text": intent.text}),
+                )],
                 ..Plan::default()
             }
         } else {
@@ -526,10 +526,10 @@ struct ExternalPlanner;
 impl Planner for ExternalPlanner {
     async fn plan(&self, _intent: &Intent, _available: &[CapabilitySpec]) -> Plan {
         Plan {
-            steps: vec![Step {
-                capability: CapabilityName::new("test.external"),
-                args: json!({"recipient":"alice"}),
-            }],
+            steps: vec![Step::new(
+                CapabilityName::new("test.external"),
+                json!({"recipient":"alice"}),
+            )],
             ..Plan::default()
         }
     }
@@ -563,7 +563,8 @@ async fn approval_uses_the_concrete_token_across_connections_and_is_single_use()
                 .request(Command::Approve {
                     id,
                     step: 1,
-                    confirmation: "wrong".into()
+                    confirmation: "wrong".into(),
+                    pin: None,
                 })
                 .await
         ),
@@ -575,7 +576,8 @@ async fn approval_uses_the_concrete_token_across_connections_and_is_single_use()
                 .request(Command::Approve {
                     id,
                     step: 0,
-                    confirmation: token.clone()
+                    confirmation: token.clone(),
+                    pin: None,
                 })
                 .await
         ),
@@ -587,7 +589,8 @@ async fn approval_uses_the_concrete_token_across_connections_and_is_single_use()
             .ok(Command::Approve {
                 id,
                 step: 1,
-                confirmation: token.clone()
+                confirmation: token.clone(),
+                pin: None,
             })
             .await,
         Reply::ApprovalQueued { .. }
@@ -600,7 +603,8 @@ async fn approval_uses_the_concrete_token_across_connections_and_is_single_use()
                 .request(Command::Approve {
                     id,
                     step: 1,
-                    confirmation: token
+                    confirmation: token,
+                    pin: None,
                 })
                 .await
         ),
@@ -927,4 +931,124 @@ async fn an_intent_nobody_can_act_on_ends_unhandled_and_is_filterable() {
         panic!("expected a task")
     };
     assert_eq!(task.state, TaskState::Unhandled);
+}
+
+struct WipePlanner;
+#[async_trait]
+impl Planner for WipePlanner {
+    async fn plan(&self, _intent: &Intent, _available: &[CapabilitySpec]) -> Plan {
+        Plan {
+            steps: vec![Step::new(CapabilityName::new("disk.wipe"), json!({}))],
+            ..Plan::default()
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_irreversible_step_is_approved_over_the_socket_only_with_the_pin() {
+    use agentos_services::expression::ExpressionHub;
+    use agentos_services::identity::PinVault;
+    use agentos_taskd::butler::Butler;
+
+    let dir = TempDir::new();
+    let path = dir.0.join("control.sock");
+    let tasks = Arc::new(TaskStore::memory());
+    let audit_path = dir.0.join("audit.jsonl");
+    let audit = Arc::new(AuditLog::open(&audit_path).unwrap());
+    let wipe = Arc::new(ExternalCapability {
+        spec: CapabilitySpec {
+            name: CapabilityName::new("disk.wipe"),
+            description: "test only".into(),
+            risk: RiskLevel::Irreversible,
+            input_schema: json!({"type":"object"}),
+        },
+        calls: AtomicUsize::new(0),
+    });
+    let mut registry = CapabilityRegistry::new();
+    registry.register(wipe.clone());
+    let id = AgentId::new("butler");
+    let mut policy = PolicyEngine::new();
+    grant_manifest(&mut policy, &id, &[CapabilityName::new("disk.wipe")]);
+    let pins = Arc::new(
+        PinVault::open(dir.0.join("pin.json"))
+            .unwrap()
+            .with_audit(audit.clone()),
+    );
+    pins.set("918273645546").unwrap();
+    let butler = Butler::with_store(
+        id,
+        registry,
+        policy,
+        Box::new(WipePlanner),
+        audit.clone(),
+        ExpressionHub::new(audit.clone()),
+        tasks.clone(),
+    )
+    .with_pin_vault(pins.clone());
+    let server = Service::with_butler(butler, audit, Some(pins))
+        .bind(&path)
+        .await
+        .unwrap();
+    let (shutdown, receiver) = oneshot::channel::<()>();
+    let server = tokio::spawn(server.run_until(async {
+        let _ = receiver.await;
+    }));
+    let wait = |id: TaskId, state: TaskState| {
+        let tasks = tasks.clone();
+        async move {
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(task) = tasks.get(id).filter(|t| t.state == state) {
+                        return task;
+                    }
+                    sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("task state deadline")
+        }
+    };
+
+    let mut client = Connection::connect(&path).await;
+    let id = client.submit("清除磁盘").await;
+    let task = wait(id, TaskState::AwaitingConfirmation).await;
+    let confirmation = task.confirmation.unwrap();
+    assert!(confirmation.verify_identity);
+    let approve = |pin: Option<&str>| Command::Approve {
+        id,
+        step: 1,
+        confirmation: confirmation.token.clone(),
+        pin: pin.map(str::to_string),
+    };
+    // The right OS user and token are not enough for an irreversible step.
+    assert_eq!(
+        error_code(client.request(approve(None)).await),
+        "identity_required"
+    );
+    assert_eq!(
+        error_code(client.request(approve(Some("111122223333"))).await),
+        "identity_rejected"
+    );
+    // Neither attempt consumed the request or ran anything.
+    assert_eq!(
+        tasks.get(id).unwrap().state,
+        TaskState::AwaitingConfirmation
+    );
+    assert_eq!(wipe.calls.load(Ordering::SeqCst), 0);
+
+    assert!(matches!(
+        client.ok(approve(Some("918273645546"))).await,
+        Reply::ApprovalQueued { .. }
+    ));
+    wait(id, TaskState::Succeeded).await;
+    assert_eq!(wipe.calls.load(Ordering::SeqCst), 1);
+
+    // The PIN is checked and audited, but is never written anywhere.
+    shutdown.send(()).unwrap();
+    server.await.unwrap().unwrap();
+    let audit = fs::read_to_string(&audit_path).unwrap();
+    assert!(audit.contains("\"event\":\"identity_check\""));
+    assert!(!audit.contains("918273645546") && !audit.contains("111122223333"));
+    let stored = serde_json::to_string(&tasks.get(id).unwrap()).unwrap();
+    assert!(!stored.contains("918273645546"));
 }

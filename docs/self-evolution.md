@@ -1,5 +1,7 @@
 # 自我进化
 
+> **在任务服务上。** `agentos-taskd` 提供同一组 `evolve.*` 能力，插件保存在状态目录的 `evolve/`（默认 `~/.local/state/agentos/evolve/`）。安装是 L3：必须先用 `agentos-taskd --set-pin` 设置 PIN，批准安装时输入它；没有设置 PIN 时安装会被拒绝。下文的 `AGENTOS_HOME` 指旧的 `agentosd`。
+
 用户通过输入设备（键盘、语音）提出一个 AgentOS 现在做不到的要求，AgentOS 自己写出新能力、自测、请用户审阅，确认后装上并立刻可用；不满意可以回滚。
 
 ## 设计原则

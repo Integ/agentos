@@ -370,6 +370,9 @@ struct Intent {
 struct Approval {
     step: usize,
     confirmation: String,
+    /// The PIN, for an irreversible step. Passed through, never kept.
+    #[serde(default)]
+    pin: Option<String>,
 }
 
 fn command(request: &Request) -> Result<Command, HttpError> {
@@ -461,10 +464,14 @@ fn command(request: &Request) -> Result<Command, HttpError> {
                     {
                         return Err(HttpError::bad("批准步骤从 1 开始，并需要有效的确认令牌"));
                     }
+                    if approval.pin.as_ref().is_some_and(|pin| pin.len() > 64) {
+                        return Err(HttpError::bad("PIN 无效"));
+                    }
                     Ok(Command::Approve {
                         id,
                         step: approval.step,
                         confirmation: approval.confirmation,
+                        pin: approval.pin,
                     })
                 }
                 _ => Err(HttpError::new(404, "not_found", "没有此接口")),
@@ -790,7 +797,7 @@ mod tests {
         assert!(command(&request("GET", "/api/tasks?before=task-0", Value::Null)).is_err());
         assert!(
             matches!(command(&request("POST", "/api/tasks/task-9/approve", json!({"step":2,"confirmation":"opaque"}))).unwrap(),
-            Command::Approve { id: TaskId(9), step: 2, confirmation } if confirmation == "opaque")
+            Command::Approve { id: TaskId(9), step: 2, confirmation, pin: None } if confirmation == "opaque")
         );
         assert!(command(&request(
             "POST",

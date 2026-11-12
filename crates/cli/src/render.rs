@@ -65,6 +65,7 @@ fn step_label(state: StepState) -> &'static str {
         StepState::Running => "执行中",
         StepState::Succeeded => "成功",
         StepState::Failed => "失败",
+        StepState::Skipped => "未执行",
     }
 }
 
@@ -129,8 +130,14 @@ pub fn task_detail(task: &Task, include_token: bool) -> String {
         );
     }
     for (i, step) in task.steps.iter().enumerate() {
+        // A step taken by a delegate is shown under the agent that took it.
+        let by = step
+            .agent
+            .as_ref()
+            .map(|agent| format!("〔{}〕", one_line(agent.as_str(), 40)))
+            .unwrap_or_default();
         lines.push(format!(
-            "  {}. {} · {}",
+            "  {}. {by}{} · {}",
             i + 1,
             one_line(step.capability.as_str(), 120),
             step_label(step.state)

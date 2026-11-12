@@ -25,6 +25,7 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use tao::window::{Fullscreen, WindowBuilder};
 use wry::WebViewBuilder;
 
+mod kernel;
 mod setup;
 
 const UI: &str = include_str!("../ui/index.html");
@@ -36,16 +37,20 @@ const READY: &str = "__ready";
 type Conn = Arc<Mutex<Option<UnixStream>>>;
 
 const HELP: &str = "\
-用法：agentos-shell [--socket 路径] [--windowed | --fullscreen]
+用法：agentos-shell [--taskd | --task-socket 路径 | --socket 路径] [--windowed | --fullscreen]
 
-  --socket 路径   agentosd 的 Unix socket（或 AGENTOS_SOCKET；
-                  默认 $XDG_RUNTIME_DIR/agentos.sock）
+  --taskd         连接任务服务 agentos-taskd（协议 v1），使用默认状态目录下的 socket
+  --task-socket 路径
+                  连接任务服务 agentos-taskd 的指定 socket（或 AGENTOS_TASK_SOCKET）
+  --socket 路径   连接旧的 agentosd（或 AGENTOS_SOCKET；
+                  默认 $XDG_RUNTIME_DIR/agentos.sock）。不指定任务服务时使用它
   --windowed      以 1440×900 的窗口运行，便于开发
   --fullscreen    无边框全屏
   --help, -h      查看帮助
   --version, -V   查看版本
 
-需要先启动后台：agentosd --listen <同一个 socket 路径>。";
+需要先启动后台：agentos-taskd，或 agentosd --listen <同一个 socket 路径>。
+语音目前只在连接 agentosd 时可用。";
 
 /// What the command line asks for other than opening the desktop: text to
 /// print before exiting, or a usage error. Checked before any window exists,
@@ -63,12 +68,12 @@ fn command_line(args: impl IntoIterator<Item = String>) -> Result<Option<String>
             "--version" | "-V" => {
                 return Ok(Some(format!("agentos-shell {}", env!("CARGO_PKG_VERSION"))))
             }
-            "--socket" => {
+            "--socket" | "--task-socket" => {
                 if args.next().is_none_or(|value| value.starts_with("--")) {
-                    return Err("--socket 缺少路径，使用 --help 查看用法".into());
+                    return Err(format!("{name} 缺少路径，使用 --help 查看用法"));
                 }
             }
-            "--windowed" | "--fullscreen" => {}
+            "--windowed" | "--fullscreen" | "--taskd" => {}
             _ => return Err(format!("未知参数：{name}，使用 --help 查看用法")),
         }
     }
@@ -96,6 +101,51 @@ fn socket_path() -> PathBuf {
     }
     let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
     PathBuf::from(dir).join("agentos.sock")
+}
+
+/// The task service's socket, when the desktop is to run on it:
+/// `--task-socket`, `AGENTOS_TASK_SOCKET`, or with `--taskd` the socket in the
+/// default state directory.
+fn task_socket() -> Option<PathBuf> {
+    if let Some(path) = arg("--task-socket") {
+        return Some(path.into());
+    }
+    if let Some(path) = std::env::var_os("AGENTOS_TASK_SOCKET").filter(|p| !p.is_empty()) {
+        return Some(path.into());
+    }
+    if !flag("--taskd") {
+        return None;
+    }
+    match agentos_ipc::default_state_dir() {
+        Ok(state) => Some(agentos_ipc::default_socket_path(&state)),
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// What the page asks of the butler, rebuilt from known fields only.
+fn butler_request(v: &Value) -> Option<kernel::Request> {
+    match v.get("type").and_then(Value::as_str)? {
+        "intent" => Some(kernel::Request::Intent(
+            v.get("text")?.as_str()?.to_string(),
+        )),
+        "confirm" => Some(kernel::Request::Confirm {
+            approved: v.get("approved")?.as_bool()?,
+            task: v.get("task").and_then(Value::as_u64),
+            pin: pin_of(v),
+        }),
+        _ => None,
+    }
+}
+
+/// A PIN as the confirmation sheet sends it: digits only, bounded.
+fn pin_of(v: &Value) -> Option<String> {
+    v.get("pin")
+        .and_then(Value::as_str)
+        .filter(|pin| (1..=12).contains(&pin.len()) && pin.bytes().all(|b| b.is_ascii_digit()))
+        .map(str::to_string)
 }
 
 /// Keep a connection to agentosd, reconnecting every second, and forward each
@@ -184,17 +234,39 @@ fn mark_ready(hello: &Value) {
 /// fields; `system` runs a fixed set of actions and `setup` the setup
 /// assistant's checked operations (see `setup.rs`). The shell never touches the
 /// microphone itself: agentosd records, so it can audit and show every use.
-fn handle_ipc(body: &str, conn: &Conn, proxy: &EventLoopProxy<Value>) {
+fn handle_ipc(
+    body: &str,
+    conn: &Conn,
+    proxy: &EventLoopProxy<Value>,
+    tasks: Option<&tokio::sync::mpsc::UnboundedSender<kernel::Request>>,
+) {
     let Ok(v) = serde_json::from_str::<Value>(body) else {
         return;
     };
+    // On the task service, intents and approvals are protocol requests.
+    if let (Some(tasks), Some(request)) = (tasks, butler_request(&v)) {
+        let _ = tasks.send(request);
+        return;
+    }
     let out = match v.get("type").and_then(Value::as_str) {
         Some("intent") => match v.get("text").and_then(Value::as_str) {
             Some(t) => json!({"type": "intent", "text": t}),
             None => return,
         },
         Some("confirm") => match v.get("approved").and_then(Value::as_bool) {
-            Some(a) => json!({"type": "confirm", "approved": a}),
+            Some(a) => {
+                // Which task is answered, and the PIN for an irreversible
+                // step, belong to the answer: without them the daemon answers
+                // its newest waiting task and can never accept a PIN.
+                let mut out = json!({"type": "confirm", "approved": a});
+                if let Some(task) = v.get("task").and_then(Value::as_u64) {
+                    out["task"] = json!(task);
+                }
+                if let Some(pin) = pin_of(&v) {
+                    out["pin"] = json!(pin);
+                }
+                out
+            }
             None => return,
         },
         Some("listen") => match v.get("action").and_then(Value::as_str) {
@@ -292,8 +364,21 @@ fn main() -> wry::Result<()> {
     }
 
     let conn: Conn = Arc::new(Mutex::new(None));
-    {
+    // One backend: the task service over protocol v1, or the older agentosd.
+    let tasks = task_socket().map(|socket| {
+        let (requests, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let proxy = event_loop.create_proxy();
+        eprintln!("agentos-shell：连接任务服务 {}", socket.display());
+        std::thread::spawn(move || {
+            kernel::run(socket, receiver, move |event| {
+                proxy.send_event(event).is_ok()
+            })
+        });
+        requests
+    });
+    if tasks.is_none() {
         let (conn, proxy, path) = (conn.clone(), event_loop.create_proxy(), path.clone());
+        eprintln!("agentos-shell：连接 {}", path.display());
         std::thread::spawn(move || daemon_loop(path, conn, proxy));
     }
 
@@ -301,7 +386,7 @@ fn main() -> wry::Result<()> {
     let builder = WebViewBuilder::new()
         .with_html(UI)
         .with_background_color((11, 15, 28, 255))
-        .with_ipc_handler(move |req| handle_ipc(req.body(), &ipc_conn, &ipc_proxy));
+        .with_ipc_handler(move |req| handle_ipc(req.body(), &ipc_conn, &ipc_proxy, tasks.as_ref()));
 
     #[cfg(target_os = "linux")]
     let webview = {
@@ -312,7 +397,6 @@ fn main() -> wry::Result<()> {
     #[cfg(not(target_os = "linux"))]
     let webview = builder.build(&window)?;
 
-    eprintln!("agentos-shell：连接 {}", path.display());
     // Events that arrive before the page has loaded wait here.
     let mut queued: Option<Vec<Value>> = Some(Vec::new());
     event_loop.run(move |event, _, control_flow| {
@@ -396,5 +480,61 @@ mod tests {
         );
         assert_eq!(a(r#"{"type":"system","action":"rm -rf /"}"#), None);
         assert_eq!(a(r#"{"type":"system"}"#), None);
+    }
+
+    #[test]
+    fn the_task_service_can_be_selected_as_the_backend() {
+        let parse = |args: &[&str]| command_line(args.iter().map(|a| a.to_string()));
+        for args in [
+            vec!["--taskd"],
+            vec!["--task-socket", "/run/user/1000/control.sock"],
+        ] {
+            assert_eq!(parse(&args), Ok(None), "{args:?}");
+        }
+        assert!(parse(&["--task-socket"]).is_err());
+    }
+
+    #[test]
+    fn approvals_keep_their_task_and_pin_and_nothing_else_from_the_page() {
+        let v = |s: &str| serde_json::from_str::<Value>(s).unwrap();
+        assert_eq!(
+            butler_request(&v(
+                r#"{"type":"confirm","approved":true,"task":3,"pin":"1234","token":"forged"}"#
+            )),
+            Some(kernel::Request::Confirm {
+                approved: true,
+                task: Some(3),
+                pin: Some("1234".into())
+            })
+        );
+        assert_eq!(
+            butler_request(&v(r#"{"type":"confirm","approved":false}"#)),
+            Some(kernel::Request::Confirm {
+                approved: false,
+                task: None,
+                pin: None
+            })
+        );
+        assert_eq!(
+            butler_request(&v(r#"{"type":"intent","text":"记一下 牛奶"}"#)),
+            Some(kernel::Request::Intent("记一下 牛奶".into()))
+        );
+        // Not a PIN: too long, not digits, empty, or not a string.
+        for pin in [
+            json!("12345678901234"),
+            json!("12ab"),
+            json!(""),
+            json!(1234),
+        ] {
+            let body = json!({"type": "confirm", "approved": true, "pin": pin});
+            assert_eq!(pin_of(&body), None, "{body}");
+        }
+        for other in [
+            r#"{"type":"system","action":"reboot"}"#,
+            r#"{"type":"confirm"}"#,
+            r#"{"type":"intent"}"#,
+        ] {
+            assert_eq!(butler_request(&v(other)), None, "{other}");
+        }
     }
 }

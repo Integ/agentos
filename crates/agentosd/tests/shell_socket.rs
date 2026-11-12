@@ -6,13 +6,13 @@ use std::time::Duration;
 
 use agentos_audit::AuditLog;
 use agentos_core::{now_ms, AgentId};
+use agentos_planner::RulePlanner;
 use agentos_policy::PolicyEngine;
+use agentos_services::expression::ExpressionHub;
+use agentos_services::perception::PerceptionHub;
+use agentos_services::registry::CapabilityRegistry;
 use agentosd::builtin;
 use agentosd::butler::{grant_manifest, Butler};
-use agentosd::expression::ExpressionHub;
-use agentosd::perception::PerceptionHub;
-use agentosd::planner::RulePlanner;
-use agentosd::registry::CapabilityRegistry;
 use agentosd::shell_api::{self, ShellServer, SocketOutput};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};

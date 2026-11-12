@@ -576,9 +576,9 @@ for line in sys.stdin:
             "mcp.fake_srv.wipe_all"
         );
         let long = capability_for("srv", &"x".repeat(200)).unwrap();
-        let tool = crate::planner::tool_name(&long);
+        let tool = agentos_planner::tool_name(&long);
         assert!(tool.len() <= MAX_TOOL_NAME, "{tool}");
-        assert_eq!(crate::planner::capability_name(&tool), long);
+        assert_eq!(agentos_planner::capability_name(&tool), long);
         assert!(capability_for("", "x").is_none());
         assert!(capability_for("srv", "!!!").is_none());
     }

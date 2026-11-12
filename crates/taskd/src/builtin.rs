@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::registry::CapabilityRegistry;
+use agentos_services::registry::CapabilityRegistry;
 
 const MAX_NOTE_CHARS: usize = 16_384;
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);

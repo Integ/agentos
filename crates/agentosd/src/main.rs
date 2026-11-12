@@ -8,27 +8,27 @@ use std::sync::Arc;
 
 use agentos_audit::AuditLog;
 use agentos_core::{AgentId, PerceptKind, Sensor};
+use agentos_planner::claude::{ClaudeConfig, ClaudePlanner};
+use agentos_planner::llm::TextModel;
+use agentos_planner::openai::{OpenAiConfig, OpenAiPlanner};
+use agentos_planner::{Planner, RulePlanner};
 use agentos_policy::PolicyEngine;
-use agentosd::agents::AgentDirectory;
-use agentosd::blackboard::{self, Blackboard};
+use agentos_services::agents::AgentDirectory;
+use agentos_services::blackboard::{self, Blackboard};
+use agentos_services::devices::{ConsoleOutput, LineSensor};
+use agentos_services::evolve::{self, LlmGenerator, NoGenerator, PluginGenerator};
+use agentos_services::expression::ExpressionHub;
+use agentos_services::homeassistant::{self, Hass, HassConfig};
+use agentos_services::identity::{self, PinCheck, PinVault};
+use agentos_services::judge::LlmJudge;
+use agentos_services::mcp::{self, McpConfig};
+use agentos_services::perception::PerceptionHub;
+use agentos_services::plugin::SandboxMode;
+use agentos_services::plugin_store::PluginManager;
+use agentos_services::registry::CapabilityRegistry;
 use agentosd::builtin;
 use agentosd::butler::{grant_manifest, Butler};
-use agentosd::claude_planner::{ClaudeConfig, ClaudePlanner};
 use agentosd::crash;
-use agentosd::devices::{ConsoleOutput, LineSensor};
-use agentosd::evolve::{self, LlmGenerator, NoGenerator, PluginGenerator};
-use agentosd::expression::ExpressionHub;
-use agentosd::homeassistant::{self, Hass, HassConfig};
-use agentosd::identity::{self, PinCheck, PinVault};
-use agentosd::judge::LlmJudge;
-use agentosd::llm::TextModel;
-use agentosd::mcp::{self, McpConfig};
-use agentosd::openai_planner::{OpenAiConfig, OpenAiPlanner};
-use agentosd::perception::PerceptionHub;
-use agentosd::planner::{Planner, RulePlanner};
-use agentosd::plugin::SandboxMode;
-use agentosd::plugin_store::PluginManager;
-use agentosd::registry::CapabilityRegistry;
 use agentosd::shell_api::{self, ShellServer, SocketOutput};
 use agentosd::tasks::TaskStore;
 use agentosd::voice::{SpeechOutput, Voice, VoiceConfig, MIC_DEVICE};
@@ -313,7 +313,16 @@ async fn main() -> std::io::Result<()> {
         return verify_audit(&audit_path(&home));
     }
     crash::install(&home);
-    let audit = Arc::new(AuditLog::open(audit_path(&home))?);
+    // A damaged or altered log must not keep the machine from starting: it
+    // is set aside untouched and a new one begins, saying so.
+    let (audit, set_aside) = AuditLog::open_or_set_aside(audit_path(&home))?;
+    if let Some(old) = set_aside {
+        eprintln!(
+            "审计日志无法继续写入（已损坏或被改动），原文件保留为 {}，已开始新的日志。",
+            old.display()
+        );
+    }
+    let audit = Arc::new(audit);
     if let Some(summary) = crash::take_last(&home) {
         eprintln!(
             "上次 agentosd 异常退出：{summary}\n  完整报告：{}（也在 journalctl -t agentosd 里）",

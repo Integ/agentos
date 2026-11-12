@@ -17,8 +17,8 @@ use agentos_core::{now_ms, AgentId, CapabilitySpec, Intent, RiskLevel};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::blackboard::save;
-use crate::planner::{Plan, Round, Step, ToolResult};
+use agentos_planner::{Plan, Round, Step, ToolResult};
+use agentos_services::blackboard::save;
 
 /// Finished tasks kept on disk (the agent's long-term task memory).
 pub const KEEP_FINISHED: usize = 200;

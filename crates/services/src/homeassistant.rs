@@ -28,8 +28,8 @@ use agentos_core::{Capability, CapabilityError, CapabilityName, CapabilitySpec, 
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 
-use crate::llm::{send_with_retry, Retry};
 use crate::registry::CapabilityRegistry;
+use agentos_planner::llm::{send_with_retry, Retry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HassConfig {
@@ -556,7 +556,7 @@ pub fn register_all(reg: &mut CapabilityRegistry, hass: Arc<Hass>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_http::sequence_server;
+    use agentos_planner::test_http::sequence_server;
 
     fn hass(url: &str) -> Arc<Hass> {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();

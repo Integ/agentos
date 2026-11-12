@@ -11,15 +11,15 @@ use agentos_core::{
     ExpressionKind, Intent, IntentId, Modality, Output, OutputError, PrivacyClass, RiskLevel,
     Urgency,
 };
+use agentos_planner::{Plan, Planner, RulePlanner, Step};
 use agentos_policy::PolicyEngine;
+use agentos_services::evolve::{self, GenerationRequest, PluginGenerator};
+use agentos_services::expression::ExpressionHub;
+use agentos_services::plugin::{Permissions, PluginManifest, SandboxMode, TestCase};
+use agentos_services::plugin_store::{PluginDraft, PluginManager};
+use agentos_services::registry::CapabilityRegistry;
 use agentosd::builtin;
 use agentosd::butler::{grant_manifest, Butler};
-use agentosd::evolve::{self, GenerationRequest, PluginGenerator};
-use agentosd::expression::ExpressionHub;
-use agentosd::planner::{Plan, Planner, RulePlanner, Step};
-use agentosd::plugin::{Permissions, PluginManifest, SandboxMode, TestCase};
-use agentosd::plugin_store::{PluginDraft, PluginManager};
-use agentosd::registry::CapabilityRegistry;
 use async_trait::async_trait;
 use serde_json::json;
 

@@ -44,8 +44,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::identity::{PinCheck, PinVault};
 use crate::voice::{SpeakMode, Voice, VoiceControl};
+use agentos_services::identity::{PinCheck, PinVault};
 
 /// Fan-out of structured events to every connected shell.
 pub type EventBus = broadcast::Sender<Value>;

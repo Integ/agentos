@@ -37,7 +37,7 @@ const state = {
   generatedScene: null, generatedKey: '',
 };
 const sceneLabels = { overview: ['01', '此刻'], focus: ['02', '专注空间'], memory: ['03', '记忆'], activity: ['04', '任务轨迹'], clock: ['05', '时间'], help: ['06', '能力'], task: ['04', '意图执行'], note: ['03', '记忆'] };
-const stateLabels = { queued: '等待执行', planning: '正在规划', running: '正在执行', succeeded: '已完成', unhandled: '没有听懂', failed: '执行失败', awaiting_confirmation: '等待你的批准', cancelled: '已取消', interrupted: '已中断', pending: '尚未开始' };
+const stateLabels = { queued: '等待执行', planning: '正在规划', running: '正在执行', succeeded: '已完成', unhandled: '没有听懂', failed: '执行失败', awaiting_confirmation: '等待你的批准', cancelled: '已取消', interrupted: '已中断', pending: '尚未开始', skipped: '未执行' };
 const terminalStates = new Set(['succeeded', 'unhandled', 'failed', 'cancelled', 'interrupted']);
 let orbFrame = 0;
 let orbResizeObserver = null;
@@ -208,10 +208,10 @@ function statusIcon(task) { return icon(task.state === 'succeeded' ? 'check' : t
 function renderTaskDetail(task) {
   if (!task) return `<div class="empty-state">${icon('orbit')}<h3>每个意图，都有来处。</h3><p>选择一条轨迹，查看它的执行过程。</p></div>`;
   const id = taskId(task);
-  const stepRows = (task.steps || []).map((step, index) => `<div class="step"><strong>${String(index + 1).padStart(2, '0')} · ${e(step.capability)}</strong><p>${e(stateLabels[step.state] || step.state)}</p><details><summary class="count-label">参数与结果</summary><pre class="json-output">${e(JSON.stringify({ args: step.args, result: step.result }, null, 2))}</pre></details></div>`).join('');
+  const stepRows = (task.steps || []).map((step, index) => `<div class="step"><strong>${String(index + 1).padStart(2, '0')} · ${step.agent ? `〔${e(step.agent)}〕` : ''}${e(step.capability)}</strong><p>${e(stateLabels[step.state] || step.state)}</p><details><summary class="count-label">参数与结果</summary><pre class="json-output">${e(JSON.stringify({ args: step.args, result: step.result }, null, 2))}</pre></details></div>`).join('');
   const noteResult = (task.steps || []).findLast(s => s.capability === 'notes.list' && s.state === 'succeeded' && Array.isArray(s.result?.notes));
   const confirmation = state.approval?.id === task.id && state.approval?.token === task.confirmation?.token && state.approval.expires_at_ms > Date.now() ? state.approval : null;
-  const approval = task.state === 'awaiting_confirmation' ? `<section class="approval-panel"><h3>这一步，需要你的明确批准。</h3><p>请查看具体能力、参数和原因。批准仅针对这一任务的这一步。</p>${confirmation ? `<pre class="json-output">${e(JSON.stringify({ capability: task.steps?.[confirmation.step]?.capability, args: task.steps?.[confirmation.step]?.args, reason: task.message }, null, 2))}</pre><button class="primary-button" id="approve-task" data-task-id="${e(id)}">批准第 ${confirmation.step + 1} 步</button><p>批准请求将在 ${e(formatTime(new Date(confirmation.expires_at_ms)))} 过期。</p>` : '<button class="secondary-button" id="refresh-approval">读取并查看当前批准请求</button>'}</section>` : '';
+  const approval = task.state === 'awaiting_confirmation' ? `<section class="approval-panel"><h3>这一步，需要你的明确批准。</h3><p>请查看具体能力、参数和原因。批准仅针对这一任务的这一步。</p>${confirmation ? `<pre class="json-output">${e(JSON.stringify({ capability: task.steps?.[confirmation.step]?.capability, args: task.steps?.[confirmation.step]?.args, reason: task.message }, null, 2))}</pre>${confirmation.verify_identity ? '<p>这一步不可逆，需要输入 PIN 才能批准。PIN 只发给本机后台核对，不会保存。</p><label class="count-label" for="approve-pin">PIN</label> <input id="approve-pin" type="password" inputmode="numeric" autocomplete="off" maxlength="12">' : ''}<button class="primary-button" id="approve-task" data-task-id="${e(id)}">批准第 ${confirmation.step + 1} 步</button><p>批准请求将在 ${e(formatTime(new Date(confirmation.expires_at_ms)))} 过期。</p>` : '<button class="secondary-button" id="refresh-approval">读取并查看当前批准请求</button>'}</section>` : '';
   return `<div class="detail-kicker">${e(id.toUpperCase())} <span> / ${e(stateLabels[task.state] || task.state)}</span></div><h2>${e(taskText(task))}</h2>${task.message ? `<p class="detail-message">${e(task.message)}</p>` : ''}${stepRows ? `<div class="steps">${stepRows}</div>` : ''}${noteResult ? `<div class="result-notes"><span class="eyebrow">返回的笔记</span>${noteResult.result.notes.length ? noteResult.result.notes.map(n => `<p>${e(n)}</p>`).join('') : '<p>笔记本是空的。</p>'}</div>` : ''}${approval}${state.connected && !terminalStates.has(task.state) ? `<div style="margin-top:20px"><button class="secondary-button" id="cancel-task" data-task-id="${e(id)}">停止后续步骤</button></div>` : ''}${task.local ? '<p class="inline-note">此操作在浏览器内完成，不属于后台任务。</p>' : ''}`;
 }
 function renderActivity(scene) {
@@ -874,6 +874,10 @@ document.addEventListener('click', async event => {
   if (button.id === 'refresh-approval') { await selectTask(taskId(state.selected), { readApproval: true }); return; }
   if (button.id === 'approve-task') {
     const shown = state.approval; if (!shown || shown.expires_at_ms <= Date.now() || !state.connected) { state.approval = null; render(); return; }
+    // Read the PIN before anything re-renders the panel, and keep it only for this request.
+    const pinInput = $('#approve-pin'); const pin = pinInput ? pinInput.value.trim() : '';
+    if (shown.verify_identity && !pin) { toast('这一步不可逆，请先输入 PIN。'); pinInput?.focus(); return; }
+    if (pinInput) pinInput.value = '';
     button.disabled = true;
     try {
       const fresh = (await api(`/tasks/${encodeURIComponent(button.dataset.taskId)}`)).task;
@@ -881,7 +885,7 @@ document.addEventListener('click', async event => {
         state.selected = fresh; state.approval = null; render(); respond('批准请求已经变化，请重新读取并查看。'); return;
       }
       state.approval = null;
-      await api(`/tasks/${encodeURIComponent(button.dataset.taskId)}/approve`, { step: shown.step + 1, confirmation: shown.token });
+      await api(`/tasks/${encodeURIComponent(button.dataset.taskId)}/approve`, { step: shown.step + 1, confirmation: shown.token, ...(shown.verify_identity ? { pin } : {}) });
       respond('这一具体步骤的批准已入队，后台会再次校验。'); await refreshTasks(); render();
     } catch (error) { state.approval = null; handleError(error); render(); } return;
   }

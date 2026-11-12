@@ -26,17 +26,15 @@ async fn main() -> io::Result<()> {
             Ok(())
         }
         Action::Workbench => return workbench::run(client).await,
-        Action::Request(command) => match client.request(command).await {
-            Ok(reply) => {
-                if options.json {
-                    println!("{}", serde_json::to_string(&reply)?);
-                } else {
-                    println!("{}", render::reply_text(&reply));
-                }
-                Ok(())
+        Action::Request(mut command) => {
+            if let (true, Command::Approve { pin, .. }) = (options.pin_stdin, &mut command) {
+                eprint!("PIN：");
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                *pin = Some(line.trim().to_string());
             }
-            Err(error) => Err(error),
-        },
+            request(&client, command, options.json).await
+        }
         Action::SubmitAndWait { text, timeout } => {
             match submit_and_wait(&client, text, timeout, options.json).await {
                 Ok(0) => Ok(()),
@@ -106,6 +104,19 @@ async fn submit_and_wait(
             Err(error)
         }
     }
+}
+
+async fn request(client: &Client, command: Command, json: bool) -> Result<(), ClientError> {
+    let reply = client.request(command).await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&reply).expect("a reply is serializable")
+        );
+    } else {
+        println!("{}", render::reply_text(&reply));
+    }
+    Ok(())
 }
 
 async fn watch(client: Client, after: Option<u64>, json: bool) -> Result<(), ClientError> {

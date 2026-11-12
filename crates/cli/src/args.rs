@@ -11,7 +11,7 @@ use agentos_runtime::{TaskId, TaskState};
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(300);
 const MAX_WAIT_SECONDS: u64 = 86_400;
 
-pub const HELP: &str = "AgentOS · 独立任务工作台\n\n用法：agentos [--socket 路径 | --state-dir 路径] [--json] <命令>\n\n  workbench                         实时终端工作台（默认）\n  submit [--wait] [--timeout 秒] <意图>\n                                    提交任务，客户端退出后仍继续；--wait 等到任务结束再返回\n  tasks [--before task-N] [--limit N] [--state 状态]\n  task task-N                       查看计划、结果与批准令牌\n  cancel task-N                     取消任务的后续步骤\n  approve task-N 步骤 --confirmation 令牌\n  capabilities                      查看能力与风险\n  read <能力> [JSON 参数]           直接读取只读（L0）能力，不创建任务\n  watch [--after revision]           持续接收变更/重新同步通知\n  --help                            查看帮助\n  --version                         查看版本\n\n--json 应放在命令前，输出结构化 JSON。批准步骤从 1 开始。\n工作台 /quit 只关闭客户端，不停止后台服务。\n\n退出码：0 成功；1 连接、协议或后台错误；2 用法错误。\nsubmit --wait 另有：3 任务结束但未成功（未能处理、失败、已取消或已中断）；\n4 任务在等待批准；5 等待超时（任务仍在后台继续）。";
+pub const HELP: &str = "AgentOS · 独立任务工作台\n\n用法：agentos [--socket 路径 | --state-dir 路径] [--json] <命令>\n\n  workbench                         实时终端工作台（默认）\n  submit [--wait] [--timeout 秒] <意图>\n                                    提交任务，客户端退出后仍继续；--wait 等到任务结束再返回\n  tasks [--before task-N] [--limit N] [--state 状态]\n  task task-N                       查看计划、结果与批准令牌\n  cancel task-N                     取消任务的后续步骤\n  approve task-N 步骤 --confirmation 令牌 [--pin-stdin]\n                                    批准一步；不可逆的步骤加 --pin-stdin，从标准输入读取 PIN\n  capabilities                      查看能力与风险\n  read <能力> [JSON 参数]           直接读取只读（L0）能力，不创建任务\n  watch [--after revision]           持续接收变更/重新同步通知\n  --help                            查看帮助\n  --version                         查看版本\n\n--json 应放在命令前，输出结构化 JSON。批准步骤从 1 开始。\n工作台 /quit 只关闭客户端，不停止后台服务。\n\n退出码：0 成功；1 连接、协议或后台错误；2 用法错误。\nsubmit --wait 另有：3 任务结束但未成功（未能处理、失败、已取消或已中断）；\n4 任务在等待批准；5 等待超时（任务仍在后台继续）。";
 
 pub const WORKBENCH_HELP: &str = "普通输入：提交意图；任务在后台继续\n/tasks 或 /refresh：刷新当前页　/next：更早任务　/prev：返回上一页\n/latest：最近任务　/task task-N：选中并展示完整计划与结果\n/cancel task-N：取消后续步骤　/approve task-N 步骤：批准当前已展示的确认请求\n/capabilities：查看能力　/help：帮助　/quit：退出工作台";
 
@@ -20,6 +20,8 @@ pub struct Options {
     pub socket: PathBuf,
     pub json: bool,
     pub action: Action,
+    /// Read the PIN for an irreversible step from standard input.
+    pub pin_stdin: bool,
 }
 
 #[derive(Debug)]
@@ -78,6 +80,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
                     socket: PathBuf::new(),
                     json,
                     action: Action::Help,
+                    pin_stdin: false,
                 })
             }
             "--version" | "-V" => {
@@ -85,6 +88,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
                     socket: PathBuf::new(),
                     json,
                     action: Action::Version,
+                    pin_stdin: false,
                 })
             }
             _ => break,
@@ -101,6 +105,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
         }),
     };
     let rest = &args[i..];
+    let mut pin_stdin = false;
     let action = match rest.first().map(String::as_str) {
         None => Action::Workbench,
         Some("workbench") if rest.len() == 1 => Action::Workbench,
@@ -185,7 +190,11 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
         Some("cancel") if rest.len() == 2 => Action::Request(Command::Cancel {
             id: task_id(&rest[1])?,
         }),
-        Some("approve") if rest.len() == 5 && rest[3] == "--confirmation" => {
+        Some("approve")
+            if (rest.len() == 5 || (rest.len() == 6 && rest[5] == "--pin-stdin"))
+                && rest[3] == "--confirmation" =>
+        {
+            pin_stdin = rest.len() == 6;
             let step = rest[2]
                 .parse::<usize>()
                 .ok()
@@ -198,6 +207,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
                 id: task_id(&rest[1])?,
                 step,
                 confirmation: rest[4].clone(),
+                // Filled in from standard input, never from the command line,
+                // where it would end up in shell history and process lists.
+                pin: None,
             })
         }
         Some("capabilities") if rest.len() == 1 => Action::Request(Command::Capabilities {}),
@@ -233,6 +245,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
         socket,
         json,
         action,
+        pin_stdin,
     })
 }
 
@@ -302,6 +315,7 @@ mod tests {
             id,
             step,
             confirmation,
+            pin,
         }) = argv(&["approve", "task-3", "2", "--confirmation", "nonce"])
             .unwrap()
             .action
@@ -309,6 +323,33 @@ mod tests {
             panic!("not approval")
         };
         assert_eq!((id, step, confirmation), (TaskId(3), 2, "nonce".into()));
+        assert!(pin.is_none());
+        // A PIN is only ever read from standard input, never from an argument.
+        let with_pin = argv(&[
+            "approve",
+            "task-3",
+            "2",
+            "--confirmation",
+            "nonce",
+            "--pin-stdin",
+        ])
+        .unwrap();
+        assert!(with_pin.pin_stdin);
+        assert!(!argv(&["tasks"]).unwrap().pin_stdin);
+        for args in [
+            vec![
+                "approve",
+                "task-3",
+                "2",
+                "--confirmation",
+                "nonce",
+                "--pin",
+                "1234",
+            ],
+            vec!["approve", "task-3", "2", "--confirmation", "nonce", "1234"],
+        ] {
+            assert!(argv(&args).is_err(), "{args:?}");
+        }
     }
 
     #[test]

@@ -1,5 +1,7 @@
 # 智能家居（Home Assistant）
 
+> **在任务服务上。** `agentos-taskd` 同样读取 `HASS_URL` 和 `HASS_TOKEN`。开锁、撤防这类 L3 操作必须先用 `agentos-taskd --set-pin` 设置 PIN，否则会被拒绝执行；批准时输入 PIN。
+
 AgentOS 通过 [Home Assistant](https://www.home-assistant.io/) 控制家里的设备。HA 已经接好了 Zigbee、Matter、Wi-Fi 插座、空调、门锁等，管家只需要和它的 REST API 对话，不必自己实现每一种协议。
 
 ## 配置

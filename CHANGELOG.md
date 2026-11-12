@@ -12,7 +12,21 @@
 - **CLI**：`agentos submit --wait [--timeout 秒]` 等到任务结束再返回，退出码区分成功、未成功、等待批准和超时；`agentos read <能力>` 直接读取；`tasks --state unhandled` 可筛选；`capabilities` 的风险等级写作 L0–L3。
 - **`--help` 和 `--version`**：`agentosd`、`agentos-shell`、`agentos-taskd`、`agentos-web-shell` 都支持。此前 `agentosd --help` 会直接启动守护进程，`agentos-shell --help` 会直接打开桌面窗口。`agentosd` 和 `agentos-shell` 遇到不认识的参数现在报错退出，不再忽略。
 
-**兼容性**：`unhandled` 是协议 v1 任务状态的新增取值，`read` 是新增方法。严格解析状态的旧客户端需要升级后才能读取含 `unhandled` 的任务；新快照不保证旧程序可读。
+合并成一套系统：`agentos-taskd` 成为唯一的任务内核，原来只有 `agentosd` 才有的能力都迁了进来。
+
+- **任务内核支持多轮规划**：每轮的结果交还给规划器，由它决定下一轮或回答，最多 8 轮；步骤逐轮追加到任务上。一步失败后同轮后续步骤标为 `skipped`，规划器可以换个办法；最后一轮有调用没成功的任务记为失败。
+- **迁入任务服务**：子 Agent 委派（步骤记在同一个任务里并标上 Agent）、共享黑板、跨任务上下文、裁判（`AGENTOS_JUDGE=1`）、污点传播、MCP（状态目录的 `mcp.json`）、自我进化插件、Home Assistant、L3 的 PIN（`agentos-taskd --set-pin`）。
+- **L3 不再一律拒绝**：设置 PIN 后，不可逆的步骤进入等待批准，批准时必须带 PIN（`agentos approve … --pin-stdin`，或在 Web Shell、原生桌面的批准面板里输入）；没有设置 PIN 时仍然拒绝。
+- **一份审计日志实现**：同步落盘、单一写入者，再加哈希链（`agentos-taskd --verify-audit`）。只容忍崩溃造成的最后一行不完整；其他损坏或改动会让守护进程把原文件改名保留、另开新日志并说明原因。两个守护进程都用它。
+- **共享 crate**：`agentos-planner`（规划契约、规则规划器、Claude 与 OpenAI 兼容规划器，合并了两边的实现：多轮接口加上更严格的响应解析）和 `agentos-services`（能力注册表、子 Agent、黑板、裁判、PIN、MCP、插件、智能家居）。`agentosd` 和 `agentos-taskd` 里重复的文件已删除。
+- **原生桌面可以连接任务服务**：`agentos-shell --taskd` 通过协议 v1 工作。这个模式下暂时没有本机语音。
+- **修复：原生桌面的确认丢失任务编号和 PIN**。桌面壳转发确认时只保留了“同意/拒绝”，所以设置 PIN 后 L3 操作在图形界面里无法确认，多个任务等待时回答总是落到最新的那个。
+- **规则规划器的行为变化（`agentosd`）**：只认完整的命令。“看看我的笔记”“把笔记清空”这类包含关键词的句子不再匹配，需要说“看看笔记”“清空笔记”。
+- 文档：两份架构说明合并为 [docs/architecture.md](docs/architecture.md)，新增 [AGENTS.md](AGENTS.md)。
+
+**尚未完成**：镜像仍默认启动 `agentosd`，因为按住说话的本机语音还由它承载；见[架构](docs/architecture.md#尚未合并的部分)。
+
+**兼容性**：协议 v1 新增了 `read` 方法、`unhandled` 任务状态、步骤的 `id` / `agent` 字段和 `skipped` 状态、确认请求的 `verify_identity`、`approve` 的 `pin`。严格解析的旧客户端需要升级；任务快照升到 schema 3，旧快照自动读取，新快照不保证旧程序可读。`agentos-taskd` 的任务在一步失败后不再立即结束，而是把失败交还给规划器。
 
 ## v0.3.0
 

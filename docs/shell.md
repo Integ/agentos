@@ -23,6 +23,7 @@ agentos-shell (WebKit 全屏窗口)  ⇄  Unix socket (JSON Lines)  ⇄  agentos
 ```
 
 - 界面整体画在一个 WebKit 窗口里（`crates/shell/ui/index.html`），所以毛玻璃效果不依赖合成器支持，sway 下也能用。
+- 也可以连接任务服务：`agentos-shell --taskd`（默认状态目录），或 `--task-socket <路径>` / 环境变量 `AGENTOS_TASK_SOCKET`。这时桌面通过[协议 v1](protocol-v1.md) 工作：订阅任务变化，读取变化的任务，把它与页面上次看到的样子之间的差别翻译成下面的页面事件；意图是 `submit`，确认是 `approve`（不可逆的步骤带上确认框里输入的 PIN），取消是 `cancel`。批准令牌留在桥里，不交给页面。这个模式下没有本机语音。
 - shell 本身没有任何权限。它只把意图和确认结果转发给 `agentosd`，所有操作仍然经过策略引擎并写入审计日志。界面能让 shell 做的本地动作只有系统菜单里固定的几项，以及设置助理的几个操作（见下文）。
 - socket 权限是 0600，只有当前用户能连接。
 

@@ -2,19 +2,19 @@
 
 use std::sync::{Arc, Mutex};
 
-use agentos_audit::durable::{AuditEntry, AuditEvent, AuditLog};
+use agentos_audit::{AuditEntry, AuditEvent, AuditLog};
 use agentos_core::{
     now_ms, AgentId, Capability, CapabilityError, CapabilityName, CapabilitySpec, DeviceId,
     DeviceInfo, Expression, ExpressionKind, Intent, IntentId, Modality, Output, OutputError,
     PrivacyClass, RiskLevel, Urgency,
 };
+use agentos_planner::{Plan, Planner, RulePlanner, Step};
 use agentos_policy::PolicyEngine;
 use agentos_runtime::{StepState, Task, TaskId, TaskState};
+use agentos_services::expression::ExpressionHub;
+use agentos_services::registry::CapabilityRegistry;
 use agentos_taskd::builtin::{self, NoteStore};
 use agentos_taskd::butler::{grant_manifest, Butler};
-use agentos_taskd::expression::ExpressionHub;
-use agentos_taskd::planner::{Plan, Planner, RulePlanner, Step};
-use agentos_taskd::registry::CapabilityRegistry;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
@@ -77,10 +77,7 @@ fn plan(names: &[&str]) -> Plan {
     Plan {
         steps: names
             .iter()
-            .map(|name| Step {
-                capability: CapabilityName::new(*name),
-                args: json!({}),
-            })
+            .map(|name| Step::new(CapabilityName::new(*name), json!({})))
             .collect(),
         ..Plan::default()
     }
@@ -432,7 +429,8 @@ async fn capability_failure_stops_the_remaining_plan() {
     h.say("测试计划").await;
     assert_eq!(h.task(1).state, TaskState::Failed);
     assert_eq!(h.task(1).steps[0].state, StepState::Failed);
-    assert_eq!(h.task(1).steps[1].state, StepState::Pending);
+    // Never started, and recorded as such rather than left looking pending.
+    assert_eq!(h.task(1).steps[1].state, StepState::Skipped);
     assert_eq!(first.count(), 1);
     assert_eq!(second.count(), 0);
     assert_eq!(h.out.last().kind, ExpressionKind::Error);

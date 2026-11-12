@@ -10,7 +10,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 当前版本：**v0.3.0**（[更新日志](CHANGELOG.md)）。
 
-新增持久任务工作台和语音优先的情景式 Web Shell，与现有系统服务及原生桌面并行提供。多轮规划、MCP、插件、智能家居、PIN 和镜像更新继续由 `agentosd` / `agentos-shell` 提供；新的 `agentos-taskd` / `agentos-web-shell` 使用独立协议和状态目录。见[持久任务与 Web Shell](docs/persistent-workspace.md)。
+任务内核是 `agentos-taskd`：持久任务、多轮规划、子 Agent、黑板、MCP、插件、智能家居、PIN 和哈希链审计都在这一个服务里，终端、Web Shell 和原生桌面都通过同一个协议连接它。镜像目前仍默认启动旧的 `agentosd`，因为按住说话的本机语音还没有迁过来；见[架构](docs/architecture.md#尚未合并的部分)。给写代码的 Agent 的说明在 [AGENTS.md](AGENTS.md)。
 
 ## 现在能做什么
 
@@ -55,16 +55,18 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 ```
 crates/
-  core/      核心类型：Intent、Percept、Expression、Capability，Sensor/Output trait
-  policy/    策略引擎：能力授权 + 风险分级确认 + 污点追踪
-  audit/     只追加审计日志（JSON Lines），可回放
-  agentosd/  P0 守护进程：感知中枢 → 管家 Agent → 表达中枢；插件运行时与自我进化（evolve）
-  shell/     图形界面 agentos-shell：玻璃风格桌面，通过 Unix socket 连接 agentosd
-  taskd/     独立持久任务服务 agentos-taskd（协议 v1）
-  web-shell/ 情景式浏览器界面 agentos-web-shell：模型布局与连续实时语音
-  cli/       agentos 命令与独立终端任务工作台
-  runtime/   持久任务、分页、通知、取消与中断恢复
-  ipc/       严格校验、受限帧与本机连接协议
+  core/      词汇表：Intent、Percept、Expression、Capability，Sensor/Output trait
+  runtime/   持久任务：状态、步骤、分页、通知、取消与重启中断
+  ipc/       本地控制协议 v1：严格校验、有界帧与本机路径约定
+  policy/    策略引擎：能力授权 + 风险分级确认 + 污点
+  audit/     只追加审计日志：同步落盘、单一写入者、哈希链
+  planner/   规划契约、离线规则规划器、Claude 与 OpenAI 兼容规划器
+  services/  能力注册表、子 Agent、黑板、裁判、PIN、MCP、插件与自我进化、智能家居
+  taskd/     任务内核 agentos-taskd：管家循环、内置能力、控制服务
+  cli/       agentos 命令与终端任务工作台
+  web-shell/ 浏览器界面 agentos-web-shell：情景布局与连续实时语音
+  shell/     原生桌面 agentos-shell：玻璃风格桌面与设置助理
+  agentosd/  过渡期保留的旧守护进程（本机语音、现有镜像）
 image/       可启动磁盘镜像：构建脚本、系统集成文件（设置助理、会话脚本、agentos-update）、OTA 更新包、QEMU 冒烟测试
 ```
 
@@ -109,7 +111,7 @@ cargo run -p agentos-cli -- --state-dir /tmp/agentos-workspace workbench
 
 打开 Web Shell 输出的完整本机链接。它支持模型根据任务和上下文生成受限布局、连续实时语音及开口打断；API 密钥仅由服务端读取。完整配置见[情景式 Shell](docs/ambient-shell.md)。
 
-这组入口当前提供时钟与笔记能力；MCP、插件、智能家居和多轮规划使用上面的原生桌面入口。两组服务的 socket、任务恢复语义、笔记和审计格式各自独立，不互相读取或迁移状态。现有镜像仍默认启动原生桌面。
+任务服务提供全部能力：把 `mcp.json`、`agents/` 放进状态目录，设置 `HASS_URL` / `HASS_TOKEN`，运行 `agentos-taskd --set-pin` 设置 PIN。原生桌面用 `cargo run -p agentos-shell -- --windowed --task-socket /tmp/agentos-workspace/control.sock` 连接同一个服务。它与旧的 `agentosd` 使用不同的状态目录，数据不互相迁移。
 
 ![AgentOS 桌面](docs/images/shell-desktop.jpg)
 

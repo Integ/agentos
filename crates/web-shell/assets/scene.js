@@ -11,7 +11,7 @@ const KINDS = new Set(['overview', 'focus', 'memory', 'activity', 'clock', 'help
 const LAYOUTS = new Set(['ambient', 'split', 'focused', 'stack']);
 const PANEL_TYPES = new Set(['welcome', 'insight', 'suggestions', 'notes', 'task', 'activity', 'clock', 'focus', 'capabilities']);
 const TASK_STATES = new Set(['queued', 'planning', 'running', 'awaiting_confirmation', 'succeeded', 'unhandled', 'failed', 'cancelled', 'interrupted', 'unknown']);
-const STEP_STATES = new Set(['pending', 'running', 'succeeded', 'failed', 'unknown']);
+const STEP_STATES = new Set(['pending', 'running', 'succeeded', 'failed', 'skipped', 'unknown']);
 const SCENE_KEYS = new Set(['kind', 'eyebrow', 'title', 'description', 'layout', 'panels']);
 const PANEL_KEYS = new Set(['type', 'priority', 'span', 'title', 'description', 'items', 'task', 'active', 'duration', 'unix_ms']);
 const MODEL_PANEL_KEYS = new Set(['type', 'priority', 'span', 'title', 'description']);
@@ -63,6 +63,7 @@ export function normalizeTask(value) {
   if (!safeInteger(id)) return null;
   const steps = Array.isArray(value.steps) ? value.steps.slice(0, 100).filter(isObject).map(step => ({
     capability: text(step.capability, 160),
+    ...(typeof step.agent === 'string' && step.agent ? { agent: text(step.agent, 64) } : {}),
     state: STEP_STATES.has(step.state) ? step.state : 'unknown',
     args: cloneData(step.args),
     result: cloneData(step.result),
@@ -72,7 +73,8 @@ export function normalizeTask(value) {
     && safeInteger(value.confirmation.expires_at_ms)
     && typeof value.confirmation.token === 'string'
     && value.confirmation.token.length <= 4096
-    ? { step: value.confirmation.step, expires_at_ms: value.confirmation.expires_at_ms, token: value.confirmation.token } : null;
+    ? { step: value.confirmation.step, expires_at_ms: value.confirmation.expires_at_ms, token: value.confirmation.token,
+      ...(value.confirmation.verify_identity === true ? { verify_identity: true } : {}) } : null;
   return {
     id,
     text: text(value.intent?.text ?? value.text, 65536),

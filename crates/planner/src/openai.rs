@@ -4,7 +4,8 @@
 //! protocol (vLLM, Ollama, LM Studio, DeepSeek, Qwen/DashScope, Moonshot, ...).
 //! As with the Claude planner, every capability is offered as a function tool;
 //! the returned `tool_calls` become plan steps and still go through the policy
-//! engine before anything runs.
+//! engine before anything runs. Earlier rounds are replayed as assistant
+//! `tool_calls` followed by `tool` messages.
 
 use std::time::Duration;
 
@@ -12,7 +13,8 @@ use agentos_core::{CapabilitySpec, Intent};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::planner::{capability_name, tool_name, Plan, Planner, Step, SYSTEM_PROMPT};
+use crate::llm::{send_with_retry, Retry, TextModel};
+use crate::{capability_name, tool_name, Conversation, Plan, Planner, Step, SYSTEM_PROMPT};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -45,7 +47,20 @@ impl OpenAiConfig {
 }
 
 pub fn build_request(cfg: &OpenAiConfig, intent: &Intent, available: &[CapabilitySpec]) -> Value {
-    let tools: Vec<Value> = available
+    build_turn_request(
+        cfg,
+        &Conversation {
+            system: SYSTEM_PROMPT,
+            intent,
+            history: &[],
+            available,
+        },
+    )
+}
+
+pub fn build_turn_request(cfg: &OpenAiConfig, conv: &Conversation<'_>) -> Value {
+    let tools: Vec<Value> = conv
+        .available
         .iter()
         .map(|s| {
             json!({
@@ -58,17 +73,44 @@ pub fn build_request(cfg: &OpenAiConfig, intent: &Intent, available: &[Capabilit
             })
         })
         .collect();
-    let mut user = intent.text.clone();
-    if let Some(speaker) = &intent.speaker {
+    let mut user = conv.intent.text.clone();
+    if let Some(speaker) = &conv.intent.speaker {
         user = format!("[{speaker}] {user}");
     }
-    let mut body = json!({
-        "model": cfg.model,
-        "messages": [
-            { "role": "system", "content": SYSTEM_PROMPT },
-            { "role": "user", "content": user },
-        ],
-    });
+    let mut messages = vec![
+        json!({ "role": "system", "content": conv.system }),
+        json!({ "role": "user", "content": user }),
+    ];
+    for round in conv.history {
+        let calls: Vec<Value> = round
+            .calls
+            .iter()
+            .map(|c| {
+                json!({
+                    "id": c.id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name(&c.capability),
+                        "arguments": c.args.to_string(),
+                    }
+                })
+            })
+            .collect();
+        messages.push(json!({
+            "role": "assistant",
+            "content": round.text,
+            "tool_calls": calls,
+        }));
+        for r in &round.results {
+            let content = if r.ok {
+                r.content.clone()
+            } else {
+                format!("错误：{}", r.content)
+            };
+            messages.push(json!({ "role": "tool", "tool_call_id": r.id, "content": content }));
+        }
+    }
+    let mut body = json!({ "model": cfg.model, "messages": messages });
     // Some servers reject an empty tool list.
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools);
@@ -129,6 +171,11 @@ pub fn parse_response(body: &Value) -> Plan {
         };
         match args {
             Ok(args) if args.is_object() => steps.push(Step {
+                id: call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
                 capability: capability_name(name),
                 args,
             }),
@@ -155,9 +202,9 @@ pub fn parse_response(body: &Value) -> Plan {
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(str::to_string);
-    if steps.is_empty() && reply.is_none() {
-        return Plan::failed("模型没有返回任何内容。");
-    }
+    // A complete response with neither calls nor text is left to the agent:
+    // after earlier rounds it simply ends the turn; as a first answer it
+    // means the request went unhandled.
     Plan {
         steps,
         reply,
@@ -168,6 +215,7 @@ pub fn parse_response(body: &Value) -> Plan {
 pub struct OpenAiPlanner {
     cfg: OpenAiConfig,
     http: reqwest::Client,
+    retry: Retry,
 }
 
 impl OpenAiPlanner {
@@ -175,12 +223,22 @@ impl OpenAiPlanner {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(600))
             .build()?;
-        Ok(Self { cfg, http })
+        Ok(Self::with_client(cfg, http))
     }
 
     /// Use a caller-built HTTP client (custom proxy, TLS or timeout settings).
     pub fn with_client(cfg: OpenAiConfig, http: reqwest::Client) -> Self {
-        Self { cfg, http }
+        Self {
+            cfg,
+            http,
+            retry: Retry::default(),
+        }
+    }
+
+    /// How rate limits and overloaded or unreachable servers are retried.
+    pub fn with_retry(mut self, retry: Retry) -> Self {
+        self.retry = retry;
+        self
     }
 
     pub fn model(&self) -> &str {
@@ -196,14 +254,15 @@ impl OpenAiPlanner {
             "{}/chat/completions",
             self.cfg.base_url.trim_end_matches('/')
         );
-        let mut req = self.http.post(url).json(body);
-        if let Some(key) = &self.cfg.api_key {
-            req = req.bearer_auth(key);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| format!("无法连接 {}：{e}", self.cfg.base_url))?;
+        let resp = send_with_retry(self.retry, || {
+            let req = self.http.post(&url).json(body);
+            match &self.cfg.api_key {
+                Some(key) => req.bearer_auth(key),
+                None => req,
+            }
+        })
+        .await
+        .map_err(|e| format!("无法连接 {}：{e}", self.cfg.base_url))?;
         let status = resp.status();
         let value: Value = resp
             .json()
@@ -221,9 +280,44 @@ impl OpenAiPlanner {
 }
 
 #[async_trait]
+impl TextModel for OpenAiPlanner {
+    async fn complete(&self, system: &str, user: &str) -> Result<String, String> {
+        let body = json!({
+            "model": self.cfg.model,
+            "messages": [
+                { "role": "system", "content": system },
+                { "role": "user", "content": user },
+            ],
+        });
+        let resp = self.call(&body).await?;
+        let msg = resp
+            .pointer("/choices/0/message")
+            .ok_or("模型没有返回任何内容。")?;
+        if let Some(r) = msg.get("refusal").and_then(Value::as_str) {
+            return Err(format!("模型拒绝了这个请求：{r}"));
+        }
+        Ok(msg
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string())
+    }
+}
+
+#[async_trait]
 impl Planner for OpenAiPlanner {
     async fn plan(&self, intent: &Intent, available: &[CapabilitySpec]) -> Plan {
-        let body = build_request(&self.cfg, intent, available);
+        self.plan_turn(&Conversation {
+            system: SYSTEM_PROMPT,
+            intent,
+            history: &[],
+            available,
+        })
+        .await
+    }
+
+    async fn plan_turn(&self, conv: &Conversation<'_>) -> Plan {
+        let body = build_turn_request(&self.cfg, conv);
         match self.call(&body).await {
             Ok(resp) => parse_response(&resp),
             Err(e) => Plan::failed(e),
@@ -282,6 +376,44 @@ mod tests {
     }
 
     #[test]
+    fn history_is_replayed_as_tool_calls_and_tool_messages() {
+        use crate::{Round, ToolResult};
+        let i = intent("记一下 x");
+        let history = vec![Round {
+            text: None,
+            calls: vec![Step {
+                id: "c1".into(),
+                capability: CapabilityName::new("notes.append"),
+                args: json!({"text": "x"}),
+            }],
+            results: vec![ToolResult {
+                id: "c1".into(),
+                ok: true,
+                content: "{\"message\":\"ok\"}".into(),
+            }],
+        }];
+        let body = build_turn_request(
+            &cfg("x", None),
+            &Conversation {
+                system: "sys",
+                intent: &i,
+                history: &history,
+                available: &specs(),
+            },
+        );
+        let m = &body["messages"];
+        assert_eq!(m[0]["content"], "sys");
+        assert_eq!(m[2]["role"], "assistant");
+        assert_eq!(m[2]["tool_calls"][0]["id"], "c1");
+        assert_eq!(
+            m[2]["tool_calls"][0]["function"]["arguments"],
+            "{\"text\":\"x\"}"
+        );
+        assert_eq!(m[3]["role"], "tool");
+        assert_eq!(m[3]["tool_call_id"], "c1");
+    }
+
+    #[test]
     fn no_capabilities_means_no_tools_field() {
         let body = build_request(&cfg("x", None), &intent("hi"), &[]);
         assert!(body.get("tools").is_none());
@@ -315,56 +447,6 @@ mod tests {
         let plan = parse_response(&resp);
         assert!(plan.steps.is_empty());
         assert!(plan.reply.unwrap().contains("notes__clear"));
-        assert!(plan.error.is_some());
-    }
-
-    #[test]
-    fn incomplete_or_malformed_tool_responses_never_run_a_partial_plan() {
-        let good = json!({"type": "function", "function": {
-            "name": "notes__append", "arguments": "{\"text\":\"x\"}"
-        }});
-        let bad_calls = [
-            json!({"type": "function", "function": {"arguments": "{}"}}),
-            json!({"type": "function", "function": {"name": " ", "arguments": "{}"}}),
-            json!({"type": "function", "function": {"name": "notes__clear"}}),
-            json!({"type": "function", "function": {"name": "notes__clear", "arguments": []}}),
-            json!({"type": "function", "function": {"name": "notes__clear", "arguments": "[]"}}),
-            json!({"type": "function", "function": {"name": "notes__clear", "arguments": "null"}}),
-            json!({"type": "other", "function": {"name": "notes__clear", "arguments": "{}"}}),
-        ];
-        for bad in bad_calls {
-            let plan = parse_response(&json!({"choices": [{"message": {
-                "tool_calls": [good, bad]
-            }}]}));
-            assert!(plan.steps.is_empty());
-            assert!(plan.error.is_some());
-        }
-        for reason in [json!("length"), json!("content_filter"), Value::Null] {
-            let plan = parse_response(&json!({"choices": [{
-                "finish_reason": reason,
-                "message": {"tool_calls": [good]}
-            }]}));
-            assert!(plan.steps.is_empty());
-            assert!(plan.error.is_some());
-        }
-    }
-
-    #[test]
-    fn complete_response_may_run_but_a_refusal_cannot() {
-        let plan = parse_response(&json!({"choices": [{
-            "finish_reason": "tool_calls",
-            "message": {"tool_calls": [{"type": "function", "function": {
-                "name": "notes__list", "arguments": "{}"
-            }}]}
-        }]}));
-        assert_eq!(plan.steps.len(), 1);
-        assert!(plan.error.is_none());
-        let plan = parse_response(&json!({"choices": [{"message": {
-            "refusal": "cannot do this",
-            "tool_calls": [{"function": {"name": "notes__clear", "arguments": "{}"}}]
-        }}]}));
-        assert!(plan.steps.is_empty());
-        assert!(plan.error.is_some());
     }
 
     #[test]
@@ -419,7 +501,55 @@ mod tests {
             .plan(&intent("hi"), &specs())
             .await;
         assert!(plan.steps.is_empty());
-        assert!(plan.error.is_some());
         assert!(plan.reply.unwrap().contains("model not found"));
+    }
+
+    #[test]
+    fn incomplete_or_malformed_tool_responses_never_run_a_partial_plan() {
+        let good = json!({"type": "function", "function": {
+            "name": "notes__append", "arguments": "{\"text\":\"x\"}"
+        }});
+        let bad_calls = [
+            json!({"type": "function", "function": {"arguments": "{}"}}),
+            json!({"type": "function", "function": {"name": " ", "arguments": "{}"}}),
+            json!({"type": "function", "function": {"name": "notes__clear"}}),
+            json!({"type": "function", "function": {"name": "notes__clear", "arguments": []}}),
+            json!({"type": "function", "function": {"name": "notes__clear", "arguments": "[]"}}),
+            json!({"type": "function", "function": {"name": "notes__clear", "arguments": "null"}}),
+            json!({"type": "other", "function": {"name": "notes__clear", "arguments": "{}"}}),
+        ];
+        for bad in bad_calls {
+            let plan = parse_response(&json!({"choices": [{"message": {
+                "tool_calls": [good, bad]
+            }}]}));
+            assert!(plan.steps.is_empty());
+            assert!(plan.error.is_some());
+        }
+        for reason in [json!("length"), json!("content_filter"), Value::Null] {
+            let plan = parse_response(&json!({"choices": [{
+                "finish_reason": reason,
+                "message": {"tool_calls": [good]}
+            }]}));
+            assert!(plan.steps.is_empty());
+            assert!(plan.error.is_some());
+        }
+    }
+
+    #[test]
+    fn complete_response_may_run_but_a_refusal_cannot() {
+        let plan = parse_response(&json!({"choices": [{
+            "finish_reason": "tool_calls",
+            "message": {"tool_calls": [{"type": "function", "function": {
+                "name": "notes__list", "arguments": "{}"
+            }}]}
+        }]}));
+        assert_eq!(plan.steps.len(), 1);
+        assert!(plan.error.is_none());
+        let plan = parse_response(&json!({"choices": [{"message": {
+            "refusal": "cannot do this",
+            "tool_calls": [{"function": {"name": "notes__clear", "arguments": "{}"}}]
+        }}]}));
+        assert!(plan.steps.is_empty());
+        assert!(plan.error.is_some());
     }
 }
