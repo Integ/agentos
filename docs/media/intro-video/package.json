@@ -1,0 +1,9 @@
+{
+  "name": "agentos-intro-video",
+  "private": true,
+  "type": "module",
+  "description": "Renders docs/media/agentos-intro.mp4 from video.html and narration.json",
+  "dependencies": {
+    "playwright-core": "^1.59.0"
+  }
+}

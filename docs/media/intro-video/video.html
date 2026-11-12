@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>AgentOS intro video</title>
+<!--
+  Every scene of the intro video. Nothing here plays on its own: render.mjs
+  calls setup(timeline) once and then seek(seconds) for every frame, so a frame
+  depends only on its timestamp.
+
+  - A <section class="scene" id="…"> matches a scene id in narration.json.
+  - class="a [fade|pop|left|right|lit|type]" animates an element in; data-at
+    says when, relative to the narration: "2" = when line 2 starts,
+    "2+0.8" = 0.8 s later, "@1.5" = 1.5 s into the scene.
+  - Screenshots come from out/intro-video/shots (see capture.mjs).
+-->
+<style>
+  :root {
+    --ink: #eef1ff; --dim: rgba(238,241,255,.64); --faint: rgba(238,241,255,.4);
+    --indigo: #8c9eff; --teal: #5eead4; --amber: #fbbf24; --red: #fb7185; --green: #4ade80; --pink: #f0abfc; --blue: #60a5fa;
+    --glass: rgba(255,255,255,.055); --line: rgba(255,255,255,.13);
+    --sans: "SF Pro Display", "PingFang SC", system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1280px; height: 720px; overflow: hidden; background: #05070f; color: var(--ink); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+
+  /* ---------- backdrop ---------- */
+  #bg { position: absolute; inset: 0; background: #060814; overflow: hidden; }
+  #bg i { position: absolute; border-radius: 50%; filter: blur(90px); opacity: .55; animation: drift 46s ease-in-out infinite alternate; }
+  #bg i:nth-child(1) { width: 760px; height: 620px; left: -160px; top: -260px; background: #2a2f9c; }
+  #bg i:nth-child(2) { width: 700px; height: 560px; right: -180px; top: -200px; background: #5b21a8; animation-duration: 58s; animation-direction: alternate-reverse; }
+  #bg i:nth-child(3) { width: 820px; height: 520px; right: -120px; bottom: -330px; background: #0b6b66; animation-duration: 52s; }
+  #bg i:nth-child(4) { width: 620px; height: 420px; left: -200px; bottom: -280px; background: #1b2a78; animation-duration: 64s; animation-direction: alternate-reverse; }
+  @keyframes drift { from { transform: translate(0,0) scale(1); } to { transform: translate(70px,46px) scale(1.14); } }
+  #stars { position: absolute; inset: 0; }
+  #stars b { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: #dfe6ff; }
+  #vignette { position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 42%, transparent 46%, rgba(3,4,12,.62) 100%); }
+
+  /* ---------- scenes ---------- */
+  .scene { position: absolute; inset: 0; opacity: 0; visibility: hidden; }
+  .kicker { position: absolute; left: 72px; top: 50px; font: 600 13px/1 var(--mono); letter-spacing: .16em; color: var(--teal); text-transform: uppercase; }
+  .kicker::before { content: ""; display: inline-block; width: 26px; height: 2px; background: var(--teal); vertical-align: middle; margin-right: 12px; }
+  .title { position: absolute; left: 72px; top: 76px; font-size: 36px; font-weight: 700; letter-spacing: .01em; }
+  .abs { position: absolute; }
+  .glass { background: var(--glass); border: 1px solid var(--line); border-radius: 16px; backdrop-filter: blur(18px); box-shadow: 0 18px 50px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.07); }
+  .mono { font-family: var(--mono); }
+  .dim { color: var(--dim); }
+
+  /* ---------- timed animations (seeked, never played) ---------- */
+  .a { animation: rise .75s cubic-bezier(.2,.75,.2,1) both; animation-delay: var(--d, 0s); }
+  .a.fade { animation-name: fade; animation-duration: .7s; }
+  .a.pop { animation-name: pop; }
+  .a.left { animation-name: from-left; }
+  .a.right { animation-name: from-right; }
+  .a.lit { animation-name: lit; animation-duration: .6s; }
+  .a.type { animation: type var(--len, 1.1s) steps(28, end) both; animation-delay: var(--d, 0s); }
+  @keyframes rise { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: none; } }
+  @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes pop { from { opacity: 0; transform: scale(.9); } to { opacity: 1; transform: none; } }
+  @keyframes from-left { from { opacity: 0; transform: translateX(-26px); } to { opacity: 1; transform: none; } }
+  @keyframes from-right { from { opacity: 0; transform: translateX(26px); } to { opacity: 1; transform: none; } }
+  @keyframes lit { from { opacity: .32; filter: saturate(.4); } to { opacity: 1; filter: none; } }
+  @keyframes type { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+  @keyframes zoom { 0%, 16% { transform: scale(1); } 52%, 100% { transform: scale(var(--zoom, 1.08)); } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes breathe { from { transform: scale(1); opacity: .75; } to { transform: scale(1.1); opacity: 1; } }
+
+  /* ---------- shared pieces ---------- */
+  .frame { position: absolute; border-radius: 14px; overflow: hidden; border: 1px solid rgba(255,255,255,.16); box-shadow: 0 34px 90px rgba(0,0,0,.6), 0 0 0 1px rgba(0,0,0,.4); background: #0a0d1a; }
+  .frame img { position: absolute; left: 0; top: 0; width: 100%; display: block; }
+  .frame img.zoom { animation: zoom var(--dur, 12s) ease-in-out both; }
+  .card { padding: 18px 20px; }
+  .card h3 { font-size: 19px; font-weight: 650; margin-bottom: 7px; display: flex; align-items: center; gap: 10px; }
+  .card p { font-size: 14.5px; line-height: 1.55; color: var(--dim); }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .chip { font-size: 12.5px; padding: 5px 11px; border-radius: 999px; border: 1px solid var(--line); background: rgba(255,255,255,.06); color: var(--ink); white-space: nowrap; }
+  .chip.mono { font-size: 12px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--c, var(--indigo)); box-shadow: 0 0 12px var(--c, var(--indigo)); flex: none; }
+  .lv { font: 700 13px/1 var(--mono); padding: 6px 9px; border-radius: 8px; color: #060814; background: var(--c); flex: none; }
+
+  /* ---------- orb ---------- */
+  .orb { position: absolute; width: 150px; height: 150px; }
+  .orb .core { position: absolute; inset: 34px; border-radius: 50%; background: radial-gradient(circle at 36% 30%, #fff 0%, #c9d2ff 18%, #7c6cff 52%, #3b1fa8 100%); box-shadow: 0 0 46px 12px rgba(140,130,255,.55), 0 0 130px 44px rgba(110,90,255,.3); animation: breathe 2.6s ease-in-out infinite alternate; }
+  .orb svg { position: absolute; inset: -30px; width: 210px; height: 210px; overflow: visible; }
+  .orb .r1 { transform-origin: 105px 105px; animation: spin 16s linear infinite; }
+  .orb .r2 { transform-origin: 105px 105px; animation: spin 23s linear infinite reverse; }
+  .wordmark { position: absolute; left: 0; right: 0; text-align: center; font-size: 88px; font-weight: 750; letter-spacing: -.02em; background: linear-gradient(180deg, #fff 20%, #b9c2ff 100%); -webkit-background-clip: text; color: transparent; }
+  .tagline { position: absolute; left: 0; right: 0; text-align: center; font-size: 25px; letter-spacing: .14em; color: var(--dim); }
+  .flow { position: absolute; left: 0; right: 0; display: flex; justify-content: center; align-items: center; gap: 16px; }
+  .flow .pill { padding: 13px 24px; font-size: 18px; border-radius: 999px; }
+  .flow .arrow { color: var(--indigo); font-size: 22px; }
+
+  /* ---------- arch ---------- */
+  .layer { position: absolute; left: 72px; width: 560px; height: 72px; display: flex; align-items: center; padding: 0 22px 0 26px; }
+  .layer::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 4px; border-radius: 4px; background: var(--c); box-shadow: 0 0 14px var(--c); }
+  .layer b { font-size: 18px; font-weight: 650; width: 112px; flex: none; }
+  .layer span { font: 14px/1.5 var(--mono); color: var(--dim); }
+  .node { position: absolute; left: 706px; width: 502px; height: 64px; display: flex; align-items: center; gap: 14px; padding: 0 20px; }
+  .node b { font-size: 16.5px; font-weight: 650; width: 124px; flex: none; }
+  .node span { font: 13.5px/1.45 var(--mono); color: var(--dim); }
+  .node + .link, .link { position: absolute; left: 738px; width: 2px; height: 16px; background: linear-gradient(var(--indigo), transparent); }
+
+  /* ---------- safety ---------- */
+  .risk { position: absolute; left: 72px; width: 520px; height: 82px; display: flex; align-items: center; gap: 16px; padding: 0 20px; }
+  .risk b { font-size: 18px; width: 64px; flex: none; }
+  .risk span { font-size: 14.5px; color: var(--dim); flex: 1; }
+  .risk em { font-style: normal; font-size: 14px; font-weight: 600; color: var(--c); white-space: nowrap; }
+  .guard { position: absolute; top: 562px; height: 50px; width: 366px; display: flex; align-items: center; gap: 12px; padding: 0 18px; font-size: 14px; border-radius: 14px; }
+  .guard b { font-size: 15px; white-space: nowrap; }
+  .guard span { color: var(--dim); font-size: 13px; white-space: nowrap; }
+
+  /* ---------- caps ---------- */
+  .cap { position: absolute; width: 558px; height: 212px; padding: 24px 26px; }
+  .cap .ic { width: 46px; height: 46px; border-radius: 13px; display: grid; place-items: center; background: color-mix(in srgb, var(--c) 22%, transparent); border: 1px solid color-mix(in srgb, var(--c) 50%, transparent); margin-bottom: 14px; }
+  .cap .ic svg { width: 24px; height: 24px; fill: none; stroke: var(--c); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .cap h3 { font-size: 22px; font-weight: 680; margin-bottom: 6px; }
+  .cap p { font-size: 14.5px; color: var(--dim); line-height: 1.5; }
+  .cap .chips { margin-top: 14px; }
+
+  /* ---------- taskd ---------- */
+  .client { position: absolute; top: 160px; width: 160px; height: 60px; display: grid; place-items: center; font-size: 15px; font-weight: 600; border-radius: 14px; }
+  .wire { position: absolute; top: 220px; width: 2px; height: 38px; background: linear-gradient(var(--indigo), rgba(140,158,255,.25)); }
+  .term { position: absolute; border-radius: 14px; overflow: hidden; background: rgba(6,9,20,.82); border: 1px solid rgba(255,255,255,.14); box-shadow: 0 30px 80px rgba(0,0,0,.5); }
+  .term header { height: 34px; display: flex; align-items: center; gap: 7px; padding: 0 14px; background: rgba(255,255,255,.06); border-bottom: 1px solid rgba(255,255,255,.08); font: 12px var(--mono); color: var(--faint); }
+  .term header i { width: 10px; height: 10px; border-radius: 50%; background: #fb7185; } .term header i:nth-child(2) { background: #fbbf24; } .term header i:nth-child(3) { background: #4ade80; margin-right: 10px; }
+  .term pre { padding: 14px 18px; font: 14px/1.62 var(--mono); color: #cfd6f6; white-space: pre; }
+  .term pre div { height: 22.7px; }
+  .term .p { color: var(--teal); } .term .ok { color: var(--green); } .term .mut { color: var(--faint); }
+
+  /* ---------- install ---------- */
+  .step { position: absolute; left: 680px; width: 528px; height: 68px; display: flex; align-items: center; gap: 18px; padding: 0 22px; }
+  .step i { font: 700 22px/1 var(--mono); font-style: normal; color: var(--indigo); width: 34px; }
+  .step b { font-size: 18px; width: 112px; flex: none; }
+  .step span { font-size: 14px; color: var(--dim); line-height: 1.4; }
+
+  /* ---------- caption / chrome ---------- */
+  #caption { position: absolute; left: 0; right: 0; bottom: 30px; display: flex; justify-content: center; opacity: 0; }
+  #caption span { max-width: 1060px; padding: 9px 20px 10px; font-size: 21px; line-height: 1.4; letter-spacing: .02em; text-align: center; border-radius: 12px; background: rgba(4,6,16,.62); border: 1px solid rgba(255,255,255,.08); text-shadow: 0 1px 2px rgba(0,0,0,.6); }
+  #progress { position: absolute; left: 0; bottom: 0; height: 3px; width: 0; background: linear-gradient(90deg, var(--indigo), var(--teal)); opacity: .8; }
+  #fade { position: absolute; inset: 0; background: #000; opacity: 1; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="bg"><i></i><i></i><i></i><i></i><div id="stars"></div><div id="vignette"></div></div>
+
+<!-- ============ intro ============ -->
+<section class="scene" id="intro">
+  <div class="orb a pop" data-at="@0.1" style="left:565px;top:118px">
+    <svg viewBox="0 0 210 210"><ellipse class="r1" cx="105" cy="105" rx="100" ry="34" fill="none" stroke="rgba(160,170,255,.5)" stroke-width="1.2" transform="rotate(-24 105 105)"/><g class="r2"><ellipse cx="105" cy="105" rx="92" ry="52" fill="none" stroke="rgba(94,234,212,.32)" stroke-width="1" transform="rotate(32 105 105)"/><circle cx="197" cy="105" r="3.4" fill="#5eead4" transform="rotate(32 105 105)"/></g></svg>
+    <div class="core"></div>
+  </div>
+  <div class="wordmark a" data-at="@0.5" style="top:296px">AgentOS</div>
+  <div class="tagline a fade" data-at="1+1.0" style="top:418px">以 Agent 为一等公民的操作系统</div>
+  <div class="flow" style="top:498px">
+    <div class="pill glass a" data-at="2">你说出意图</div>
+    <div class="arrow a fade" data-at="2+0.9">→</div>
+    <div class="pill glass a" data-at="2+1.0" style="border-color:rgba(140,158,255,.5)">Agent 规划并完成</div>
+    <div class="arrow a fade" data-at="2+2.0">→</div>
+    <div class="pill glass a" data-at="2+2.1">过程与结果，展示给你</div>
+  </div>
+</section>
+
+<!-- ============ architecture ============ -->
+<section class="scene" id="arch">
+  <div class="kicker a fade">01 · 架构</div>
+  <div class="title a" data-at="@0.1">Linux 内核之上，自建 Agent 用户态</div>
+
+  <div class="layer glass a" data-at="1+1.6" style="top:160px;--c:var(--pink)"><b>交互层</b><span>agentos-shell · Web Shell · agentos CLI</span></div>
+  <div class="layer glass a" data-at="1+1.3" style="top:242px;--c:var(--indigo)"><b>Agent 层</b><span>管家 Agent · 子 Agent</span></div>
+  <div class="layer glass a" data-at="1+1.0" style="top:324px;--c:var(--teal)"><b>核心服务</b><span>规划器 · 策略引擎 · 审计日志 · 任务运行时</span></div>
+  <div class="layer glass a" data-at="1+0.7" style="top:406px;--c:var(--amber)"><b>设备抽象</b><span>Sensor / Output：语音 · 键盘 · 屏幕 · 智能家居</span></div>
+  <div class="layer glass a" data-at="1+0.2" style="top:488px;--c:var(--faint);background:rgba(255,255,255,.1)"><b>Linux 内核</b><span>驱动与隔离机制 · Debian 13 / Ubuntu 24.04</span></div>
+  <div class="abs chip mono a fade" data-at="1+2.6" style="left:516px;top:128px;color:var(--teal);border-color:rgba(94,234,212,.4)">Rust · 用户态</div>
+
+  <div class="node glass a right" data-at="2" style="top:160px"><i class="dot" style="--c:var(--pink)"></i><b>意图</b><span>「记一下 买牛奶，然后看看笔记」</span></div>
+  <div class="link a fade" data-at="2+0.9" style="top:224px"></div>
+  <div class="node glass a right" data-at="2+1.0" style="top:240px"><i class="dot"></i><b>管家 · 计划</b><span>notes.append → notes.list</span></div>
+  <div class="link a fade" data-at="2+2.3" style="top:304px"></div>
+  <div class="node glass a right" data-at="2+2.4" style="top:320px"><i class="dot" style="--c:var(--teal)"></i><b>策略引擎</b><span>逐步检查：L1 自动执行 · L0 自动执行</span></div>
+  <div class="link a fade" data-at="2+3.5" style="top:384px"></div>
+  <div class="node glass a right" data-at="2+3.6" style="top:400px"><i class="dot" style="--c:var(--green)"></i><b>能力执行</b><span>已记下：买牛奶</span></div>
+  <div class="link a fade" data-at="2+4.5" style="top:464px"></div>
+  <div class="node glass a right" data-at="2+4.6" style="top:480px"><i class="dot" style="--c:var(--amber)"></i><b>审计日志</b><span>只追加 · SHA-256 哈希链 · 可校验</span></div>
+</section>
+
+<!-- ============ native desktop ============ -->
+<section class="scene" id="desktop">
+  <div class="kicker a fade">02 · 原生桌面 agentos-shell</div>
+  <div class="title a" data-at="@0.1">一句话，变成看得见的计划</div>
+  <div class="frame a pop" data-at="@0.2" style="left:72px;top:150px;width:744px;height:465px"><img class="zoom" src="../../../out/intro-video/shots/desktop.png" style="--zoom:1.5;transform-origin:92% 36%"></div>
+  <div class="card glass abs a right" data-at="1+1.2" style="left:846px;top:150px;width:362px"><h3><i class="dot"></i>意图 → 计划 → 逐步执行</h3><p>每一步都显示能力名、风险等级和执行状态，最近活动来自审计日志。</p></div>
+  <div class="card glass abs a right" data-at="2" style="left:846px;top:304px;width:362px"><h3><i class="dot" style="--c:var(--teal)"></i>规划器任选</h3><div class="chips" style="margin-top:4px"><span class="chip">Claude</span><span class="chip">OpenAI 兼容接口</span><span class="chip">离线规则</span></div><p style="margin-top:10px">DeepSeek、通义千问、本机 Ollama 都可以。</p></div>
+  <div class="card glass abs a right" data-at="3" style="left:846px;top:482px;width:362px"><h3><i class="dot" style="--c:var(--amber)"></i>按住 Caps Lock 说话</h3><p>只在按住时录音，没有唤醒词；回复可以朗读。</p></div>
+</section>
+
+<!-- ============ safety ============ -->
+<section class="scene" id="safety">
+  <div class="kicker a fade">03 · 安全模型</div>
+  <div class="title a" data-at="@0.1">越危险，越要你点头</div>
+  <div class="frame a pop" data-at="@0.3" style="left:640px;top:156px;width:568px;height:384px"><img src="../../../out/intro-video/shots/confirm.png" style="width:1300px;left:-366px;top:-104px"></div>
+
+  <div class="risk glass a left" data-at="2" style="top:156px;--c:var(--green)"><i class="lv">L0</i><b>只读</b><span>看时间、读笔记</span><em>自动执行</em></div>
+  <div class="risk glass a left" data-at="2+0.5" style="top:250px;--c:var(--blue)"><i class="lv">L1</i><b>可逆</b><span>记笔记、开灯</span><em>自动执行并记录</em></div>
+  <div class="risk glass a left" data-at="2+1.0" style="top:344px;--c:var(--amber)"><i class="lv">L2</i><b>对外</b><span>场景脚本、MCP 工具</span><em>每次确认</em></div>
+  <div class="risk glass a left" data-at="2+2.4" style="top:438px;--c:var(--red);border-color:rgba(251,113,133,.45)"><i class="lv">L3</i><b>不可逆</b><span>清空数据、开门锁、装插件</span><em>确认 + PIN</em></div>
+
+  <div class="guard glass a" data-at="3" style="left:72px"><i class="dot" style="--c:var(--pink)"></i><b>污点追踪</b><span>不可信输出之后，一律确认</span></div>
+  <div class="guard glass a" data-at="3+0.9" style="left:457px"><i class="dot" style="--c:var(--amber)"></i><b>哈希链审计</b><span>agentosd --verify-audit</span></div>
+  <div class="guard glass a" data-at="3+1.9" style="left:842px"><i class="dot" style="--c:var(--teal)"></i><b>插件沙箱</b><span>bubblewrap + 资源上限</span></div>
+</section>
+
+<!-- ============ capabilities ============ -->
+<section class="scene" id="caps">
+  <div class="kicker a fade">04 · 能力</div>
+  <div class="title a" data-at="@0.1">能力可以不断生长</div>
+
+  <div class="cap glass a" data-at="1" style="left:72px;top:152px;--c:var(--indigo)">
+    <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.6"/><circle cx="5" cy="18" r="2.6"/><circle cx="19" cy="18" r="2.6"/><path d="M12 7.6v4.4M12 12l-5.4 4M12 12l5.4 4"/></svg></div>
+    <h3>管家调度子 Agent</h3><p>拆解任务、逐个委派；权限取交集，确认统一回到人。</p>
+    <div class="chips"><span class="chip">任务即进程</span><span class="chip">检查点 · 重启后接着做</span><span class="chip">共享黑板</span></div>
+  </div>
+  <div class="cap glass a" data-at="2" style="left:650px;top:152px;--c:var(--amber)">
+    <div class="ic"><svg viewBox="0 0 24 24"><path d="m4 11 8-7 8 7v9h-5v-6H9v6H4z"/></svg></div>
+    <h3>智能家居</h3><p>通过 Home Assistant 查看和控制家里的设备。</p>
+    <div class="chips"><span class="chip">开灯 · 空调 L1</span><span class="chip">场景脚本 L2</span><span class="chip">开锁 · 车库门 L3</span></div>
+  </div>
+  <div class="cap glass a" data-at="2+3.3" style="left:72px;top:384px;--c:var(--teal)">
+    <div class="ic"><svg viewBox="0 0 24 24"><path d="M9 3v5M15 3v5M6 8h12v4a6 6 0 0 1-12 0zM12 18v3"/></svg></div>
+    <h3>MCP 工具</h3><p>mcp.json 里配置的 server，工具自动注册为管家的能力。</p>
+    <div class="chips"><span class="chip">默认每次确认</span><span class="chip">输出视为不可信</span></div>
+  </div>
+  <div class="cap glass a" data-at="3" style="left:650px;top:384px;--c:var(--pink)">
+    <div class="ic"><svg viewBox="0 0 24 24"><path d="m12 3 2.2 6.8L21 12l-6.8 2.2L12 21l-2.2-6.8L3 12l6.8-2.2z"/></svg></div>
+    <h3>自我进化</h3><p>说「学会：把摄氏度换算成华氏度」，它给自己写一个新能力。</p>
+    <div class="chips"><span class="chip">沙箱自测</span><span class="chip">L3 确认安装</span><span class="chip">版本化回滚</span></div>
+  </div>
+</section>
+
+<!-- ============ taskd ============ -->
+<section class="scene" id="taskd">
+  <div class="kicker a fade">05 · v0.3 新增</div>
+  <div class="title a" data-at="@0.1">持久任务服务：任务归后台所有</div>
+
+  <div class="client glass a" data-at="2+1.0" style="left:72px"><span><span class="mono">agentos</span> CLI</span></div>
+  <div class="client glass a" data-at="2+1.8" style="left:248px">终端工作台</div>
+  <div class="client glass a" data-at="2+2.7" style="left:424px">Web Shell</div>
+  <div class="wire a fade" data-at="2+3.4" style="left:151px"></div>
+  <div class="wire a fade" data-at="2+3.4" style="left:327px"></div>
+  <div class="wire a fade" data-at="2+3.4" style="left:503px"></div>
+  <div class="abs glass a" data-at="2+3.5" style="left:72px;top:258px;width:512px;height:46px;display:grid;place-items:center;font-size:14px;border-color:rgba(140,158,255,.5);border-radius:12px"><span><b>Unix socket · 协议 v1</b><span class="dim">　仅本机同一用户 · 0600</span></span></div>
+  <div class="wire a fade" data-at="2+3.6" style="left:327px;top:304px;height:30px"></div>
+  <div class="abs glass a pop" data-at="1+0.3" style="left:72px;top:334px;width:512px;height:206px;padding:20px 22px;border-color:rgba(94,234,212,.4)">
+    <div class="mono" style="font-size:20px;font-weight:700;color:var(--teal)">agentos-taskd</div>
+    <p class="dim" style="font-size:13.5px;margin:6px 0 2px">持有任务、能力、策略与审计；不随界面退出</p>
+    <div class="chips"><span class="chip">持久任务与 revision</span><span class="chip">有界队列</span><span class="chip">管家 · 规划器</span><span class="chip">实时变更通知</span><span class="chip">分页历史</span><span class="chip">只追加审计</span></div>
+  </div>
+
+  <div class="term a pop" data-at="@0.4" style="left:632px;top:160px;width:576px;height:380px">
+    <header><i></i><i></i><i></i>agentos — 任务工作台</header>
+<pre><div class="a type" data-at="1+0.6"><span class="p">$</span> agentos submit 记一下 买牛奶</div><div class="a fade ok" data-at="1+1.9">[task-1] 已接收 · 排队中。客户端退出后任务继续。</div><div class="a type" data-at="2"><span class="p">$</span> agentos workbench</div><div class="a fade mut" data-at="2+1.2">╭─ AgentOS v0.3.0 · 任务工作台 ─────────────────────</div><div class="a fade" data-at="2+1.2"><span class="mut">│</span> <span class="ok">● 已连接后台</span>  · 快照 #6 · 第 1 页</div><div class="a fade" data-at="2+1.2"><span class="mut">│</span> 本页 2 项  进行中 0  待批准 0  已完成 2  需查看 0</div><div class="a fade mut" data-at="2+1.2">╰─────────────────────────────────────────────────</div><div class="a fade mut" data-at="2+1.6">  任务       状态     步骤  意图</div><div class="a fade" data-at="2+1.9">  task-2     <span class="ok">已完成</span>    1/1   看看笔记</div><div class="a fade" data-at="2+2.2">  task-1     <span class="ok">已完成</span>    1/1   记一下 买牛奶</div><div> </div><div class="a type" data-at="3"><span class="p">&gt;</span> /quit</div><div class="a fade mut" data-at="3+1.0"># 工作台退出，agentos-taskd 继续运行</div></pre>
+  </div>
+
+  <div class="guard glass a" data-at="3+0.4" style="left:72px;width:512px"><i class="dot" style="--c:var(--green)"></i><b>关掉界面 ≠ 取消任务</b><span>断线不自动重发变更</span></div>
+  <div class="guard glass a" data-at="3+2.4" style="left:632px;width:576px"><i class="dot" style="--c:var(--amber)"></i><b>批准绑定</b><span>任务 · 步骤 · 随机令牌 · 同一用户 · 5 分钟有效</span></div>
+</section>
+
+<!-- ============ web shell ============ -->
+<section class="scene" id="webshell">
+  <div class="kicker a fade">06 · v0.3 新增</div>
+  <div class="title a" data-at="@0.1">语音优先的情景式 Web Shell</div>
+  <div class="frame a pop" data-at="@0.2" style="left:72px;top:150px;width:744px;height:465px">
+    <img src="../../../out/intro-video/shots/web-now.png">
+    <img class="a fade" data-at="2+0.6" src="../../../out/intro-video/shots/web-memory.png">
+    <img class="a fade" data-at="3" src="../../../out/intro-video/shots/web-focus.png">
+  </div>
+  <div class="card glass abs a right" data-at="1+0.8" style="left:846px;top:150px;width:362px"><h3><i class="dot" style="--c:var(--green)"></i>情景画布</h3><p>此刻、专注、记忆、轨迹四个空间，随你的意图切换。</p></div>
+  <div class="card glass abs a right" data-at="2" style="left:846px;top:286px;width:362px"><h3><i class="dot"></i>模型组织界面</h3><p>模型只选择组件、顺序和宽度；任务数据与批准控件始终绑定真实状态。</p></div>
+  <div class="card glass abs a right" data-at="3" style="left:846px;top:444px;width:362px"><h3><i class="dot" style="--c:var(--amber)"></i>WebRTC 实时语音</h3><p>连续对话，开口即可打断。语音里的“好的”不能代替批准。</p></div>
+</section>
+
+<!-- ============ install ============ -->
+<section class="scene" id="install">
+  <div class="kicker a fade">07 · 上手</div>
+  <div class="title a" data-at="@0.1">写进 U 盘，启动就能用</div>
+  <div class="frame a pop" data-at="@0.2" style="left:72px;top:156px;width:568px;height:355px"><img class="zoom" src="../../../out/intro-video/shots/setup.png" style="--zoom:1.2;transform-origin:50% 50%"></div>
+  <div class="abs glass a" data-at="@0.8" style="left:72px;top:530px;width:568px;height:44px;display:flex;align-items:center;gap:12px;padding:0 18px;font-size:13.5px;border-radius:12px"><i class="dot" style="--c:var(--green)"></i><b>最新镜像 v0.2.2</b><span class="dim">Debian 13 / Ubuntu 24.04 · x86-64 · UEFI</span></div>
+
+  <div class="step glass a right" data-at="1+0.7" style="top:156px"><i>01</i><b>下载镜像</b><span class="mono">github.com/Integ/agentos/releases</span></div>
+  <div class="step glass a right" data-at="1+2.5" style="top:234px"><i>02</i><b>写入 U 盘</b><span>balenaEtcher、Rufus 或 dd</span></div>
+  <div class="step glass a right" data-at="1+3.6" style="top:312px"><i>03</i><b>从 U 盘启动</b><span>自动登录进入桌面；安全启动可保持开启</span></div>
+  <div class="step glass a right" data-at="2" style="top:390px"><i>04</i><b>设置助理</b><span>Wi‑Fi · 模型 · 语音 · PIN · 装到硬盘</span></div>
+  <div class="abs glass a" data-at="3" style="left:680px;top:478px;width:528px;height:44px;display:flex;align-items:center;gap:14px;padding:0 20px;border-radius:12px;border-color:rgba(94,234,212,.4)"><span class="mono" style="font-size:14px"><span style="color:var(--teal)">$</span> sudo agentos-update</span><span class="dim" style="font-size:13px">先自检再替换 · 可 --rollback</span></div>
+  <div class="abs glass a" data-at="4" style="left:680px;top:530px;width:528px;height:44px;display:flex;align-items:center;gap:14px;padding:0 20px;border-radius:12px"><span style="font-size:13.5px;font-weight:600;white-space:nowrap">任务服务 / Web Shell</span><span class="mono dim" style="font-size:12.5px">cargo run -p agentos-taskd</span></div>
+</section>
+
+<!-- ============ outro ============ -->
+<section class="scene" id="outro">
+  <div class="orb a pop" data-at="@0.1" style="left:565px;top:128px">
+    <svg viewBox="0 0 210 210"><ellipse class="r1" cx="105" cy="105" rx="100" ry="34" fill="none" stroke="rgba(160,170,255,.5)" stroke-width="1.2" transform="rotate(-24 105 105)"/><g class="r2"><ellipse cx="105" cy="105" rx="92" ry="52" fill="none" stroke="rgba(94,234,212,.32)" stroke-width="1" transform="rotate(32 105 105)"/><circle cx="197" cy="105" r="3.4" fill="#5eead4" transform="rotate(32 105 105)"/></g></svg>
+    <div class="core"></div>
+  </div>
+  <div class="wordmark a" data-at="@0.3" style="top:306px">AgentOS</div>
+  <div class="tagline a fade" data-at="1+0.8" style="top:428px">让 Agent 成为操作系统的一等公民</div>
+  <div class="flow" style="top:504px"><div class="pill glass mono a" data-at="2" style="font-size:17px;border-color:rgba(140,158,255,.5)">github.com/Integ/agentos</div></div>
+  <div class="tagline a fade" data-at="2+1.0" style="top:580px;font-size:14px;letter-spacing:.1em;color:var(--faint)">main 分支 v0.3.0　·　最新发布镜像 v0.2.2</div>
+</section>
+
+<div id="poster" hidden>
+  <div class="flow" style="top:504px"><div class="pill glass mono" style="font-size:17px;color:var(--teal);border-color:rgba(94,234,212,.45)">v0.3.0 · 项目介绍</div></div>
+  <div class="glass" style="position:absolute;right:40px;bottom:36px;height:64px;padding:0 26px 0 22px;border-radius:999px;display:flex;align-items:center;gap:14px;font-size:27px;font-weight:650;background:rgba(255,255,255,.14)"><svg width="26" height="26" viewBox="0 0 24 24"><path d="M6 3.5v17l14-8.5z" fill="#fff"/></svg><span id="poster-length"></span></div>
+</div>
+<div id="caption"><span></span></div>
+<div id="progress"></div>
+<div id="fade"></div>
+
+<script>
+  // Deterministic star field.
+  {
+    let seed = 20261111;
+    const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+    const stars = document.getElementById('stars');
+    for (let i = 0; i < 110; i++) {
+      const b = document.createElement('b');
+      const size = rnd() < 0.85 ? 1.4 : 2.4;
+      b.style.cssText = `left:${(rnd() * 1280).toFixed(1)}px;top:${(rnd() * 720).toFixed(1)}px;width:${size}px;height:${size}px;opacity:${(0.12 + rnd() * 0.4).toFixed(2)}`;
+      stars.append(b);
+    }
+  }
+
+  const clamp = (x) => Math.min(1, Math.max(0, x));
+  const ease = (x) => x * x * (3 - 2 * x);
+  let timeline = null;
+  let scenes = [];
+  let animations = [];
+  const caption = document.getElementById('caption');
+  const captionText = caption.firstElementChild;
+
+  // "2" → start of line 2; "2+0.8" → 0.8 s later; "@1.5" → 1.5 s into the scene.
+  function cue(scene, spec) {
+    const m = /^(@)?([\d.]+)([+-][\d.]+)?$/.exec(spec);
+    if (!m) throw new Error(`bad data-at "${spec}" in #${scene.id}`);
+    const base = m[1] ? Number(m[2]) : scene.lines[Number(m[2]) - 1].start - scene.start;
+    return Math.max(0, base + Number(m[3] ?? 0));
+  }
+
+  window.setup = async (tl) => {
+    timeline = tl;
+    for (const scene of tl.scenes) {
+      const el = document.getElementById(scene.id);
+      if (!el) throw new Error(`no <section id="${scene.id}">`);
+      el.style.setProperty('--dur', `${scene.end - scene.start}s`);
+      for (const node of el.querySelectorAll('[data-at]')) node.style.setProperty('--d', `${cue(scene, node.dataset.at)}s`);
+      scenes.push({ ...scene, el });
+    }
+    await Promise.all([...document.images].map((img) => img.decode()));
+    await document.fonts.ready;
+    document.body.getBoundingClientRect();
+    animations = document.getAnimations().map((animation) => {
+      animation.pause();
+      const owner = animation.effect.target.closest('.scene');
+      return { animation, start: owner ? tl.scenes.find((s) => s.id === owner.id).start : 0 };
+    });
+    window.seek(0);
+    return { duration: tl.duration, animations: animations.length };
+  };
+
+  window.seek = (t) => {
+    for (const scene of scenes) {
+      const opacity = Math.min(ease(clamp((t - scene.start) / 0.5)), ease(clamp((scene.end - t) / 0.4)));
+      scene.el.style.opacity = opacity;
+      scene.el.style.visibility = opacity > 0 ? 'visible' : 'hidden';
+    }
+    for (const { animation, start } of animations) animation.currentTime = Math.max(0, (t - start) * 1000);
+
+    let shown = 0;
+    for (const scene of timeline.scenes) {
+      for (const line of scene.lines) {
+        const o = Math.min(clamp((t - line.start + 0.12) / 0.22), clamp((line.end + 0.22 - t) / 0.22));
+        if (o > 0) { captionText.textContent = line.text; shown = o; }
+      }
+    }
+    caption.style.opacity = shown;
+    document.getElementById('progress').style.width = `${(t / timeline.duration) * 100}%`;
+    document.getElementById('fade').style.opacity = Math.max(1 - clamp(t / 0.7), clamp((t - (timeline.duration - 1.0)) / 0.9));
+  };
+
+  // README thumbnail: the title card at time t, without caption, with a play badge.
+  window.poster = (t, label) => {
+    window.seek(t);
+    for (const id of ['caption', 'progress', 'fade']) document.getElementById(id).style.display = 'none';
+    document.getElementById('poster-length').textContent = label;
+    document.getElementById('poster').hidden = false;
+  };
+
+  // Preview in a normal browser: video.html?t=42 jumps to 42 s, ?play runs in real time (no sound).
+  if (location.search) {
+    const query = new URLSearchParams(location.search);
+    fetch('../../../out/intro-video/timeline.json').then((r) => r.json()).then(async (tl) => {
+      await window.setup(tl);
+      if (query.has('play')) { const t0 = performance.now(); const tick = () => { window.seek(Math.min(tl.duration, (performance.now() - t0) / 1000)); requestAnimationFrame(tick); }; tick(); }
+      else window.seek(Number(query.get('t') ?? 0));
+    });
+  }
+</script>
+</body>
+</html>

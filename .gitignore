@@ -1,3 +1,5 @@
 /target
 *.jsonl
 /out/
+node_modules/
+.venv/
