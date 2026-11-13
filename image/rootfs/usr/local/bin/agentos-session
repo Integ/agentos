@@ -2,6 +2,15 @@
 # tty1 autologin → sway → AgentOS desktop (agentosd + agentos-shell).
 # Falls back to the plain text console if the graphical session can't start.
 
+# The task service runs for as long as the user is logged in, in text mode
+# too. It is started rather than enabled: an update bundle can add the unit,
+# but not the symlink that enabling needs. A unit added by an update while the
+# user manager kept running is only seen after a reload.
+if command -v systemctl >/dev/null && [ -x /usr/local/bin/agentos-taskd ]; then
+  systemctl --user cat agentos-taskd.service >/dev/null 2>&1 || systemctl --user daemon-reload 2>/dev/null
+  systemctl --user --no-block start agentos-taskd.service 2>/dev/null
+fi
+
 # The Linux console has no CJK glyphs: run the (Chinese) text console inside
 # fbterm, which draws with the system fonts on the framebuffer.
 text_console() {

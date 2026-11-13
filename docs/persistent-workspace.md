@@ -12,6 +12,19 @@ AgentOS 探索以人的意图为入口、以 Agent 为执行者的操作系统�
 - [架构概要](architecture.md) · [v0.2 审查与持久任务设计](v0.2-design.md)
 - [情景式图形 Shell：设计、启动与边界](ambient-shell.md)
 
+## 在 AgentOS 镜像里
+
+镜像里已经装好 `agentos-taskd`、`agentos` 和 `agentos-web-shell`。任务服务是桌面用户的 systemd 用户服务，登录后自动启动，读取 `/etc/agentos/agentos.env` 里的规划器和密钥设置，状态放在 `~/.local/state/agentos`。在终端（桌面里的 foot）直接用：
+
+```sh
+agentos                                   # 终端工作台
+agentos submit --wait 记一下 买牛奶
+systemctl --user status agentos-taskd     # 服务状态
+journalctl --user -u agentos-taskd        # 服务日志
+```
+
+修改 `agentos.env` 后用 `systemctl --user restart agentos-taskd` 生效。设置助理里设置的 PIN 同时用于 `agentosd` 和任务服务。图形桌面默认仍连接 `agentosd`；加一行 `AGENTOS_DESKTOP=taskd` 并重新登录，桌面改为连接任务服务（暂时没有按住说话的语音）。`agentos-web-shell` 不会自动启动。
+
 ## 快速体验
 
 需要 **Rust 1.88+**，支持 Linux 和 macOS。无需模型服务即可运行完整核心体验。

@@ -18,9 +18,11 @@ sudo agentos-update --file agentos-update-x86_64.tar.gz   # 离线安装（旁�
 1. 查询 `https://api.github.com/repos/Integ/agentos/releases/latest`（或 `--to` 指定的版本），和本机的 `/usr/share/agentos/release` 比较。
 2. 下载 `agentos-update-x86_64.tar.gz` 和它的 `.sha256`，校验不一致就停止。
 3. 解包到临时目录并检查内容：只接受 `usr/…`、`etc/systemd/system/agentos-*` 和 `etc/udev/rules.d/*agentos*` 下的普通文件，有符号链接、设备文件或其他路径就整个拒绝；去掉 setuid 位。
-4. **自检**：用新的 `agentosd` 跑一遍离线规划器（记一条笔记再读出来），失败就停止，本机什么都没改。
+4. **自检**：用新的 `agentosd` 跑一遍离线规划器（记一条笔记再读出来）；更新包里有任务服务时，再启动一个临时的新 `agentos-taskd`，用新的 `agentos` 命令提交一条意图并等它完成。任何一项失败就停止，本机什么都没改。
 5. 把即将被覆盖的文件备份到 `/var/lib/agentos-update/rollback/`（只保留上一个版本），然后逐个文件"写到旁边再改名"地替换，正在运行的程序不会读到写了一半的文件。
-6. 重新加载 systemd 和 udev 配置，重启 `agentosd`（`agentos-daemon` 一秒内拉起新版本）。图形桌面 `agentos-shell` 在下次登录或重启后换成新版本。
+6. 重新加载 systemd 和 udev 配置，重启 `agentosd`（`agentos-daemon` 一秒内拉起新版本）和正在运行的 `agentos-taskd`（它的用户单元拉起新版本；重启前未完成的任务标为“已中断”）。图形桌面 `agentos-shell` 在下次登录或重启后换成新版本。
+
+从没有任务服务的版本（v0.2.x）更新上来时，任务服务在下次登录后才开始运行：它由登录会话启动，更新包里只能带单元文件，带不了“开机启用”需要的符号链接。
 
 `/etc/agentos/agentos.env`（API key、规划器、Home Assistant 等设置）、PIN、笔记、审计日志和插件都不在更新包里，更新和回滚都不会动它们。
 

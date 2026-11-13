@@ -1,0 +1,11 @@
+#!/bin/bash
+# Run agentos-taskd for the desktop user with the settings in
+# /etc/agentos/agentos.env (planner, API keys, Home Assistant, budgets). That
+# file is written with shell quoting, so it is sourced here rather than given
+# to systemd as an EnvironmentFile. Started by agentos-taskd.service.
+ENV_FILE=/etc/agentos/agentos.env
+set -a
+# shellcheck disable=SC1090
+[ -r "$ENV_FILE" ] && . "$ENV_FILE"
+set +a
+exec /usr/local/bin/agentos-taskd "$@"

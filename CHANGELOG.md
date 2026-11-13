@@ -12,6 +12,7 @@
 - **系统提示带上时间和设备**：每一轮规划都由服务附上当前时间、时区、主机名、系统和意图来源。主机名会随提示发给你配置的模型服务。
 - **预授权**：`agentos preauthorize <能力> …` 事先许可一类调用，之后符合规则的 L1/L2 调用不再逐次确认。规则针对参数（等于、属于列表、文本前缀、在目录内、任意），可带期限；没写到的参数默认不允许出现。不适用于 L3，不适用于读过外部内容的任务；撤销（`agentos revoke pre-N`）立即生效，每次命中都记入审计。设置了 PIN 时创建需要 PIN。
 - **AgentOS 作为 MCP server**：`agentos caller add <id> --name … --allow …` 注册一个外部调用方，`agentos mcp --caller <id>` 以它的身份在标准输入输出上提供 MCP 服务。调用方只能使用清单里的能力（默认什么都没有），只看得到自己的任务，有副作用的步骤默认都要你批准，它自己不能批准。见 [docs/mcp.md](docs/mcp.md#反过来agentos-作为-mcp-server)。
+- **镜像和更新包包含任务服务**：`agentos-taskd`、`agentos` 命令和 `agentos-web-shell` 进入镜像和 `agentos-update` 更新包。任务服务作为桌面用户的 systemd 用户服务（`agentos-taskd.service`）随登录启动，读取 `/etc/agentos/agentos.env`，状态在 `~/.local/state/agentos`；在终端里直接用 `agentos`。开机自检和在线更新的自检都会启动它并提交一条意图，开机自检还会经 `agentos mcp` 读一次能力。设置助理设置或清除 PIN 时两个守护进程一起改。图形桌面默认仍连接 `agentosd`，在 `agentos.env` 里设 `AGENTOS_DESKTOP=taskd` 可改为连接任务服务（没有按住说话的语音）。从 v0.2.x 在线更新上来时，任务服务在下次登录后才开始运行。
 - **行为变化：用完规划轮数的任务记为失败**。此前管家连续执行 8 轮后以“先停在这里”结束并记为已完成；现在是“超出预算：规划轮数”，已完成的步骤保留。
 - **行为变化：其他对话不再拿到受污染任务的结果**。此前“最近任务”的摘要会把读过外部内容的任务的结果放进下一个任务的提示里；现在只告诉规划器那个任务发生过。
 - 修复：MCP 请求被放弃后，等待表里的条目不再留到响应到达为止。
@@ -38,7 +39,7 @@
 - **规则规划器的行为变化（`agentosd`）**：只认完整的命令。“看看我的笔记”“把笔记清空”这类包含关键词的句子不再匹配，需要说“看看笔记”“清空笔记”。
 - 文档：两份架构说明合并为 [docs/architecture.md](docs/architecture.md)，新增 [AGENTS.md](AGENTS.md)。
 
-**尚未完成**：镜像仍默认启动 `agentosd`，因为按住说话的本机语音还由它承载；见[架构](docs/architecture.md#尚未合并的部分)。
+**尚未完成**：图形桌面默认仍连接 `agentosd`，因为按住说话的本机语音还由它承载；见[架构](docs/architecture.md#尚未合并的部分)。
 
 **兼容性**：协议 v1 新增了 `read` 方法、`unhandled` 任务状态、步骤的 `id` / `agent` 字段和 `skipped` 状态、确认请求的 `verify_identity`、`approve` 的 `pin`。严格解析的旧客户端需要升级；任务快照升到 schema 3，旧快照自动读取，新快照不保证旧程序可读。`agentos-taskd` 的任务在一步失败后不再立即结束，而是把失败交还给规划器。
 

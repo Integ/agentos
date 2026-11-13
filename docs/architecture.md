@@ -99,11 +99,13 @@ AgentOS 是 Linux 内核之上的用户态 Agent OS：人交付意图，系统�
 
 ## 尚未合并的部分
 
-`agentosd` 还在仓库里，镜像默认仍启动它，原因只有一个：**按住说话的本机语音**（录音、识别、朗读、麦克风指示灯）由它承载，任务服务还不提供。此外只有它有崩溃报告在桌面“最近活动”里的提示。
+镜像和更新包里同时有两个守护进程。任务服务 `agentos-taskd` 作为桌面用户的 systemd 用户服务（`agentos-taskd.service`），由登录会话启动，`agentos` 命令、终端工作台和 `agentos mcp` 都连接它；开机自检和 `agentos-update` 的自检都会跑它。图形桌面默认仍连接 `agentosd`，在 `/etc/agentos/agentos.env` 里设置 `AGENTOS_DESKTOP=taskd` 可以改为连接任务服务。
+
+`agentosd` 还在仓库里，桌面默认仍连接它，原因只有一个：**按住说话的本机语音**（录音、识别、朗读、麦克风指示灯）由它承载，任务服务还不提供。此外只有它有崩溃报告在桌面“最近活动”里的提示。
 
 它的规划器、审计日志、能力、子 Agent、黑板、裁判、PIN、MCP、插件和智能家居都已经改用共享 crate，与任务服务是同一份代码。它自己仍保留一套管家循环和任务存储（检查点恢复语义），以及不带版本的 socket 协议 `shell_api`。这部分是待删除的重复，不要在上面加新功能。
 
-合并的最后一步是：把语音迁到任务服务一侧（需要协议里有麦克风控制和设备使用的审计入口），把崩溃提示接到任务服务，把镜像的会话脚本和自检切到 `agentos-taskd` + `agentos-shell --taskd`，然后删除 `agentosd`。两个守护进程的状态目录不同（`~/.local/share/agentos` 与 `~/.local/state/agentos`），切换时需要迁移笔记、插件、黑板、`mcp.json` 和 PIN。
+合并的最后一步是：把语音迁到任务服务一侧（需要协议里有麦克风控制和设备使用的审计入口），把崩溃提示接到任务服务，把桌面默认切到 `agentos-shell --taskd`，然后删除 `agentosd`。两个守护进程的状态目录不同（`~/.local/share/agentos` 与 `~/.local/state/agentos`），切换时需要迁移笔记、插件、黑板、`mcp.json` 和 PIN。
 
 ## 其他边界
 
