@@ -164,7 +164,16 @@ impl Service {
         builder.recursive(true).mode(0o700).create(parent)?;
         let parent_meta = fs::metadata(parent)?;
         if parent_meta.uid() != current_uid() || parent_meta.mode() & 0o022 != 0 {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "socket parent must be owned by this user and not writable by group/others; use a private directory"));
+            // Not repaired here: a directory others could write to may
+            // already hold files they put there. The person decides.
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "socket parent {} (mode {:o}) must be owned by this user and not writable by group/others; check what is in it, then run chmod 700 on it, or use a private directory",
+                    parent.display(),
+                    parent_meta.mode() & 0o7777
+                ),
+            ));
         }
         match fs::symlink_metadata(path) {
             Ok(meta) => {

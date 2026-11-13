@@ -7,6 +7,15 @@ console() {
   [ -e /dev/ttyS0 ] && timeout 2 sh -c "echo '$*' > /dev/ttyS0" 2>/dev/null || true
 }
 
+# Standard input to the journal and, indented, to the serial console: the
+# reason for a failure, where the QEMU smoke test can show it.
+console_text() {
+  local text
+  text=$(sed 's/^/  /')
+  printf '%s\n' "$text"
+  [ -e /dev/ttyS0 ] && printf '%s\n' "$text" | timeout 2 tee /dev/ttyS0 >/dev/null 2>&1 || true
+}
+
 out=$(printf '记一下 开机自检\n看看笔记\n' |
   timeout 60 /usr/local/bin/agentosd --planner rule --home /run/agentos-selfcheck --audit /run/agentos-selfcheck.jsonl 2>&1)
 if grep -q '开机自检' <<<"$out"; then
@@ -115,6 +124,7 @@ fi
 # The desktop user's own task service: agentos-session starts it at login as
 # a user unit, and the agentos command (as that user) reaches it.
 state=$(getent passwd agent | cut -d: -f6)/.local/state/agentos
+waited=$SECONDS
 for _ in $(seq 60); do
   runuser -u agent -- /usr/local/bin/agentos --state-dir "$state" ping >/dev/null 2>&1 && break
   sleep 2
@@ -122,9 +132,15 @@ done
 if out=$(runuser -u agent -- /usr/local/bin/agentos --state-dir "$state" ping 2>&1); then
   console "AGENTOS-TASKD-SESSION: OK ($out)"
 else
-  console "AGENTOS-TASKD-SESSION: FAIL"
-  printf '%s\n' "$out"
-  journalctl -q -b --no-pager -n 20 -t agentos-taskd 2>/dev/null
+  console "AGENTOS-TASKD-SESSION: FAIL (after $((SECONDS - waited)) s)"
+  {
+    printf '%s\n' "$out"
+    loginctl list-sessions --no-legend
+    systemctl --machine=agent@.host --user status agentos-taskd.service --no-pager -l
+    journalctl -q -b --no-pager -n 30 _SYSTEMD_USER_UNIT=agentos-taskd.service
+    journalctl -q -b --no-pager -n 20 -t agentos-taskd -t agentos-session
+    ls -la "$state"
+  } 2>&1 | console_text
 fi
 
 # Crash logging: the desktop's agentosd writes to the journal (agentos-daemon

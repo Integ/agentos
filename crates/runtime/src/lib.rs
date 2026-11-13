@@ -275,7 +275,7 @@ pub struct TaskChange {
 impl TaskStore {
     pub fn open(directory: impl AsRef<Path>) -> io::Result<Self> {
         let directory = directory.as_ref().to_path_buf();
-        fs::create_dir_all(&directory)?;
+        create_private_dir(&directory)?;
         let lock = exclusive_lock(&directory.join(".lock"))?;
         let mut state = match fs::read(directory.join(STATE_FILE)) {
             Ok(bytes) => {
@@ -561,6 +561,28 @@ impl TaskStore {
             persist(directory, state)?;
         }
         Ok(())
+    }
+}
+
+/// Create `directory` and any missing parents readable only by this user.
+///
+/// The mode is explicit rather than left to the umask: desktop sessions on
+/// Debian and Ubuntu run with umask 002, which would make the directory
+/// group-writable. It holds tasks, notes and the audit log, and the control
+/// socket beside them refuses a parent that others can write to. A directory
+/// that already exists is left as it is.
+pub fn create_private_dir(directory: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(directory)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(directory)
     }
 }
 
@@ -1206,5 +1228,27 @@ mod tests {
         let recovered = store.get(waiting.id).unwrap();
         assert_eq!(recovered.state, TaskState::Interrupted);
         assert!(recovered.question.is_none());
+    }
+
+    #[test]
+    fn a_new_state_directory_and_its_missing_parents_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new();
+        let nested = dir.0.join("state").join("agentos");
+        let store = TaskStore::open(&nested).unwrap();
+        // Guards the control socket's parent check: whatever the umask, the
+        // directory the service creates is one it will accept.
+        for created in [&nested, &dir.0.join("state")] {
+            let mode = fs::metadata(created).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{}", created.display());
+        }
+        drop(store);
+        // An existing directory is left as it is.
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o750)).unwrap();
+        drop(TaskStore::open(&nested).unwrap());
+        assert_eq!(
+            fs::metadata(&nested).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
     }
 }

@@ -1661,3 +1661,49 @@ async fn an_outside_caller_reaches_only_what_it_was_given_and_only_its_own_tasks
     );
     harness.stop().await;
 }
+
+#[tokio::test]
+async fn the_daemon_starts_in_a_fresh_state_directory_under_a_desktop_umask() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new();
+    let state = dir.0.join("state").join("agentos");
+    // Debian and Ubuntu desktop sessions run with umask 002. A state
+    // directory created under it used to be group-writable, and the
+    // daemon then refused its own socket's parent and never started.
+    let mut daemon = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("umask 002; exec \"$0\" --planner rule --state-dir \"$1\"")
+        .arg(env!("CARGO_BIN_EXE_agentos-taskd"))
+        .arg(&state)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENAI_BASE_URL")
+        .env_remove("AGENTOS_PLANNER")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let socket = state.join("control.sock");
+    let started = timeout(Duration::from_secs(10), async {
+        while !socket.exists() {
+            if let Ok(Some(_)) = daemon.try_wait() {
+                return false;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        true
+    })
+    .await
+    .unwrap_or(false);
+    let _ = daemon.kill();
+    let output = daemon.wait_with_output().unwrap();
+    assert!(
+        started,
+        "daemon did not start: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::metadata(&state).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}

@@ -96,7 +96,7 @@ PY
 
 fail() {
   kill "$QEMU_PID" 2>/dev/null || true
-  echo "---- serial log ($1) ----"; tail -n 80 "$WORK/serial-$1.log" || true
+  echo "---- serial log ($1) ----"; tail -n 150 "$WORK/serial-$1.log" || true
   die "$2"
 }
 

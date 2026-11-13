@@ -6,9 +6,13 @@
 # too. It is started rather than enabled: an update bundle can add the unit,
 # but not the symlink that enabling needs. A unit added by an update while the
 # user manager kept running is only seen after a reload.
+# A failure is logged (journalctl -t agentos-session), never fatal: the
+# desktop does not depend on the task service.
 if command -v systemctl >/dev/null && [ -x /usr/local/bin/agentos-taskd ]; then
   systemctl --user cat agentos-taskd.service >/dev/null 2>&1 || systemctl --user daemon-reload 2>/dev/null
-  systemctl --user --no-block start agentos-taskd.service 2>/dev/null
+  if ! err=$(systemctl --user --no-block start agentos-taskd.service 2>&1); then
+    printf '无法启动任务服务：%s\n' "$err" | systemd-cat -t agentos-session -p warning 2>/dev/null
+  fi
 fi
 
 # The Linux console has no CJK glyphs: run the (Chinese) text console inside
