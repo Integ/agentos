@@ -19,6 +19,26 @@ set -u
 
 ENV_FILE=${AGENTOS_ENV_FILE:-/etc/agentos/agentos.env}
 AGENT_HOME=/home/agent/.local/share/agentos
+TASKD_STATE=/home/agent/.local/state/agentos
+
+# Both daemons guard irreversible steps with the PIN, each with its own copy
+# in its own state directory; set and clear them together. A running task
+# service reads its PIN when it starts, so it is restarted (its user unit
+# brings it straight back).
+set_pins() { # set_pins PIN
+  printf '%s\n%s\n' "$1" "$1" |
+    runuser -u agent -- /usr/local/bin/agentosd --home "$AGENT_HOME" --set-pin >/dev/null 2>&1 || return 1
+  [ -x /usr/local/bin/agentos-taskd ] || return 0
+  printf '%s\n%s\n' "$1" "$1" |
+    runuser -u agent -- /usr/local/bin/agentos-taskd --state-dir "$TASKD_STATE" --set-pin >/dev/null 2>&1 || return 1
+  pkill -x -u agent agentos-taskd 2>/dev/null || true
+}
+clear_pins() {
+  runuser -u agent -- /usr/local/bin/agentosd --home "$AGENT_HOME" --clear-pin >/dev/null 2>&1
+  [ -x /usr/local/bin/agentos-taskd ] || return 0
+  runuser -u agent -- /usr/local/bin/agentos-taskd --state-dir "$TASKD_STATE" --clear-pin >/dev/null 2>&1
+  pkill -x -u agent agentos-taskd 2>/dev/null || true
+}
 MANAGED=(AGENTOS_PLANNER ANTHROPIC_API_KEY AGENTOS_MODEL OPENAI_BASE_URL OPENAI_API_KEY
   OPENAI_MODEL AGENTOS_STT AGENTOS_TTS AGENTOS_SPEAK AGENTOS_VOICE_BASE_URL
   AGENTOS_VOICE_API_KEY HASS_URL HASS_TOKEN)
@@ -114,11 +134,10 @@ case "${1:-}" in
     install -m 0640 -o root -g agent "$tmp" "$ENV_FILE" || { rm -f "$tmp"; echo "无法写入 $ENV_FILE" >&2; exit 1; }
     rm -f "$tmp"
     if [ -n "${IN[PIN]:-}" ]; then
-      printf '%s\n%s\n' "${IN[PIN]}" "${IN[PIN]}" |
-        runuser -u agent -- /usr/local/bin/agentosd --home "$AGENT_HOME" --set-pin >/dev/null 2>&1 ||
-        { echo "设置已保存，但 PIN 设置失败（可以在终端运行 agentosd --set-pin）" >&2; exit 1; }
+      set_pins "${IN[PIN]}" ||
+        { echo "设置已保存，但 PIN 设置失败（可以在终端运行 agentosd --set-pin 和 agentos-taskd --set-pin）" >&2; exit 1; }
     elif [ -n "${IN[PIN_CLEAR]:-}" ]; then
-      runuser -u agent -- /usr/local/bin/agentosd --home "$AGENT_HOME" --clear-pin >/dev/null 2>&1
+      clear_pins
     fi
     touch /etc/agentos/setup-done || exit 1
     echo saved=1
@@ -254,17 +273,17 @@ case "$choice" in
         W --title "PIN" --msgbox "两次输入不一致，请重新设置。" 8 50
         continue
       fi
-      if printf '%s\n%s\n' "$p1" "$p2" | runuser -u agent -- /usr/local/bin/agentosd --home /home/agent/.local/share/agentos --set-pin >/dev/null 2>&1; then
+      if set_pins "$p1"; then
         W --title "PIN" --msgbox "PIN 已设置。" 8 40
       else
-        W --title "PIN" --msgbox "PIN 设置失败，可以稍后在终端运行 agentosd --set-pin。" 9 60
+        W --title "PIN" --msgbox "PIN 设置失败，可以稍后在终端运行 agentosd --set-pin 和 agentos-taskd --set-pin。" 9 66
       fi
       break
     done
     unset p1 p2
     ;;
   clear)
-    runuser -u agent -- /usr/local/bin/agentosd --home /home/agent/.local/share/agentos --clear-pin >/dev/null 2>&1
+    clear_pins
     W --title "PIN" --msgbox "已取消 PIN。" 8 40
     ;;
 esac

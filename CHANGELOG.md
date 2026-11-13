@@ -1,6 +1,21 @@
 # 更新日志
 
-## 未发布
+## v0.4.0
+
+让 Agent 成为一等公民：`agentos-taskd` 上的 Agent 可以同时做多件事、接着上一句话说、缺信息时发问、知道自己花了多少，并在你事先划定的范围内自主行动；别的 Agent 也可以通过 MCP 来用它。设计见 [docs/v0.4-design.md](docs/v0.4-design.md)。
+
+- **任务并行执行**：默认同时 4 个，一个任务在等模型时不再挡住其他任务。同一段对话里的任务仍按提交顺序开始。
+- **取消立即生效**：取消不再等模型请求返回；只读调用和沙箱插件的在途调用也会被放弃，这一步记为失败并写明结果未知，审计里以 `CapabilityInterrupted` 收尾。其他调用照旧运行到自己结束。
+- **会话线程**：每个任务属于一个线程。`agentos submit --thread task-N` 接着一段对话说，规划器会拿到这段对话里此前任务的意图和结局；终端工作台里每句话默认接着同一段对话，`/new` 另起一段；原生桌面连接任务服务时，一次运行是一段对话。接着说的任务如果拿到了读过外部内容的任务的结果，从一开始就按受污染处理。
+- **Agent 可以提问**：缺少只有你知道的信息时，Agent 调用 `ask.user`，任务进入新状态 `awaiting_input`（“等待回答”），不占执行名额。用 `agentos reply task-N 步骤 <回答>`、工作台的 `/reply`、Web Shell 任务详情里的输入框回答；原生桌面上你输入的下一句话就是回答。`submit --wait` 新增退出码 6。
+- **用量和预算**：每次模型请求的模型、输入输出 token 和耗时写入审计并累计到任务上，任务详情里多一行“用量”；接口没有报告的用量记为未知，不记为 0。每个任务有规划轮数、token（默认 200 万）和执行时长（默认 30 分钟，不含等你的时间）三项预算，用 `AGENTOS_TASK_TOKENS`、`AGENTOS_TASK_SECONDS` 调整。
+- **系统提示带上时间和设备**：每一轮规划都由服务附上当前时间、时区、主机名、系统和意图来源。主机名会随提示发给你配置的模型服务。
+- **预授权**：`agentos preauthorize <能力> …` 事先许可一类调用，之后符合规则的 L1/L2 调用不再逐次确认。规则针对参数（等于、属于列表、文本前缀、在目录内、任意），可带期限；没写到的参数默认不允许出现。不适用于 L3，不适用于读过外部内容的任务；撤销（`agentos revoke pre-N`）立即生效，每次命中都记入审计。设置了 PIN 时创建需要 PIN。
+- **AgentOS 作为 MCP server**：`agentos caller add <id> --name … --allow …` 注册一个外部调用方，`agentos mcp --caller <id>` 以它的身份在标准输入输出上提供 MCP 服务。调用方只能使用清单里的能力（默认什么都没有），只看得到自己的任务，有副作用的步骤默认都要你批准，它自己不能批准。见 [docs/mcp.md](docs/mcp.md#反过来agentos-作为-mcp-server)。
+- **镜像和更新包包含任务服务**：`agentos-taskd`、`agentos` 命令和 `agentos-web-shell` 进入镜像和 `agentos-update` 更新包。任务服务作为桌面用户的 systemd 用户服务（`agentos-taskd.service`）随登录启动，读取 `/etc/agentos/agentos.env`，状态在 `~/.local/state/agentos`；在终端里直接用 `agentos`。开机自检和在线更新的自检都会启动它并提交一条意图，开机自检还会经 `agentos mcp` 读一次能力。设置助理设置或清除 PIN 时两个守护进程一起改。图形桌面默认仍连接 `agentosd`，在 `agentos.env` 里设 `AGENTOS_DESKTOP=taskd` 可改为连接任务服务（没有按住说话的语音）。从 v0.2.x 在线更新上来时，任务服务在下次登录后才开始运行。
+- **行为变化：用完规划轮数的任务记为失败**。此前管家连续执行 8 轮后以“先停在这里”结束并记为已完成；现在是“超出预算：规划轮数”，已完成的步骤保留。
+- **行为变化：其他对话不再拿到受污染任务的结果**。此前“最近任务”的摘要会把读过外部内容的任务的结果放进下一个任务的提示里；现在只告诉规划器那个任务发生过。
+- 修复：MCP 请求被放弃后，等待表里的条目不再留到响应到达为止。
 
 让结果可信：任务的结局、时间和任务历史都如实反映发生了什么。
 
@@ -24,9 +39,11 @@
 - **规则规划器的行为变化（`agentosd`）**：只认完整的命令。“看看我的笔记”“把笔记清空”这类包含关键词的句子不再匹配，需要说“看看笔记”“清空笔记”。
 - 文档：两份架构说明合并为 [docs/architecture.md](docs/architecture.md)，新增 [AGENTS.md](AGENTS.md)。
 
-**尚未完成**：镜像仍默认启动 `agentosd`，因为按住说话的本机语音还由它承载；见[架构](docs/architecture.md#尚未合并的部分)。
+**尚未完成**：图形桌面默认仍连接 `agentosd`，因为按住说话的本机语音还由它承载；见[架构](docs/architecture.md#尚未合并的部分)。
 
 **兼容性**：协议 v1 新增了 `read` 方法、`unhandled` 任务状态、步骤的 `id` / `agent` 字段和 `skipped` 状态、确认请求的 `verify_identity`、`approve` 的 `pin`。严格解析的旧客户端需要升级；任务快照升到 schema 3，旧快照自动读取，新快照不保证旧程序可读。`agentos-taskd` 的任务在一步失败后不再立即结束，而是把失败交还给规划器。
+
+v0.4.0 在协议 v1 上又追加了：`reply`、`preauthorize`、`preauthorizations`、`revoke_preauthorization`、`register_caller`、`callers`、`revoke_caller` 方法；请求信封的 `caller`；`awaiting_input` 任务状态；任务的 `thread`、`question`、`usage` 字段；`submit` 和 `list` 的 `thread`；错误码 `invalid_reply`、`not_preauthorizable`、`forbidden`。不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务。任务快照升到 schema 4，旧快照自动读取，新快照旧程序读不了，所以升级后不能带着状态目录退回旧版本。审计日志新增了事件类型，旧记录照常可读。
 
 ## v0.3.0
 

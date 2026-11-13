@@ -94,6 +94,7 @@ rsync -aHAXx --numeric-ids --info=progress2 \
   --exclude='/tmp/*' --exclude='/var/tmp/*' --exclude='/var/log/journal/*' \
   --exclude='/var/cache/apt/archives/*.deb' --exclude='/var/lib/agentos/audit.jsonl' \
   --exclude='/home/*/.cache/*' --exclude='/run/*' \
+  --exclude='/home/*/.local/state/agentos/control.sock' \
   / "$mnt/"
 
 say "配置新系统"

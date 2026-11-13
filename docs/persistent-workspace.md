@@ -4,13 +4,26 @@
 
 AgentOS 探索以人的意图为入口、以 Agent 为执行者的操作系统：人交付目标，系统协调模型、能力、设备和权限，并持续解释执行状态。目标架构是 **Linux 内核 + Rust 用户态 Agent OS 层**；当前是可运行的单用户本地任务服务。
 
-**v0.3：后台系统服务与独立终端工作台。** Unix socket 将任务内核与交互界面分开，支持多个客户端、实时变更通知、分页历史和跨连接批准。退出工作台后，后台任务继续执行。
+**v0.4：并行任务、会话线程、提问、预算、预授权和 MCP server，见[设计](v0.4-design.md)。v0.3：后台系统服务与独立终端工作台。** Unix socket 将任务内核与交互界面分开，支持多个客户端、实时变更通知、分页历史和跨连接批准。退出工作台后，后台任务继续执行。
 
 - [v0.3 设计与实现边界](v0.3-design.md)
-- [v0.4 设计草案：让 Agent 成为一等公民](v0.4-design.md)（尚未实现）
+- [v0.4 设计：让 Agent 成为一等公民](v0.4-design.md)
 - [Unix socket 协议 v1](protocol-v1.md)
 - [架构概要](architecture.md) · [v0.2 审查与持久任务设计](v0.2-design.md)
 - [情景式图形 Shell：设计、启动与边界](ambient-shell.md)
+
+## 在 AgentOS 镜像里
+
+镜像里已经装好 `agentos-taskd`、`agentos` 和 `agentos-web-shell`。任务服务是桌面用户的 systemd 用户服务，登录后自动启动，读取 `/etc/agentos/agentos.env` 里的规划器和密钥设置，状态放在 `~/.local/state/agentos`。在终端（桌面里的 foot）直接用：
+
+```sh
+agentos                                   # 终端工作台
+agentos submit --wait 记一下 买牛奶
+systemctl --user status agentos-taskd     # 服务状态
+journalctl --user -u agentos-taskd        # 服务日志
+```
+
+修改 `agentos.env` 后用 `systemctl --user restart agentos-taskd` 生效。设置助理里设置的 PIN 同时用于 `agentosd` 和任务服务。图形桌面默认仍连接 `agentosd`；加一行 `AGENTOS_DESKTOP=taskd` 并重新登录，桌面改为连接任务服务（暂时没有按住说话的语音）。`agentos-web-shell` 不会自动启动。
 
 ## 快速体验
 

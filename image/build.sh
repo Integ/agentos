@@ -17,15 +17,17 @@
 #                 The finished image always points apt at the distro's
 #                 default mirror, so a CI-local mirror never leaks into it.
 #   OUT           output directory                      (default: out/)
-#   AGENTOSD_BIN  prebuilt agentosd binary (skips cargo build)
-#   AGENTOS_SHELL_BIN  prebuilt agentos-shell binary (skips cargo build)
+#   AGENTOSD_BIN, AGENTOS_SHELL_BIN, AGENTOS_TASKD_BIN, AGENTOS_CLI_BIN,
+#   AGENTOS_WEB_SHELL_BIN
+#                 prebuilt agentosd, agentos-shell, agentos-taskd, agentos and
+#                 agentos-web-shell binaries (all five skip cargo build)
 #   EXTRA_MB      free space left in the root fs, in MiB (default: 1024)
 #   COMPRESS      1 to also write <image>.xz            (default: 0)
 #   AGENTOS_RELEASE  release tag recorded in the image  (default: git describe)
 #
 # Host requirements: debootstrap, sfdisk (fdisk), mkfs.vfat (dosfstools),
 # mtools, mkfs.ext4 (e2fsprogs >= 1.47), cargo and libwebkit2gtk-4.1-dev
-# (unless both binaries are given).
+# (unless all binaries are given).
 #
 # Binaries must be linked against a glibc no newer than the target's; see
 # build-in-docker.sh, which builds them on Debian 12.
@@ -101,15 +103,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- 1. agentosd and agentos-shell -------------------------------------------
-if [[ -z "${AGENTOSD_BIN:-}" || -z "${AGENTOS_SHELL_BIN:-}" ]]; then
-  log "编译 agentosd 和 agentos-shell（release）"
-  (cd "$REPO" && cargo build --release -p agentosd -p agentos-shell)
+# --- 1. AgentOS programs ------------------------------------------------------
+# agentosd + agentos-shell are the desktop; agentos-taskd is the task service
+# (a user service started with the session), agentos its command line and
+# MCP server, agentos-web-shell the browser interface (started by hand).
+if [[ -z "${AGENTOSD_BIN:-}" || -z "${AGENTOS_SHELL_BIN:-}" || -z "${AGENTOS_TASKD_BIN:-}" ||
+      -z "${AGENTOS_CLI_BIN:-}" || -z "${AGENTOS_WEB_SHELL_BIN:-}" ]]; then
+  log "编译 AgentOS 程序（release）"
+  (cd "$REPO" && cargo build --release -p agentosd -p agentos-shell -p agentos-taskd \
+    -p agentos-cli -p agentos-web-shell)
 fi
 BIN="${AGENTOSD_BIN:-$REPO/target/release/agentosd}"
 SHELL_BIN="${AGENTOS_SHELL_BIN:-$REPO/target/release/agentos-shell}"
-[[ -x "$BIN" ]] || die "找不到 agentosd 可执行文件：$BIN"
-[[ -x "$SHELL_BIN" ]] || die "找不到 agentos-shell 可执行文件：$SHELL_BIN"
+TASKD_BIN="${AGENTOS_TASKD_BIN:-$REPO/target/release/agentos-taskd}"
+CLI_BIN="${AGENTOS_CLI_BIN:-$REPO/target/release/agentos}"
+WEB_SHELL_BIN="${AGENTOS_WEB_SHELL_BIN:-$REPO/target/release/agentos-web-shell}"
+for b in "$BIN" "$SHELL_BIN" "$TASKD_BIN" "$CLI_BIN" "$WEB_SHELL_BIN"; do
+  [[ -x "$b" ]] || die "找不到可执行文件：$b"
+done
 
 # --- 2. base system ----------------------------------------------------------
 rm -rf "$WORK"
@@ -218,6 +229,9 @@ cp -a --no-preserve=ownership "$HERE/rootfs/." "$ROOT/"
 chown root:root "$ROOT"
 install -m 0755 "$BIN" "$ROOT/usr/local/bin/agentosd"
 install -m 0755 "$SHELL_BIN" "$ROOT/usr/local/bin/agentos-shell"
+install -m 0755 "$TASKD_BIN" "$ROOT/usr/local/bin/agentos-taskd"
+install -m 0755 "$CLI_BIN" "$ROOT/usr/local/bin/agentos"
+install -m 0755 "$WEB_SHELL_BIN" "$ROOT/usr/local/bin/agentos-web-shell"
 chmod 0755 "$ROOT"/usr/local/bin/agentos-*
 chmod 0440 "$ROOT/etc/sudoers.d/agentos"
 echo "$DISTRO" > "$ROOT/usr/share/agentos/distro"

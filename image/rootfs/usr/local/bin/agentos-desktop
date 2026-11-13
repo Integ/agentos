@@ -2,12 +2,25 @@
 # The AgentOS desktop inside sway: agentosd on a Unix socket plus the
 # full-screen agentos-shell. Falls back to the text console if the graphical
 # shell cannot run.
+#
+# With AGENTOS_DESKTOP=taskd in /etc/agentos/agentos.env the desktop talks to
+# the task service (agentos-taskd, started with the session) instead: threads,
+# questions and the rest of v0.4, but no push-to-talk voice yet.
 export AGENTOS_SOCKET="$XDG_RUNTIME_DIR/agentos.sock"
 rm -f "$XDG_RUNTIME_DIR/agentos-shell.ready"
 
-/usr/local/bin/agentos-daemon &
-daemon=$!
-stop_daemon() { kill "$daemon" 2>/dev/null; pkill -x -u "$(id -u)" agentosd; }
+ENV_FILE=/etc/agentos/agentos.env
+desktop=$( [ -r "$ENV_FILE" ] && . "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${AGENTOS_DESKTOP:-}" )
+
+if [ "$desktop" = taskd ]; then
+  shell_args=(--taskd)
+  stop_daemon() { :; }
+else
+  shell_args=()
+  /usr/local/bin/agentos-daemon &
+  daemon=$!
+  stop_daemon() { kill "$daemon" 2>/dev/null; pkill -x -u "$(id -u)" agentosd; }
+fi
 
 # First boot: agentos-shell opens its setup assistant by itself until
 # /etc/agentos/setup-done exists (the text console runs agentos-setup).
@@ -18,9 +31,9 @@ ls /dev/dri/renderD* >/dev/null 2>&1 || export WEBKIT_DISABLE_DMABUF_RENDERER=1
 
 # Shell output goes to the journal (journalctl -t agentos-shell).
 if command -v systemd-cat >/dev/null; then
-  systemd-cat -t agentos-shell --stderr-priority=warning /usr/local/bin/agentos-shell
+  systemd-cat -t agentos-shell --stderr-priority=warning /usr/local/bin/agentos-shell "${shell_args[@]}"
 else
-  /usr/local/bin/agentos-shell 2>>"$XDG_RUNTIME_DIR/agentos-shell.log"
+  /usr/local/bin/agentos-shell "${shell_args[@]}" 2>>"$XDG_RUNTIME_DIR/agentos-shell.log"
 fi
 status=$?
 stop_daemon

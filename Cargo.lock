@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentos-audit"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agentos-core",
  "serde",
@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agentos-audit",
  "agentos-core",
@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-ipc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agentos-core",
  "agentos-policy",
@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-planner"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agentos-core",
  "async-trait",
@@ -64,7 +64,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-policy"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agentos-core",
  "serde",
@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-runtime"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agentos-core",
  "serde",
@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-services"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agentos-audit",
  "agentos-core",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-shell"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agentos-audit",
  "agentos-cli",
@@ -118,7 +118,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-taskd"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agentos-audit",
  "agentos-core",
@@ -137,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-web-shell"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agentos-cli",
  "agentos-core",
@@ -151,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "agentosd"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agentos-audit",
  "agentos-core",

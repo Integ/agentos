@@ -1,6 +1,6 @@
 #!/bin/bash
-# Boot self-check: prove agentosd runs on this machine (offline rule planner,
-# no network or API key needed). The result goes to the journal and to the
+# Boot self-check: prove agentosd and the task service run on this machine
+# (offline rule planner, no network or API key needed). The result goes to the journal and to the
 # serial console, where the QEMU smoke test looks for it.
 console() {
   echo "$*"
@@ -15,6 +15,40 @@ else
   console "AGENTOS-SELFCHECK: FAIL"
   printf '%s\n' "$out"
 fi
+
+# Task service: a throwaway agentos-taskd (offline rule planner) carries out
+# an intent from the agentos command, and its MCP server answers a registered
+# caller with exactly what that caller was given.
+taskd_check() {
+  local dir=/run/agentos-selfcheck-taskd pid ok=1 mcp
+  rm -rf "$dir"
+  mkdir -m 0700 "$dir"
+  cli() { timeout 60 /usr/local/bin/agentos --state-dir "$dir/state" "$@"; }
+  /usr/local/bin/agentos-taskd --planner rule --state-dir "$dir/state" >"$dir/log" 2>&1 &
+  pid=$!
+  for _ in $(seq 100); do [ -S "$dir/state/control.sock" ] && break; sleep 0.1; done
+  cli submit --wait --timeout 30 '记一下 开机自检' >"$dir/submit" 2>&1 || ok=0
+  cli caller add selfcheck --name 开机自检 --allow notes.list >/dev/null 2>&1 || ok=0
+  mcp=$(printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_capability","arguments":{"capability":"notes.list"}}}' \
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_capability","arguments":{"capability":"clock.now"}}}' |
+    cli mcp --caller selfcheck 2>&1)
+  # The note is readable through MCP; a capability it was not given is not.
+  grep '"id":2' <<<"$mcp" | grep -q '开机自检' || ok=0
+  grep '"id":3' <<<"$mcp" | grep -q '"isError":true' || ok=0
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  if [ "$ok" = 1 ]; then
+    console "AGENTOS-TASKD: OK ($(/usr/local/bin/agentos --version 2>/dev/null))"
+  else
+    console "AGENTOS-TASKD: FAIL"
+    cat "$dir/submit" "$dir/log"
+    printf '%s\n' "$mcp"
+  fi
+  rm -rf "$dir"
+}
+taskd_check
 
 # Plugin sandbox: an unprivileged bubblewrap sandbox can run Python.
 if [ "$(runuser -u agent -- bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
@@ -76,6 +110,21 @@ else
   console "AGENTOS-DESKTOP: FAIL"
   journalctl -q -b --no-pager -n 20 -t agentos-shell -t agentosd -t agentos-desktop 2>/dev/null
   tail -n 20 "/run/user/$(id -u agent)/agentos-shell.log" /tmp/agentos-sway.log 2>/dev/null
+fi
+
+# The desktop user's own task service: agentos-session starts it at login as
+# a user unit, and the agentos command (as that user) reaches it.
+state=$(getent passwd agent | cut -d: -f6)/.local/state/agentos
+for _ in $(seq 60); do
+  runuser -u agent -- /usr/local/bin/agentos --state-dir "$state" ping >/dev/null 2>&1 && break
+  sleep 2
+done
+if out=$(runuser -u agent -- /usr/local/bin/agentos --state-dir "$state" ping 2>&1); then
+  console "AGENTOS-TASKD-SESSION: OK ($out)"
+else
+  console "AGENTOS-TASKD-SESSION: FAIL"
+  printf '%s\n' "$out"
+  journalctl -q -b --no-pager -n 20 -t agentos-taskd 2>/dev/null
 fi
 
 # Crash logging: the desktop's agentosd writes to the journal (agentos-daemon

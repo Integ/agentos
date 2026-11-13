@@ -10,36 +10,35 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 ## 项目状态
 
-截至 2026-11-12：
+截至 2026-11-13：
 
-- **版本**：`main` 分支是 v0.3.0 加上[更新日志](CHANGELOG.md)里“未发布”的改动。v0.3.0 没有打 tag、没有发布镜像；最新发布版是 **v0.2.2**（2026-11-02），[Releases](https://github.com/Integ/agentos/releases) 里的镜像是这一版。
-- **一个任务内核**：任务内核是 `agentos-taskd`：持久任务、多轮规划、子 Agent、黑板、MCP、插件、智能家居、PIN 和哈希链审计都在这一个服务里，终端、Web Shell 和原生桌面都通过同一个协议连接它。镜像目前仍默认启动旧的 `agentosd`，因为按住说话的本机语音还没有迁过来；见[架构](docs/architecture.md#尚未合并的部分)。给写代码的 Agent 的说明在 [AGENTS.md](AGENTS.md)。
+- **版本**：`main` 分支是 v0.4.0，内容见[更新日志](CHANGELOG.md)。v0.3.0 和 v0.4.0 都还没有打 tag、没有发布镜像；最新发布版是 **v0.2.2**（2026-11-02），[Releases](https://github.com/Integ/agentos/releases) 里的镜像是这一版。
+- **一个任务内核**：任务内核是 `agentos-taskd`（从 v0.4.0 起进入镜像和更新包，随登录启动）：持久任务、多轮规划、子 Agent、黑板、MCP、插件、智能家居、PIN 和哈希链审计都在这一个服务里，终端、Web Shell 和原生桌面都通过同一个协议连接它。图形桌面默认仍连接旧的 `agentosd`，因为按住说话的本机语音还没有迁过来；见[架构](docs/architecture.md#尚未合并的部分)。给写代码的 Agent 的说明在 [AGENTS.md](AGENTS.md)。
 
 两个守护进程现在共用规划器、审计日志和各项能力的代码，区别只剩下面这些：
 
 | | `agentos-taskd`（任务内核） | `agentosd`（过渡期保留） |
 | --- | --- | --- |
 | 定位 | 新功能加在这里 | 待删除，不再加新功能 |
-| 界面 | `agentos` 命令与终端工作台、Web Shell、原生桌面（`agentos-shell --taskd`） | 原生桌面（默认方式）、控制台 |
-| 只有它有 | 协议 v1、分页历史、变更通知、只读能力的直接查询 | 按住说话的本机语音、崩溃后在桌面上的提示 |
+| 界面 | `agentos` 命令与终端工作台、`agentos mcp`、Web Shell、原生桌面（`agentos-shell --taskd`，镜像里设 `AGENTOS_DESKTOP=taskd`） | 原生桌面（默认方式）、控制台 |
+| 只有它有 | 协议 v1、分页历史、变更通知、只读能力的直接查询；并行执行、会话线程、Agent 提问、用量与预算、预授权、作为 MCP server | 按住说话的本机语音、崩溃后在桌面上的提示 |
 | 重启后 | 未完成的任务标为“已中断”，不自动重做 | 从检查点接着做 |
 | L3 操作 | 设置 PIN 后等待批准，批准必须带 PIN；没有设置 PIN 时拒绝 | 你确认后执行；设置 PIN 后还要输入 PIN |
 | 语音 | Web Shell 的 WebRTC 实时对话，音频发给模型服务 | 按住说话 + 朗读，云端或本机后端 |
-| 怎么得到 | 从源码运行，镜像里还没有 | 发布镜像默认启动，可在线更新 |
+| 怎么得到 | 镜像里作为桌面用户的服务随登录启动，用 `agentos` 命令连接，可在线更新 | 镜像里随图形桌面启动，可在线更新 |
 | 状态目录 | `~/.local/state/agentos` | `~/.local/share/agentos` |
 
 两个状态目录之间没有数据迁移。
 
 - **CI 覆盖**：Ubuntu 上的格式、Clippy、全部测试和在线更新模拟测试；macOS 和 Rust 1.88 上任务内核一侧的测试；Web Shell 的前端测试；cargo-deny。
 - **还没有验证**：
-  - 任务服务一侧（合并时列出）：`agentos-shell --taskd` 的窗口界面没有实际打开看过；真实的模型接口、MCP server 和 Home Assistant 没有在任务服务上跑过；合并后没有跑镜像构建和 QEMU 冒烟测试。
+  - 任务服务一侧（合并时列出）：`agentos-shell --taskd` 的窗口界面没有实际打开看过；OpenAI 兼容接口在任务服务上跑过一轮真实请求（线程、提问、取消、用量、外部调用方），Claude 接口、裁判、真实的 MCP 客户端和 server、Home Assistant 没有；v0.4.0 新增的提问面板和用量显示在 Web Shell 和原生桌面上没有实际操作过；合并后没有跑镜像构建和 QEMU 冒烟测试。
   - 真机（v0.2.0 发布时列出，之后没有更新过）：Caps Lock 按键说话和指示灯、真实麦克风和扬声器；真实的 Home Assistant 和 MCP 服务器；从一个发布版本在线升级到下一个发布版本。v0.2.2 的修复来自 Intel N100 小主机和笔记本上的真机测试。
 
 已知缺口：
 
-- 合并还差最后一步：把本机语音和崩溃提示迁到任务服务，把镜像切到 `agentos-taskd` + `agentos-shell --taskd`，迁移数据，然后删除 `agentosd`。见[架构](docs/architecture.md#尚未合并的部分)。
-- v0.3.0 还没有发版，`agentos-taskd`、`agentos-web-shell` 和 `agentos` 命令没有进镜像和更新包。
-- 任务串行执行（单 worker）；除插件在 bubblewrap 沙箱里以外，能力与服务同进程运行，没有进程隔离。见[架构](docs/architecture.md#其他边界)。
+- 合并还差最后一步：把本机语音和崩溃提示迁到任务服务，把桌面默认切到 `agentos-shell --taskd`，迁移数据，然后删除 `agentosd`。在那之前两个守护进程同时运行，笔记、插件和黑板各有一份。见[架构](docs/architecture.md#尚未合并的部分)。
+- 调用没有超时：不可中止的调用挂住时会一直占着一个执行名额。除插件在 bubblewrap 沙箱里以外，能力与服务同进程运行，没有进程隔离。见[架构](docs/architecture.md#其他边界)。
 - 没有本机唤醒词，没有定时任务（见 [docs/agents.md](docs/agents.md#尚未实现)）。
 - Web Shell 是浏览器里的本地界面，不是桌面合成器；实时语音会把音频发给模型服务，不是全本地语音。
 - 仓库里还没有 LICENSE 文件，使用和分发条款尚未声明。

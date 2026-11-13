@@ -4,8 +4,9 @@
 #
 #   image/test/update-test.sh [bundle.tar.gz]
 #
-# Without an argument a bundle is made from target/debug/agentosd
-# (cargo build -p agentosd first).
+# Without an argument a bundle is made from target/debug/agentosd,
+# agentos-taskd and agentos (cargo build -p agentosd -p agentos-taskd
+# -p agentos-cli first).
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 UPDATE="$REPO/image/rootfs/usr/local/bin/agentos-update"
@@ -24,7 +25,9 @@ if [ $# -ge 1 ]; then
   bundle="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 else
   OUT="$T/out" AGENTOS_RELEASE=v9.9.9 AGENTOSD_BIN="$REPO/target/debug/agentosd" \
-    AGENTOS_SHELL_BIN=/bin/true "$REPO/image/make-bundle.sh" >/dev/null
+    AGENTOS_SHELL_BIN=/usr/bin/true AGENTOS_TASKD_BIN="$REPO/target/debug/agentos-taskd" \
+    AGENTOS_CLI_BIN="$REPO/target/debug/agentos" AGENTOS_WEB_SHELL_BIN=/usr/bin/true \
+    "$REPO/image/make-bundle.sh" >/dev/null
   bundle="$T/out/agentos-update-x86_64.tar.gz"
 fi
 new_release=$(tar -xzOf "$bundle" usr/share/agentos/release)
@@ -66,6 +69,10 @@ ok "--check reports the new release"
 cmp -s "$root/usr/local/bin/agentosd" <(tar -xzOf "$bundle" usr/local/bin/agentosd) || fail "agentosd not replaced"
 [ -x "$root/usr/local/bin/agentos-update" ] || fail "scripts not installed"
 [ -f "$root/etc/systemd/system/agentos-selfcheck.service" ] || fail "units not installed"
+cmp -s "$root/usr/local/bin/agentos-taskd" <(tar -xzOf "$bundle" usr/local/bin/agentos-taskd) ||
+  fail "agentos-taskd not installed"
+[ -x "$root/usr/local/bin/agentos" ] || fail "agentos command not installed"
+[ -f "$root/usr/lib/systemd/user/agentos-taskd.service" ] || fail "task service user unit not installed"
 grep -q keep-me "$root/etc/agentos/agentos.env" || fail "settings touched"
 [ -z "$(find "$root" -name '*.agentos-new')" ] || fail "temp files left behind"
 ok "update installs the bundle and keeps settings"
@@ -80,6 +87,8 @@ ok "up to date afterwards"
 [ "$(cat "$root/usr/share/agentos/release")" = v0.0.1 ] || fail "release not rolled back"
 grep -q 'echo old' "$root/usr/local/bin/agentosd" || fail "agentosd not rolled back"
 [ ! -e "$root/usr/local/bin/agentos-update" ] || fail "new-only files not removed"
+[ ! -e "$root/usr/local/bin/agentos-taskd" ] || fail "agentos-taskd left behind by rollback"
+[ ! -e "$root/usr/lib/systemd/user/agentos-taskd.service" ] || fail "user unit left behind by rollback"
 if "$UPDATE" --rollback >/dev/null 2>&1; then fail "second rollback should fail"; fi
 ok "rollback restores the previous version"
 
@@ -116,6 +125,17 @@ if "$UPDATE" >"$T/log" 2>&1; then fail "broken agentosd accepted"; fi
 grep -q "自检失败" "$T/log" || { cat "$T/log"; fail "wrong error for broken agentosd"; }
 grep -q 'echo old' "$root/usr/local/bin/agentosd" || fail "broken update changed files"
 ok "a new agentosd that fails its self-check is not installed"
+
+evil broken-taskd 'printf "#!/bin/sh\nexit 1\n" > usr/local/bin/agentos-taskd'
+if "$UPDATE" >"$T/log" 2>&1; then fail "broken agentos-taskd accepted"; fi
+grep -q "任务服务自检失败" "$T/log" || { cat "$T/log"; fail "wrong error for broken agentos-taskd"; }
+[ ! -e "$root/usr/local/bin/agentos-taskd" ] || fail "broken task service update changed files"
+ok "a new agentos-taskd that fails its self-check is not installed"
+
+evil no-cli 'rm usr/local/bin/agentos'
+if "$UPDATE" >"$T/log" 2>&1; then fail "task service without its command accepted"; fi
+grep -q "没有 agentos 命令" "$T/log" || { cat "$T/log"; fail "wrong error for a missing agentos command"; }
+ok "a bundle with the task service but without its command is refused"
 
 # Offline install from a local file.
 cp "$bundle" "$T/offline.tar.gz"

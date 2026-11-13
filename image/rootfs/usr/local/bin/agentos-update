@@ -1,7 +1,8 @@
 #!/bin/bash
-# Update the AgentOS layer (agentosd, agentos-shell, the agentos-* scripts and
-# their systemd/udev files) from a GitHub release, with a health check before
-# anything is replaced and one-step rollback.
+# Update the AgentOS layer (agentosd, agentos-shell, agentos-taskd, agentos,
+# agentos-web-shell, the agentos-* scripts and their systemd/udev files) from
+# a GitHub release, with a health check before anything is replaced and
+# one-step rollback.
 #
 #   sudo agentos-update              # install the latest release
 #   agentos-update --check           # only report whether one is available
@@ -76,13 +77,16 @@ print(r["tag_name"], assets[name], assets[name + ".sha256"], sep="\t")
 ' "$ASSET"
 }
 
-# Services that pick up new files: systemd units, udev rules, the daemon
-# (agentos-daemon restarts it within a second). The shell needs a new session.
+# Services that pick up new files: systemd units, udev rules, the daemons
+# (agentos-daemon restarts agentosd within a second; the task service's user
+# unit restarts agentos-taskd, which first marks unfinished tasks interrupted).
+# The shell needs a new session.
 reload() {
   [ -z "$ROOT" ] || return 0
   systemctl daemon-reload 2>/dev/null || true
   udevadm control --reload 2>/dev/null || true
   pkill -x agentosd 2>/dev/null || true
+  pkill -x agentos-taskd 2>/dev/null || true
 }
 
 # Accept only the paths AgentOS owns; reject links, devices and the like.
@@ -107,6 +111,32 @@ health_check() {
       --audit "$tmp/audit.jsonl" 2>&1) || true
   rm -rf "$tmp"
   grep -q '更新自检' <<<"$out" || { printf '%s\n' "$out" | tail -20 >&2; die "新版本自检失败，未做任何改动"; }
+  health_check_taskd "$dir"
+}
+
+# The new task service must accept an intent from the new `agentos` command
+# and carry it out with the offline rule planner. Bundles from before the
+# task service was shipped have neither, and are checked as before.
+health_check_taskd() {
+  local dir="$1" tmp pid out status=0
+  [ -e "$dir/usr/local/bin/agentos-taskd" ] || return 0
+  [ -x "$dir/usr/local/bin/agentos" ] || die "更新包里有 agentos-taskd 却没有 agentos 命令"
+  tmp=$(mktemp -d)
+  # No model, no judge: whatever keys this shell has must not be used.
+  env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u OPENAI_BASE_URL -u AGENTOS_PLANNER -u AGENTOS_JUDGE \
+    "$dir/usr/local/bin/agentos-taskd" --planner rule --state-dir "$tmp/state" >"$tmp/log" 2>&1 &
+  pid=$!
+  for _ in $(seq 100); do [ -S "$tmp/state/control.sock" ] && break; sleep 0.1; done
+  out=$(timeout 60 "$dir/usr/local/bin/agentos" --state-dir "$tmp/state" \
+    submit --wait --timeout 30 '记一下 更新自检' 2>&1) || status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  if [ "$status" -ne 0 ] || ! grep -q '更新自检' <<<"$out"; then
+    { printf '%s\n' "$out"; tail -20 "$tmp/log"; } | tail -30 >&2
+    rm -rf "$tmp"
+    die "新版本的任务服务自检失败，未做任何改动"
+  fi
+  rm -rf "$tmp"
 }
 
 # Copy every file of $1 over $ROOT, each one atomically (write next to the

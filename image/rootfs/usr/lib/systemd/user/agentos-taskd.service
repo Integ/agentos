@@ -1,0 +1,23 @@
+# The AgentOS task service for the desktop user: tasks, threads, budgets,
+# pre-authorizations and the socket the `agentos` command and its MCP server
+# talk to. State lives in ~/.local/state/agentos.
+#
+# agentos-session starts it at login instead of it being enabled: an update
+# bundle can add this file, but not the symlink that enabling would need.
+[Unit]
+Description=AgentOS task service (agentos-taskd)
+
+[Service]
+ExecStart=/usr/local/bin/agentos-taskd-service
+SyslogIdentifier=agentos-taskd
+# It also exits cleanly when asked to (agentos-update replaces it that way),
+# so restart on any exit, backing off when it keeps failing.
+Restart=always
+RestartSec=1
+RestartSteps=5
+RestartMaxDelaySec=30
+# On SIGTERM it drains admitted work for up to five seconds.
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

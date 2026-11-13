@@ -9,7 +9,7 @@
 #      and a screenshot of the graphical session is saved
 #
 # In both boots the graphical desktop (sway + agentos-shell connected to
-# agentosd) must come up.
+# agentosd) and the desktop user's task service (agentos-taskd) must come up.
 #
 # Usage: image/test/qemu-smoke.sh out/agentos-debian-x86_64.img [workdir]
 set -euo pipefail
@@ -107,6 +107,8 @@ run_vm usb \
   -fw_cfg name=opt/agentos/autoinstall,string=/dev/vdb
 wait_for "$WORK/serial-usb.log" 'AGENTOS-SELFCHECK: OK' "$TIMEOUT" || fail usb "U 盘启动自检失败"
 log "U 盘启动自检通过：$(grep -ao 'AGENTOS-SELFCHECK: [^)]*)' "$WORK/serial-usb.log" | tail -1)"
+wait_for "$WORK/serial-usb.log" 'AGENTOS-TASKD: OK' 120 || fail usb "任务服务、agentos 命令或 MCP server 自检失败"
+log "任务服务：$(grep -ao 'AGENTOS-TASKD: OK[^\r]*' "$WORK/serial-usb.log" | tail -1)"
 wait_for "$WORK/serial-usb.log" 'AGENTOS-SANDBOX: OK' 120 || fail usb "bubblewrap 沙箱里跑不起 Python"
 log "插件沙箱（bubblewrap + Python）可用"
 wait_for "$WORK/serial-usb.log" 'AGENTOS-SUDO: OK' 60 || fail usb "agent 不能免密 sudo（检查 /etc/sudoers.d 属主）"
@@ -118,6 +120,8 @@ wait_for "$WORK/serial-usb.log" 'AGENTOS-NETWORK: OK' 120 || fail usb "网络没
 log "有线网络自动连接、DNS 正常"
 wait_for "$WORK/serial-usb.log" 'AGENTOS-DESKTOP: OK' 240 || fail usb "图形桌面（agentos-shell）没有就绪"
 log "图形桌面就绪：$(grep -ao 'AGENTOS-DESKTOP: OK[^\r]*' "$WORK/serial-usb.log" | tail -1)"
+wait_for "$WORK/serial-usb.log" 'AGENTOS-TASKD-SESSION: OK' 180 || fail usb "登录后没有启动桌面用户的任务服务（agentos-taskd.service）"
+log "桌面用户的任务服务：$(grep -ao 'AGENTOS-TASKD-SESSION: OK[^\r]*' "$WORK/serial-usb.log" | tail -1)"
 wait_for "$WORK/serial-usb.log" 'AGENTOS-JOURNAL: OK' 60 || fail usb "agentosd 的输出没有进 journal（agentos-daemon / systemd-cat）"
 wait_for "$WORK/serial-usb.log" 'AGENTOS-AUTOINSTALL: OK' "$TIMEOUT" || fail usb "自动安装失败"
 log "安装完成，等待关机"
@@ -130,6 +134,7 @@ wait_for "$WORK/serial-disk.log" 'AGENTOS-SELFCHECK: OK' "$TIMEOUT" || fail disk
 log "硬盘启动自检通过"
 wait_for "$WORK/serial-disk.log" 'AGENTOS-DESKTOP: OK' 240 || fail disk "硬盘启动后图形桌面没有就绪"
 log "硬盘启动后图形桌面就绪"
+wait_for "$WORK/serial-disk.log" 'AGENTOS-TASKD-SESSION: OK' 180 || fail disk "硬盘启动后任务服务没有启动"
 sleep "${SCREENSHOT_DELAY:-20}"   # let the setup assistant settle over the desktop
 # Wiggle the pointer so the compositor repaints the whole output first.
 for xy in "40 40" "-40 -40" "40 40"; do monitor disk "mouse_move $xy"; done
