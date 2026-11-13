@@ -17,7 +17,7 @@
 响应保留原请求的 `id`：
 
 ```json
-{"version":1,"id":7,"body":{"status":"ok","data":{"type":"pong","server_version":"0.3.0","revision":12}}}
+{"version":1,"id":7,"body":{"status":"ok","data":{"type":"pong","server_version":"0.4.0","revision":12}}}
 ```
 
 错误响应：
@@ -28,7 +28,7 @@
 
 信封还可以带一个可选的 `caller`，表示以某个已注册的外部调用方的身份发出请求；见“外部调用方”。
 
-`version` 是协议版本，与程序的语义版本号分开。v0.3 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法；请求信封的 `caller`、`preauthorize` 的 `caller`，以及 `register_caller`、`callers`、`revoke_caller` 方法。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
+`version` 是协议版本，与程序的语义版本号分开。v0.3 和 v0.4 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法；请求信封的 `caller`、`preauthorize` 的 `caller`，以及 `register_caller`、`callers`、`revoke_caller` 方法。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
 
 `id` 是客户端选择的无符号整数，仅用于关联响应，**不是幂等键**。重复发送同一个 `submit` 请求编号仍可能创建第二个任务。收到完整响应前连接断开时，结果可能已经落盘；客户端必须查询任务，不能自动重发变更请求。
 
@@ -277,7 +277,7 @@ PIN 由服务端核对，不保存、不写入任务或审计；核对通过只�
 
 ## 资源界限与背压
 
-| 项目 | v0.3 限制与行为 |
+| 项目 | v0.4 限制与行为 |
 | --- | --- |
 | 单帧 | 最多 1,048,576 字节，不含末尾换行；接收和响应序列化均有界 |
 | 意图与回答文本 | 非空，最多 65,536 字节，按解码后的 UTF-8 字节数计算 |

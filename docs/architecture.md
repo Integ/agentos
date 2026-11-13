@@ -1,6 +1,6 @@
 # 架构
 
-AgentOS 是 Linux 内核之上的用户态 Agent OS：人交付意图，系统协调模型、能力、设备和权限，并持续说明执行状态。本文是唯一的架构说明；设计草案的历史版本见 [v0.2 设计](v0.2-design.md)、[v0.3 设计](v0.3-design.md)和[AgentOS 架构设计草案](https://claude.ai/artifact/RzRDjHkBbJVbnyFDRSZ4BN)。下一步的提案（尚未实现）见 [v0.4 设计草案](v0.4-design.md)。
+AgentOS 是 Linux 内核之上的用户态 Agent OS：人交付意图，系统协调模型、能力、设备和权限，并持续说明执行状态。本文是唯一的架构说明；设计草案的历史版本见 [v0.2 设计](v0.2-design.md)、[v0.3 设计](v0.3-design.md)和[AgentOS 架构设计草案](https://claude.ai/artifact/RzRDjHkBbJVbnyFDRSZ4BN)。v0.4 的设计见 [v0.4 设计](v0.4-design.md)。
 
 ## 基础决策
 
