@@ -1,5 +1,7 @@
 use agentos_core::{now_ms, RiskLevel};
-use agentos_ipc::{Event, EventKind, Reply, TaskSummary};
+use agentos_ipc::{
+    Caller, Event, EventKind, Matcher, Preauthorization, Reply, Subject, TaskSummary,
+};
 use agentos_runtime::{StepState, Task, TaskId, TaskState};
 
 use crate::wait::WaitOutcome;
@@ -41,6 +43,7 @@ pub fn state_label(state: TaskState) -> &'static str {
         TaskState::Planning => "规划中",
         TaskState::Running => "执行中",
         TaskState::AwaitingConfirmation => "等待批准",
+        TaskState::AwaitingInput => "等待回答",
         TaskState::Succeeded => "已完成",
         TaskState::Unhandled => "未能处理",
         TaskState::Failed => "失败",
@@ -179,10 +182,111 @@ pub fn task_detail(task: &Task, include_token: bool) -> String {
             }
         }
     }
+    let used = &task.usage;
+    if used.model_calls > 0 {
+        let mut line = format!(
+            "  用量：{} 次模型请求 · 输入 {} / 输出 {} token · 执行 {} 秒",
+            used.model_calls,
+            used.input_tokens,
+            used.output_tokens,
+            used.active_ms / 1_000
+        );
+        if used.unmetered_calls > 0 {
+            // Unknown is not zero: say that the counts are a lower bound.
+            line.push_str(&format!(
+                "（其中 {} 次没有报告用量，token 数只是下限）",
+                used.unmetered_calls
+            ));
+        }
+        lines.push(line);
+    }
+    if let Some(question) = &task.question {
+        // The question itself is the task's message, shown above.
+        lines.push(format!(
+            "  任务在等你回答第 {} 步的问题；不回答就不会继续。",
+            question.step + 1
+        ));
+        lines.push(if include_token {
+            format!(
+                "  agentos reply {} {} <你的回答>",
+                task.id,
+                question.step + 1
+            )
+        } else {
+            format!(
+                "  回答 /reply {} {} <你的回答>    取消 /cancel {}",
+                task.id,
+                question.step + 1,
+                task.id
+            )
+        });
+    }
     if task.state == TaskState::Cancelled {
         lines.push("  后续步骤已停止；已开始的调用可能仍产生结果。".into());
     }
     lines.join("\n")
+}
+
+/// One caller and exactly what it was given.
+pub fn caller_line(caller: &Caller) -> String {
+    format!(
+        "{} · {} · 最高 {} · {}",
+        one_line(&caller.id, 40),
+        one_line(&caller.name, 80),
+        risk_label(caller.max_risk),
+        if caller.capabilities.is_empty() {
+            "没有任何能力".to_string()
+        } else {
+            caller
+                .capabilities
+                .iter()
+                .map(|pattern| one_line(pattern, 80))
+                .collect::<Vec<_>>()
+                .join("、")
+        }
+    )
+}
+
+/// One pre-authorization, with every rule spelled out: what is not written
+/// here is not permitted by it.
+pub fn preauthorization_line(pre: &Preauthorization) -> String {
+    let value = |v: &serde_json::Value| one_line(&v.to_string(), 120);
+    let mut rules: Vec<String> = pre
+        .args
+        .iter()
+        .map(|rule| {
+            let field = one_line(&rule.field, 60);
+            match &rule.matcher {
+                Matcher::Equals(v) => format!("{field} = {}", value(v)),
+                Matcher::OneOf(vs) => format!(
+                    "{field} 属于 [{}]",
+                    vs.iter().map(value).collect::<Vec<_>>().join(", ")
+                ),
+                Matcher::Prefix(text) => format!("{field} 以 {} 开头", one_line(text, 120)),
+                Matcher::Under(dir) => format!("{field} 在目录 {} 内", one_line(dir, 120)),
+                Matcher::Any => format!("{field} 任意"),
+            }
+        })
+        .collect();
+    rules.push(if pre.other_args {
+        "其他参数任意".into()
+    } else {
+        "不允许其他参数".into()
+    });
+    let expiry = match pre.expires_at_ms {
+        Some(at) => format!("剩余 {} 分钟", at.saturating_sub(now_ms()).div_ceil(60_000)),
+        None => "不过期".into(),
+    };
+    let subject = match &pre.subject {
+        Subject::User => "你自己的任务".to_string(),
+        Subject::Caller(id) => format!("调用方 {} 的任务", one_line(id, 40)),
+    };
+    format!(
+        "{} · {subject} · {} · {} · {expiry}",
+        one_line(&pre.id, 40),
+        one_line(pre.capability.as_str(), 100),
+        rules.join("；")
+    )
 }
 
 pub fn task_rows(tasks: &[TaskSummary], selected: Option<TaskId>) -> String {
@@ -231,6 +335,10 @@ pub fn dashboard(
         .iter()
         .filter(|t| t.state == TaskState::AwaitingConfirmation)
         .count();
+    let asking = tasks
+        .iter()
+        .filter(|t| t.state == TaskState::AwaitingInput)
+        .count();
     let done = tasks
         .iter()
         .filter(|t| t.state == TaskState::Succeeded)
@@ -244,7 +352,7 @@ pub fn dashboard(
             )
         })
         .count();
-    let mut out = format!("\n╭─ AgentOS v{} · 任务工作台 ─────────────────────────────\n│ {}  · 快照 #{revision} · 第 {page_number} 页\n│ 本页 {} 项  进行中 {active}  待批准 {waiting}  已完成 {done}  需查看 {attention}\n╰────────────────────────────────────────────────────────\n  任务       状态     步骤  意图\n{}\n",env!("CARGO_PKG_VERSION"),if connected { "● 已连接后台" } else { "○ 连接中断，正在重连视图" },tasks.len(),task_rows(tasks,selected.map(|t|t.id)));
+    let mut out = format!("\n╭─ AgentOS v{} · 任务工作台 ─────────────────────────────\n│ {}  · 快照 #{revision} · 第 {page_number} 页\n│ 本页 {} 项  进行中 {active}  待批准 {waiting}  待回答 {asking}  已完成 {done}  需查看 {attention}\n╰────────────────────────────────────────────────────────\n  任务       状态     步骤  意图\n{}\n",env!("CARGO_PKG_VERSION"),if connected { "● 已连接后台" } else { "○ 连接中断，正在重连视图" },tasks.len(),task_rows(tasks,selected.map(|t|t.id)));
     out.push_str(&format!(
         "\n  /prev 上一页  {}  /latest 最近任务\n",
         if has_older {
@@ -272,10 +380,11 @@ pub fn reply_text(reply: &Reply) -> String {
             one_line(server_version, 100)
         ),
         Reply::Accepted { task } => format!(
-            "[{}] 已接收 · {}。客户端退出后任务继续。\n使用 agentos task {} 查看进度。",
+            "[{}] 已接收 · {}。客户端退出后任务继续。\n使用 agentos task {} 查看进度；接着说用 agentos submit --thread {} <意图>。",
             task.id,
             state_label(task.state),
-            task.id
+            task.id,
+            task.thread
         ),
         Reply::Tasks {
             tasks,
@@ -313,6 +422,42 @@ pub fn reply_text(reply: &Reply) -> String {
         Reply::ApprovalQueued { id, step } => {
             format!("{id} 第 {step} 步的批准请求已排队；执行前仍会校验权限与有效期。")
         }
+        Reply::ReplyQueued { id, step } => {
+            format!("{id} 第 {step} 步的回答已收到；任务会接着进行。")
+        }
+        Reply::Preauthorized { preauthorization } => format!(
+            "已创建预授权，符合它的调用不再逐次确认：\n{}\n撤销：agentos revoke {}",
+            preauthorization_line(preauthorization),
+            one_line(&preauthorization.id, 40)
+        ),
+        Reply::Preauthorizations { preauthorizations } if preauthorizations.is_empty() => {
+            "没有有效的预授权。".into()
+        }
+        Reply::Preauthorizations { preauthorizations } => preauthorizations
+            .iter()
+            .map(preauthorization_line)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Reply::PreauthorizationRevoked { id } => format!(
+            "{} 已撤销，立即生效；进行中的任务也不再适用。",
+            one_line(id, 40)
+        ),
+        Reply::CallerRegistered { caller } => format!(
+            "已注册外部调用方，它只能使用列出的能力：\n{}\n接入：agentos mcp --caller {}　撤销：agentos caller remove {}",
+            caller_line(caller),
+            one_line(&caller.id, 40),
+            one_line(&caller.id, 40)
+        ),
+        Reply::Callers { callers } if callers.is_empty() => "没有注册外部调用方。".into(),
+        Reply::Callers { callers } => callers
+            .iter()
+            .map(caller_line)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Reply::CallerRevoked { id } => format!(
+            "调用方 {} 已撤销；它进行中的任务不再能调用任何能力，它的预授权也一并撤销。",
+            one_line(id, 40)
+        ),
         Reply::Watching { revision } => {
             format!("已订阅任务变更 · 快照 #{revision}；断线后需重新同步任务视图。")
         }
@@ -327,6 +472,9 @@ pub fn wait_text(outcome: &WaitOutcome) -> String {
         WaitOutcome::Settled(_) => return detail,
         WaitOutcome::NeedsApproval(_) => {
             "任务在等待批准，不会自行继续；核对上面的步骤与参数后再批准或取消。".to_string()
+        }
+        WaitOutcome::NeedsInput(_) => {
+            "任务在等待你的回答，不会自行继续；用上面的 reply 命令回答，或取消任务。".to_string()
         }
         WaitOutcome::TimedOut(_) => format!(
             "等待超时；任务仍在后台继续。稍后使用 agentos task {} 查看。",

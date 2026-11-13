@@ -35,6 +35,9 @@ need 写清楚要做什么、输入和输出；用户要求改进已安装的插
 它们只能用自己被授权的工具，做完会把结果交还给你。\
 \n- 每轮工具调用的结果会交还给你，你可以根据结果继续调用工具。事情做完后用一两句话总结，不要重复每一步已经汇报过的内容。\
 \n- 需要长期记住、或者要交给以后的任务和其他 Agent 的事实，写到共享黑板（board__write）；系统提示里会附上最近的任务和黑板内容，供你参考。\
+\n- 缺少只有用户知道的信息、而且猜错会有代价时，调用 ask__user 问一个具体的问题，然后等回答；\
+能从上下文或工具查到的不要问，能直接回答的不要反问。\
+\n- 系统提示里的“这次对话里此前的内容”是用户这句话的上文，“它”“刚才那个”这类指代按上文理解。\
 \n- 闲聊、知识问答等不需要工具的，用一两句话直接回答，不要编造工具。\
 \n- 用用户使用的语言回复，简洁。";
 
@@ -46,6 +49,7 @@ pub fn sub_agent_prompt(name: &str, description: &str, extra: Option<&str>) -> S
 \n- 只用给你的工具；做不到就直接说明原因，不要编造。\
 \n- 工具调用会先经过系统的权限检查，高风险操作会由系统向用户请求确认，你不需要自己再问。\
 \n- 每轮工具调用的结果会交还给你，你可以继续调用工具。\
+\n- 任务缺少只有用户知道的信息时，调用 ask__user 问一个具体的问题；问题会由管家转给用户。\
 \n- 完成后用一两句话说明结果，这段话会交还给管家，由管家向用户汇报。"
     );
     if let Some(extra) = extra.filter(|e| !e.trim().is_empty()) {
@@ -112,6 +116,28 @@ pub struct Conversation<'a> {
     pub available: &'a [CapabilitySpec],
 }
 
+/// What one model request consumed, as far as the service reported it. A
+/// count that was not reported is `None`: unknown, never zero.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    pub model: Option<String>,
+    /// Everything the model read, including tokens served from or written to
+    /// a prompt cache.
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+}
+
+impl Usage {
+    /// A request was made to `model` and nothing is known about its cost
+    /// (it failed, or the service does not report usage).
+    pub fn unknown(model: &str) -> Self {
+        Self {
+            model: Some(model.to_string()),
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
     pub steps: Vec<Step>,
@@ -128,6 +154,10 @@ pub struct Plan {
     /// do instead. Neither a failure nor an answer: the task ends unhandled.
     #[serde(default)]
     pub unhandled: bool,
+    /// What the model request behind this plan consumed. `None` means no
+    /// model was asked at all (the rule planner, a scripted planner).
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
 impl Plan {

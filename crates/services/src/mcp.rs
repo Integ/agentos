@@ -161,6 +161,20 @@ pub fn tool_risk(cfg: &ServerConfig, tool: &str, annotations: Option<&Value>) ->
 
 type Pending = Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 
+struct ForgetPending<'a> {
+    pending: &'a Pending,
+    id: u64,
+}
+
+impl Drop for ForgetPending<'_> {
+    fn drop(&mut self) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.id);
+    }
+}
+
 /// A running stdio MCP server.
 pub struct McpClient {
     name: String,
@@ -237,26 +251,19 @@ impl McpClient {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(id, tx);
-        let sent = self
-            .send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
-            .await;
-        if let Err(e) = sent {
-            self.pending
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .remove(&id);
-            return Err(e);
-        }
+        // A call may be abandoned at any await (its task was cancelled): the
+        // guard forgets the request however this function is left, so a late
+        // or missing response never leaves an entry behind.
+        let _forget = ForgetPending {
+            pending: &self.pending,
+            id,
+        };
+        self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+            .await?;
         match tokio::time::timeout(CALL_TIMEOUT, rx).await {
             Ok(Ok(r)) => r,
             Ok(Err(_)) => Err(format!("MCP server {} 已退出", self.name)),
-            Err(_) => {
-                self.pending
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .remove(&id);
-                Err(format!("MCP server {} 响应超时", self.name))
-            }
+            Err(_) => Err(format!("MCP server {} 响应超时", self.name)),
         }
     }
 

@@ -59,6 +59,8 @@ struct View {
     next_before: Option<TaskId>,
     revision: u64,
     connected: bool,
+    /// The conversation plain input continues; `None` starts a new one.
+    thread: Option<TaskId>,
 }
 
 impl View {
@@ -72,6 +74,7 @@ impl View {
             next_before: None,
             revision: 0,
             connected: false,
+            thread: None,
         }
     }
 
@@ -92,6 +95,7 @@ impl View {
                 before: self.before,
                 limit: PAGE_SIZE,
                 state: None,
+                thread: None,
             })
             .await
             .inspect_err(|_| self.disconnect())?
@@ -268,10 +272,14 @@ async fn perform(
         }
         WorkbenchCommand::Submit(text) => {
             let reply = client
-                .request(Command::Submit { text })
+                .request(Command::Submit {
+                    text,
+                    thread: view.thread,
+                })
                 .await
                 .map_err(|e| request_error(view, e))?;
             if let Reply::Accepted { task } = &reply {
+                view.thread = Some(task.thread);
                 view.selected_id = Some(task.id);
                 view.selected = Some(task.clone());
                 view.before = None;
@@ -300,6 +308,19 @@ async fn perform(
                 task.confirmation = None;
             }
             println!("\n{}", render::reply_text(&reply));
+        }
+        WorkbenchCommand::Reply { id, step, text } => {
+            // The service checks the reply against the question the task is
+            // waiting on now; a stale one is refused there, not guessed here.
+            let reply = client
+                .request(Command::Reply { id, step, text })
+                .await
+                .map_err(|e| request_error(view, e))?;
+            println!("\n{}", render::reply_text(&reply));
+        }
+        WorkbenchCommand::New => {
+            view.thread = None;
+            println!("\n下一句话开始一段新的对话。");
         }
         WorkbenchCommand::Capabilities => {
             let reply = client

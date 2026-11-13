@@ -85,6 +85,7 @@ impl Output for ConsoleOutput {
             ExpressionKind::Plan => "计划",
             ExpressionKind::Report => "结果",
             ExpressionKind::AskConfirm => "确认",
+            ExpressionKind::AskInput => "提问",
             ExpressionKind::Error => "错误",
         };
         println!("[{}·{tag}] {}", e.from, e.text);

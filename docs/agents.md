@@ -6,7 +6,7 @@
 
 设计讨论：[管家调度多 Agent 设计](https://claude.ai/artifact/53iWC7jjzJ1syP4MPfb2g8)
 
-> **在任务服务上。** 子 Agent、黑板、裁判和跨任务上下文同样由 `agentos-taskd` 提供，行为与下文一致，区别只有三点：自定义 Agent 清单放在状态目录的 `agents/`（默认 `~/.local/state/agentos/agents/`），黑板是状态目录里的 `blackboard.json`；任务用 `agentos` 命令或界面查看和取消，没有 `tasks.list` / `tasks.cancel` 这两个能力；重启后未完成的任务标为“已中断”，不会接着做。子 Agent 的步骤记在同一个任务里、委派那一步之后，并标上它的 id。下文的路径和“重启后恢复”描述的是旧的 `agentosd`。
+> **在任务服务上。** 子 Agent、黑板、裁判和跨任务上下文同样由 `agentos-taskd` 提供，行为与下文一致，区别只有四点：任务在任务服务上并行执行，取消会打断正在等待的模型请求和可中止的调用（见[架构](architecture.md)的“任务与管家循环”）；自定义 Agent 清单放在状态目录的 `agents/`（默认 `~/.local/state/agentos/agents/`），黑板是状态目录里的 `blackboard.json`；任务用 `agentos` 命令或界面查看和取消，没有 `tasks.list` / `tasks.cancel` 这两个能力；重启后未完成的任务标为“已中断”，不会接着做。子 Agent 的步骤记在同一个任务里、委派那一步之后，并标上它的 id。下文的路径和“重启后恢复”描述的是旧的 `agentosd`。
 
 ## OS 概念 → Agent
 

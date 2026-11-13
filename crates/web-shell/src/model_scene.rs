@@ -290,8 +290,10 @@ impl SceneGenerator {
         .await
         .unwrap_or_default();
         let requires_task = facts.selected.as_ref().is_some_and(|task| {
-            task.state == TaskState::AwaitingConfirmation
-                || matches!(request.kind.as_str(), "task" | "note")
+            matches!(
+                task.state,
+                TaskState::AwaitingConfirmation | TaskState::AwaitingInput
+            ) || matches!(request.kind.as_str(), "task" | "note")
         });
         let revision = facts.revision;
         let context = build_context(&request, facts);
@@ -439,6 +441,7 @@ async fn gather_facts(client: &Client, selected_id: Option<u64>) -> Facts {
             before: None,
             limit: 8,
             state: None,
+            thread: None,
         })
         .await
     else {
@@ -598,6 +601,7 @@ fn task_context(task: &Task) -> Value {
     json!({"id":task.id,"text":truncate(&task.intent.text,700),"state":task.state,
         "message":task.message.as_ref().map(|message|truncate(message,400)),
         "awaiting_confirmation":task.state==TaskState::AwaitingConfirmation,
+        "awaiting_input":task.state==TaskState::AwaitingInput,
         "steps":task.steps.iter().take(5).map(|step|json!({"capability":step.capability,"state":step.state,
             "args_preview":truncate(&safe_data(&step.args,0).to_string(),700),
             "result_preview":step.result.as_ref().map(|result|truncate(&safe_data(result,0).to_string(),700))})).collect::<Vec<_>>()})

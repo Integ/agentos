@@ -10,7 +10,7 @@
 const KINDS = new Set(['overview', 'focus', 'memory', 'activity', 'clock', 'help', 'note', 'task']);
 const LAYOUTS = new Set(['ambient', 'split', 'focused', 'stack']);
 const PANEL_TYPES = new Set(['welcome', 'insight', 'suggestions', 'notes', 'task', 'activity', 'clock', 'focus', 'capabilities']);
-const TASK_STATES = new Set(['queued', 'planning', 'running', 'awaiting_confirmation', 'succeeded', 'unhandled', 'failed', 'cancelled', 'interrupted', 'unknown']);
+const TASK_STATES = new Set(['queued', 'planning', 'running', 'awaiting_confirmation', 'awaiting_input', 'succeeded', 'unhandled', 'failed', 'cancelled', 'interrupted', 'unknown']);
 const STEP_STATES = new Set(['pending', 'running', 'succeeded', 'failed', 'skipped', 'unknown']);
 const SCENE_KEYS = new Set(['kind', 'eyebrow', 'title', 'description', 'layout', 'panels']);
 const PANEL_KEYS = new Set(['type', 'priority', 'span', 'title', 'description', 'items', 'task', 'active', 'duration', 'unix_ms']);
@@ -75,6 +75,9 @@ export function normalizeTask(value) {
     && value.confirmation.token.length <= 4096
     ? { step: value.confirmation.step, expires_at_ms: value.confirmation.expires_at_ms, token: value.confirmation.token,
       ...(value.confirmation.verify_identity === true ? { verify_identity: true } : {}) } : null;
+  const question = isObject(value.question) && safeInteger(value.question.step)
+    && typeof value.question.text === 'string'
+    ? { step: value.question.step, text: text(value.question.text, 65536) } : null;
   return {
     id,
     text: text(value.intent?.text ?? value.text, 65536),
@@ -82,6 +85,7 @@ export function normalizeTask(value) {
     message: typeof value.message === 'string' ? text(value.message, 65536) : null,
     steps,
     confirmation,
+    ...(question ? { question } : {}),
   };
 }
 
@@ -278,7 +282,8 @@ export function bindModelScene(proposal, facts = {}) {
       .map((panel, index) => ({ ...panel, priority: index + 1 }));
   }
 
-  const confirmation = task?.state === 'awaiting_confirmation';
+  // A task waiting on the person, to approve a step or to answer a question.
+  const confirmation = task?.state === 'awaiting_confirmation' || task?.state === 'awaiting_input';
   const requiresTask = task && confirmation;
   if (requiresTask) {
     const existing = panels.find(panel => panel.type === 'task');
@@ -287,7 +292,7 @@ export function bindModelScene(proposal, facts = {}) {
       // all eight slots have been used. Keep the remaining relative ordering.
       const required = existing || {
         type: 'task', priority: 1, span: 2,
-        title: confirmation ? '等待你的明确批准' : '当前任务', description: '', task,
+        title: task.state === 'awaiting_input' ? '等待你的回答' : confirmation ? '等待你的明确批准' : '当前任务', description: '', task,
       };
       panels = [required, ...panels.filter(panel => panel.type !== 'task')].slice(0, 8)
         .map((panel, index) => ({ ...panel, priority: index + 1 }));

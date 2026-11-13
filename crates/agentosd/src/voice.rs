@@ -128,7 +128,9 @@ fn command(argv: &[String]) -> Command {
 pub fn spoken_text(e: &Expression) -> Option<String> {
     let text = match e.kind {
         ExpressionKind::Plan => return None,
-        ExpressionKind::Report | ExpressionKind::Error => e.text.trim().to_string(),
+        ExpressionKind::Report | ExpressionKind::Error | ExpressionKind::AskInput => {
+            e.text.trim().to_string()
+        }
         // "cap：描述。原因：…。回复 y 确认，其他任意内容取消。" → keep the description.
         ExpressionKind::AskConfirm => {
             let what = e.text.split('。').next().unwrap_or_default();

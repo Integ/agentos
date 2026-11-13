@@ -24,7 +24,9 @@ use agentos_services::plugin::SandboxMode;
 use agentos_services::plugin_store::PluginManager;
 use agentos_services::registry::CapabilityRegistry;
 use agentos_taskd::builtin;
-use agentos_taskd::butler::{grant_manifest, Butler};
+use agentos_taskd::butler::{grant_manifest, Budget, Butler};
+use agentos_taskd::callers::CallerStore;
+use agentos_taskd::preauth::PreauthStore;
 use agentos_taskd::service::Service;
 
 const HELP: &str = "\
@@ -337,6 +339,8 @@ async fn main() -> io::Result<()> {
         .map(|m| format!("{}（@{}）", m.name, m.id))
         .collect();
 
+    let budget = task_budget(|name| std::env::var(name).ok())
+        .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
     let expr = ExpressionHub::new(audit.clone());
     let mut butler = Butler::with_store(
         butler_id,
@@ -350,7 +354,12 @@ async fn main() -> io::Result<()> {
     .with_agents(agents)
     .with_blackboard(board)
     .with_pin_vault(pins.clone())
-    .with_plugins(plugins);
+    .with_plugins(plugins)
+    .with_budget(budget)
+    .with_preauthorizations(Arc::new(PreauthStore::open(
+        state_dir.join("preauthorizations.json"),
+    )?))
+    .with_callers(Arc::new(CallerStore::open(state_dir.join("callers.json"))?));
     // AGENTOS_JUDGE=1: a model reviews allowed L1+ steps before they run.
     let judge_on = std::env::var("AGENTOS_JUDGE").is_ok_and(|v| v == "1" || v == "on");
     let judge = match (&text_model, judge_on) {
@@ -374,9 +383,10 @@ async fn main() -> io::Result<()> {
         server.path().display()
     );
     println!(
-        "子 Agent：{}\n插件：{}\n智能家居：{home}\n裁判：{judge}\nPIN：{}",
+        "子 Agent：{}\n插件：{}\n智能家居：{home}\n裁判：{judge}\n每个任务的预算：{}\nPIN：{}",
         agent_names.join("、"),
         sandbox.label(),
+        budget_label(budget),
         if pins.is_set() {
             "已设置，不可逆的操作批准时需要输入"
         } else {
@@ -389,6 +399,39 @@ async fn main() -> io::Result<()> {
             tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {} }
         })
         .await
+}
+
+/// What a task may consume, from the environment: `AGENTOS_TASK_TOKENS` and
+/// `AGENTOS_TASK_SECONDS`. Unset keeps the default; `0` removes the limit. A
+/// value that is not a number is an error rather than silently no limit.
+fn task_budget(var: impl Fn(&str) -> Option<String>) -> Result<Budget, String> {
+    let limit = |name: &str| -> Result<Option<Option<u64>>, String> {
+        match var(name).as_deref().map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(text) => text
+                .parse::<u64>()
+                .map(|value| Some((value > 0).then_some(value)))
+                .map_err(|_| format!("{name} 应为非负整数（0 表示不限制）：{text}")),
+        }
+    };
+    let mut budget = Budget::default();
+    if let Some(tokens) = limit("AGENTOS_TASK_TOKENS")? {
+        budget.tokens = tokens;
+    }
+    if let Some(seconds) = limit("AGENTOS_TASK_SECONDS")? {
+        budget.active = seconds.map(std::time::Duration::from_secs);
+    }
+    Ok(budget)
+}
+
+fn budget_label(budget: Budget) -> String {
+    let limit = |value: Option<String>| value.unwrap_or_else(|| "不限".into());
+    format!(
+        "{} 轮 · token {} · 执行时长 {}",
+        budget.rounds,
+        limit(budget.tokens.map(|tokens| tokens.to_string())),
+        limit(budget.active.map(|time| format!("{} 秒", time.as_secs()))),
+    )
 }
 
 #[cfg(test)]
@@ -429,6 +472,39 @@ mod tests {
             vec!["serve"],
         ] {
             assert!(parse(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn task_budgets_come_from_the_environment_and_a_typo_is_not_no_limit() {
+        let from = |pairs: &'static [(&'static str, &'static str)]| {
+            task_budget(move |name| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+            })
+        };
+        assert_eq!(from(&[]).unwrap(), Budget::default());
+        let set = from(&[
+            ("AGENTOS_TASK_TOKENS", "5000"),
+            ("AGENTOS_TASK_SECONDS", " 90 "),
+        ])
+        .unwrap();
+        assert_eq!(set.tokens, Some(5000));
+        assert_eq!(set.active, Some(std::time::Duration::from_secs(90)));
+        let unlimited =
+            from(&[("AGENTOS_TASK_TOKENS", "0"), ("AGENTOS_TASK_SECONDS", "0")]).unwrap();
+        assert_eq!((unlimited.tokens, unlimited.active), (None, None));
+        for bad in ["many", "-1", "1e6"] {
+            let pairs: &'static [(&str, &str)] = Box::leak(
+                vec![(
+                    "AGENTOS_TASK_TOKENS",
+                    &*Box::leak(bad.to_string().into_boxed_str()),
+                )]
+                .into_boxed_slice(),
+            );
+            assert!(from(pairs).is_err(), "{bad}");
         }
     }
 }

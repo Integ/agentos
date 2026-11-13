@@ -9,7 +9,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use agentos_core::{CapabilityName, CapabilitySpec};
+use agentos_core::{CapabilityName, CapabilitySpec, RiskLevel};
+pub use agentos_policy::{ArgRule, Matcher, Preauthorization, Subject};
 use agentos_runtime::{StepState, Task, TaskId, TaskState};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,6 +32,45 @@ pub struct Request {
     pub version: u32,
     pub id: u64,
     pub command: Command,
+    /// Make this request as a registered outside caller instead of as the
+    /// user. It only ever narrows what the request may do, so it needs no
+    /// secret: whoever can reach the socket could have asked for more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<String>,
+}
+
+/// Where a caller's tasks say they come from: `caller:<id>`.
+pub const CALLER_SOURCE_PREFIX: &str = "caller:";
+
+/// An outside program the user lets submit intents, and what it may use.
+/// A caller holds nothing it was not given here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Caller {
+    pub id: String,
+    pub name: String,
+    /// Capability names, or prefixes ending in `*` (`notes.*`).
+    pub capabilities: Vec<String>,
+    /// The highest risk its tasks may touch at all.
+    pub max_risk: RiskLevel,
+    #[serde(default)]
+    pub created_at_ms: u64,
+}
+
+impl Caller {
+    /// Whether the caller was given `capability`.
+    pub fn wants(&self, capability: &str) -> bool {
+        self.capabilities
+            .iter()
+            .any(|pattern| match pattern.strip_suffix('*') {
+                Some(prefix) => capability.starts_with(prefix),
+                None => capability == pattern,
+            })
+    }
+
+    pub fn source(&self) -> String {
+        format!("{CALLER_SOURCE_PREFIX}{}", self.id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +81,10 @@ pub enum Command {
     Ping {},
     Submit {
         text: String,
+        /// The thread this intent continues, named by its first task. Absent
+        /// starts a new thread.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread: Option<TaskId>,
     },
     List {
         #[serde(default)]
@@ -48,6 +92,9 @@ pub enum Command {
         limit: usize,
         #[serde(default)]
         state: Option<TaskState>,
+        /// Only tasks of this thread.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread: Option<TaskId>,
     },
     Get {
         id: TaskId,
@@ -65,6 +112,56 @@ pub enum Command {
         /// the service and never stored, logged or echoed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pin: Option<String>,
+    },
+    /// Answer the question a task in `awaiting_input` is waiting on.
+    Reply {
+        id: TaskId,
+        /// Human-facing, one-based number of the step that asked.
+        step: usize,
+        text: String,
+    },
+    /// Give standing permission for calls of one capability whose arguments
+    /// satisfy every rule, so they stop asking. Only the user's own client
+    /// can do this; no agent and no capability can.
+    Preauthorize {
+        capability: CapabilityName,
+        /// The registered caller whose tasks this applies to. Absent means
+        /// the user's own tasks. A rule never applies to both.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<String>,
+        #[serde(default)]
+        args: Vec<ArgRule>,
+        /// Accept arguments that no rule mentions. Off unless stated.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        other_args: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_in_seconds: Option<u64>,
+        /// Required when a PIN is set. Checked and never stored or logged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pin: Option<String>,
+    },
+    /// The pre-authorizations still in force.
+    Preauthorizations {},
+    RevokePreauthorization {
+        id: String,
+    },
+    /// Let an outside program submit intents with exactly these
+    /// capabilities, or replace what a registered one may use.
+    RegisterCaller {
+        id: String,
+        name: String,
+        #[serde(default)]
+        capabilities: Vec<String>,
+        max_risk: RiskLevel,
+        /// Required when a PIN is set. Checked and never stored or logged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pin: Option<String>,
+    },
+    Callers {},
+    /// Withdraw a caller. Its tasks under way lose everything at once, and
+    /// its pre-authorizations go with it.
+    RevokeCaller {
+        id: String,
     },
     Capabilities {},
     /// Query a granted read-only (L0) capability directly. A client reading
@@ -112,6 +209,9 @@ impl Response {
     }
 }
 
+// A response is built, written and dropped. Boxing the common case to shrink
+// the rare error would cost an allocation per reply and change nothing else.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResponseBody {
@@ -156,6 +256,30 @@ pub enum Reply {
         id: TaskId,
         step: usize,
     },
+    /// The answer was accepted for the task's current question. It does not
+    /// say what the task did with it.
+    ReplyQueued {
+        id: TaskId,
+        step: usize,
+    },
+    Preauthorized {
+        preauthorization: Preauthorization,
+    },
+    Preauthorizations {
+        preauthorizations: Vec<Preauthorization>,
+    },
+    PreauthorizationRevoked {
+        id: String,
+    },
+    CallerRegistered {
+        caller: Caller,
+    },
+    Callers {
+        callers: Vec<Caller>,
+    },
+    CallerRevoked {
+        id: String,
+    },
     Watching {
         revision: u64,
     },
@@ -165,6 +289,10 @@ pub enum Reply {
 #[serde(deny_unknown_fields)]
 pub struct TaskSummary {
     pub id: TaskId,
+    /// The thread the task belongs to. Absent from older services, where
+    /// every task was its own thread.
+    #[serde(default)]
+    pub thread: TaskId,
     pub text: String,
     pub state: TaskState,
     pub completed_steps: usize,
@@ -177,6 +305,7 @@ impl From<&Task> for TaskSummary {
     fn from(task: &Task) -> Self {
         Self {
             id: task.id,
+            thread: task.thread,
             text: task.intent.text.chars().take(120).collect(),
             state: task.state,
             completed_steps: task
@@ -335,6 +464,7 @@ mod tests {
                 confirmation: "nonce".into(),
                 pin: None,
             },
+            caller: None,
         };
         let value = serde_json::to_value(&request).unwrap();
         assert_eq!(value["command"]["method"], "approve");

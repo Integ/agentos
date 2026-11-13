@@ -88,7 +88,7 @@ fn durable_notebook(dir: &Path) -> (Butler, NoteStore) {
 #[tokio::test]
 async fn completed_tasks_and_notes_survive_restart_without_replaying() {
     let dir = TempDir::new("restart");
-    let (mut first, notes) = durable_notebook(&dir.0);
+    let (first, notes) = durable_notebook(&dir.0);
     first.handle(intent("记一下 买牛奶")).await;
     assert_eq!(*notes.lock().unwrap(), vec!["买牛奶"]);
     let task = first.tasks().get(TaskId(1)).unwrap();
@@ -99,7 +99,7 @@ async fn completed_tasks_and_notes_survive_restart_without_replaying() {
     drop(first);
     drop(notes);
 
-    let (mut second, notes) = durable_notebook(&dir.0);
+    let (second, notes) = durable_notebook(&dir.0);
     assert_eq!(*notes.lock().unwrap(), vec!["买牛奶"]);
     assert_eq!(second.tasks().list().len(), 1);
     assert_eq!(
@@ -232,7 +232,7 @@ async fn cancelling_in_flight_capability_keeps_cancelled_and_skips_later_steps()
         steps: vec![step("test.gated"), step("test.later")],
         ..Plan::default()
     });
-    let mut runner = butler(&dir.0, registry, Box::new(planner), tasks.clone());
+    let runner = butler(&dir.0, registry, Box::new(planner), tasks.clone());
     let worker = tokio::spawn(async move {
         runner.handle(intent("perform two steps")).await;
         runner
@@ -294,7 +294,7 @@ async fn cancelling_during_planning_prevents_capability_execution() {
         entered: entered.clone(),
         release: release.clone(),
     };
-    let mut runner = butler(&dir.0, registry, Box::new(planner), tasks.clone());
+    let runner = butler(&dir.0, registry, Box::new(planner), tasks.clone());
     let worker = tokio::spawn(async move {
         runner.handle(intent("plan a side effect")).await;
         runner
@@ -323,4 +323,216 @@ async fn cancelling_during_planning_prevents_capability_execution() {
             .state,
         TaskState::Cancelled
     );
+}
+
+#[tokio::test]
+async fn cancelling_does_not_wait_for_the_planner_to_answer() {
+    let dir = TempDir::new("cancel-model");
+    let tasks = Arc::new(TaskStore::open(dir.0.join("runtime")).unwrap());
+    let entered = Arc::new(Notify::new());
+    let planner = GatedPlanner {
+        entered: entered.clone(),
+        // Never released: the planner would hang forever.
+        release: Arc::new(Notify::new()),
+    };
+    let runner = butler(
+        &dir.0,
+        CapabilityRegistry::new(),
+        Box::new(planner),
+        tasks.clone(),
+    );
+    let worker = tokio::spawn(async move { runner.handle(intent("think forever")).await });
+    timeout(WAIT_LIMIT, entered.notified()).await.unwrap();
+    tasks.cancel(TaskId(1)).unwrap();
+    // Guards in-flight cancellation: the worker is free again although the
+    // model request never returned.
+    timeout(WAIT_LIMIT, worker).await.unwrap().unwrap();
+    let task = tasks.get(TaskId(1)).unwrap();
+    assert_eq!(task.state, TaskState::Cancelled);
+    assert!(task.steps.is_empty());
+}
+
+/// A call that hangs until it is dropped, and says so.
+struct HangingCapability {
+    spec: CapabilitySpec,
+    abortable: bool,
+    entered: Arc<Notify>,
+    dropped: Arc<AtomicUsize>,
+}
+
+struct CountDrop(Arc<AtomicUsize>);
+
+impl Drop for CountDrop {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl Capability for HangingCapability {
+    fn spec(&self) -> &CapabilitySpec {
+        &self.spec
+    }
+
+    async fn invoke(&self, _args: Value) -> Result<Value, CapabilityError> {
+        let _dropped = CountDrop(self.dropped.clone());
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+
+    fn abortable(&self) -> bool {
+        self.abortable
+    }
+}
+
+#[tokio::test]
+async fn cancelling_abandons_an_abortable_call_and_records_its_outcome_as_unknown() {
+    let dir = TempDir::new("cancel-abortable");
+    let tasks = Arc::new(TaskStore::open(dir.0.join("runtime")).unwrap());
+    let entered = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let later_calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = CapabilityRegistry::new();
+    registry.register(Arc::new(HangingCapability {
+        spec: capability_spec("test.hanging"),
+        abortable: true,
+        entered: entered.clone(),
+        dropped: dropped.clone(),
+    }));
+    registry.register(Arc::new(CountCapability {
+        spec: capability_spec("test.later"),
+        calls: later_calls.clone(),
+    }));
+    let planner = FixedPlanner(Plan {
+        steps: vec![step("test.hanging"), step("test.later")],
+        ..Plan::default()
+    });
+    let runner = butler(&dir.0, registry, Box::new(planner), tasks.clone());
+    let worker = tokio::spawn(async move { runner.handle(intent("hang then continue")).await });
+    timeout(WAIT_LIMIT, entered.notified()).await.unwrap();
+    tasks.cancel(TaskId(1)).unwrap();
+    timeout(WAIT_LIMIT, worker).await.unwrap().unwrap();
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    let task = tasks.get(TaskId(1)).unwrap();
+    assert_eq!(task.state, TaskState::Cancelled);
+    // Guards honest outcomes: a call that was cut short is neither a success
+    // nor "never ran", and a step with side effects says its effect is unknown.
+    assert_eq!(task.steps[0].state, StepState::Failed);
+    assert!(task.steps[0]
+        .result
+        .as_ref()
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.contains("未知")));
+    assert_eq!(task.steps[1].state, StepState::Pending);
+    assert_eq!(later_calls.load(Ordering::SeqCst), 0);
+    // Guards the audit trail: the start marker is closed by an interruption,
+    // never by a result nobody saw.
+    let entries = AuditLog::replay(dir.0.join("audit.jsonl")).unwrap();
+    let count = |wanted: fn(&AuditEvent) -> bool| {
+        entries.iter().filter(|entry| wanted(&entry.event)).count()
+    };
+    assert_eq!(
+        count(|e| matches!(e, AuditEvent::CapabilityStarted { .. })),
+        1
+    );
+    assert_eq!(
+        count(|e| matches!(e, AuditEvent::CapabilityInterrupted { .. })),
+        1
+    );
+    assert_eq!(
+        count(|e| matches!(e, AuditEvent::CapabilityInvoked { .. })),
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_call_that_is_not_abortable_is_never_dropped_by_cancellation() {
+    let dir = TempDir::new("cancel-not-abortable");
+    let tasks = Arc::new(TaskStore::open(dir.0.join("runtime")).unwrap());
+    let entered = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let mut registry = CapabilityRegistry::new();
+    registry.register(Arc::new(HangingCapability {
+        spec: capability_spec("test.hanging"),
+        abortable: false,
+        entered: entered.clone(),
+        dropped: dropped.clone(),
+    }));
+    let planner = FixedPlanner(Plan {
+        steps: vec![step("test.hanging")],
+        ..Plan::default()
+    });
+    let runner = butler(&dir.0, registry, Box::new(planner), tasks.clone());
+    let worker = tokio::spawn(async move { runner.handle(intent("hang")).await });
+    timeout(WAIT_LIMIT, entered.notified()).await.unwrap();
+    tasks.cancel(TaskId(1)).unwrap();
+    // Guards side effects: the task is cancelled at once, but a call that
+    // did not declare itself abortable keeps running to its own end.
+    assert!(timeout(Duration::from_millis(200), worker).await.is_err());
+    assert_eq!(dropped.load(Ordering::SeqCst), 0);
+    let task = tasks.get(TaskId(1)).unwrap();
+    assert_eq!(task.state, TaskState::Cancelled);
+    assert_eq!(task.steps[0].state, StepState::Running);
+}
+
+#[tokio::test]
+async fn a_read_only_call_is_abortable_unless_it_says_otherwise() {
+    let spec = |risk| CapabilitySpec {
+        risk,
+        ..capability_spec("test.default")
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let capability = |risk| CountCapability {
+        spec: spec(risk),
+        calls: calls.clone(),
+    };
+    assert!(capability(RiskLevel::ReadOnly).abortable());
+    for risk in [
+        RiskLevel::Reversible,
+        RiskLevel::External,
+        RiskLevel::Irreversible,
+    ] {
+        assert!(!capability(risk).abortable());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_approvals_of_one_request_run_the_step_once() {
+    let dir = TempDir::new("approve-race");
+    let tasks = Arc::new(TaskStore::open(dir.0.join("runtime")).unwrap());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = CapabilityRegistry::new();
+    registry.register(Arc::new(CountCapability {
+        spec: CapabilitySpec {
+            risk: RiskLevel::External,
+            ..capability_spec("test.send")
+        },
+        calls: calls.clone(),
+    }));
+    let planner = FixedPlanner(Plan {
+        steps: vec![step("test.send")],
+        ..Plan::default()
+    });
+    let runner = Arc::new(butler(&dir.0, registry, Box::new(planner), tasks.clone()));
+    runner.handle(intent("send it")).await;
+    let waiting = tasks.get(TaskId(1)).unwrap();
+    assert_eq!(waiting.state, TaskState::AwaitingConfirmation);
+    let token = waiting.confirmation.unwrap().token;
+    let approvals: Vec<_> = (0..8)
+        .map(|_| {
+            let (runner, token) = (runner.clone(), token.clone());
+            tokio::spawn(async move {
+                runner
+                    .approve_with_token(TaskId(1), 0, &intent("approve"), &token)
+                    .await
+            })
+        })
+        .collect();
+    for approval in approvals {
+        timeout(WAIT_LIMIT, approval).await.unwrap().unwrap();
+    }
+    // Guards "an approval is bound to one request": workers racing on the
+    // same token carry it out exactly once.
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(tasks.get(TaskId(1)).unwrap().state, TaskState::Succeeded);
 }

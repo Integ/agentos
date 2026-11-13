@@ -16,9 +16,14 @@ dependencies = [
 name = "agentos-cli"
 version = "0.3.0"
 dependencies = [
+ "agentos-audit",
  "agentos-core",
  "agentos-ipc",
+ "agentos-planner",
+ "agentos-policy",
  "agentos-runtime",
+ "agentos-services",
+ "agentos-taskd",
  "serde_json",
  "tokio",
 ]
@@ -38,6 +43,7 @@ name = "agentos-ipc"
 version = "0.3.0"
 dependencies = [
  "agentos-core",
+ "agentos-policy",
  "agentos-runtime",
  "serde",
  "serde_json",
@@ -61,6 +67,7 @@ name = "agentos-policy"
 version = "0.3.0"
 dependencies = [
  "agentos-core",
+ "serde",
  "serde_json",
 ]
 

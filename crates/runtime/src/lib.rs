@@ -18,11 +18,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 const STATE_FILE: &str = "tasks.json";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct TaskId(pub u64);
 
@@ -47,6 +49,9 @@ pub enum TaskState {
     Planning,
     Running,
     AwaitingConfirmation,
+    /// The agent asked the user something it needs to know to go on. Not an
+    /// outcome: the task stays here until it is answered or cancelled.
+    AwaitingInput,
     /// Every planned step ran, or the planner answered without needing tools.
     Succeeded,
     /// The planner had no way to act on the intent. Nothing ran and nothing
@@ -131,15 +136,58 @@ pub struct Confirmation {
     pub verify_identity: bool,
 }
 
+/// What a task has consumed so far. Counts are sums over every agent that
+/// worked on the task, the judge included.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskUsage {
+    /// Model requests made for this task.
+    pub model_calls: u32,
+    /// Requests among them whose token counts are not known (the request
+    /// failed, or the service does not report usage). Their cost is missing
+    /// from the token counts below, which are therefore a lower bound.
+    pub unmetered_calls: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// Time spent working on the task, not counting time it waited for the
+    /// human or in the queue.
+    pub active_ms: u64,
+}
+
+impl TaskUsage {
+    pub fn tokens(&self) -> u64 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+}
+
+/// What an agent asked the user. The asking is itself a step of the task;
+/// the answer becomes that step's result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Question {
+    pub step: usize,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Task {
     pub id: TaskId,
+    /// The conversation this task belongs to, named by its first task. A task
+    /// that starts a conversation is its own thread. Zero only in snapshots
+    /// stored before threads existed; it is replaced by `id` when loaded.
+    #[serde(default)]
+    pub thread: TaskId,
     pub intent: Intent,
     pub state: TaskState,
     pub steps: Vec<TaskStep>,
     pub tainted: bool,
     pub confirmation: Option<Confirmation>,
+    /// The question a task in `AwaitingInput` is waiting on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<Question>,
+    #[serde(default)]
+    pub usage: TaskUsage,
     pub message: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
@@ -182,7 +230,12 @@ impl State {
         }
     }
 
-    fn from_snapshot(snapshot: Snapshot) -> io::Result<Self> {
+    fn from_snapshot(mut snapshot: Snapshot) -> io::Result<Self> {
+        for task in &mut snapshot.tasks {
+            if task.thread.0 == 0 {
+                task.thread = task.id;
+            }
+        }
         validate_snapshot(&snapshot)?;
         Ok(Self {
             next_id: snapshot.next_id,
@@ -239,6 +292,7 @@ impl TaskStore {
                 recovered = true;
                 task.state = TaskState::Interrupted;
                 task.confirmation = None;
+                task.question = None;
                 task.updated_at_ms = recovered_at.max(task.updated_at_ms);
                 task.message = Some(
                     "守护进程已重启；未完成任务已中断，不会自动重复执行可能已发生的副作用。".into(),
@@ -269,8 +323,31 @@ impl TaskStore {
         }
     }
 
-    pub fn create(&self, mut intent: Intent) -> io::Result<Task> {
+    /// A task that starts a new thread.
+    pub fn create(&self, intent: Intent) -> io::Result<Task> {
+        self.create_in(intent, None)
+    }
+
+    /// A task that continues `thread`, or starts a new one. Continuing a
+    /// thread that does not exist is `NotFound`; continuing one that another
+    /// source started is `PermissionDenied`, so conversations never mix.
+    pub fn create_in(&self, mut intent: Intent, thread: Option<TaskId>) -> io::Result<Task> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(thread) = thread {
+            let root = guard
+                .tasks
+                .get(&thread)
+                .filter(|root| root.thread == thread)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, format!("unknown thread: {thread}"))
+                })?;
+            if root.intent.source != intent.source || root.intent.speaker != intent.speaker {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "a thread can only be continued by the source that started it",
+                ));
+            }
+        }
         let mut next = guard.clone();
         let id = TaskId(next.next_id);
         next.next_id = next
@@ -281,11 +358,14 @@ impl TaskStore {
         let at_ms = now_ms();
         let task = Task {
             id,
+            thread: thread.unwrap_or(id),
             intent,
             state: TaskState::Queued,
             steps: Vec::new(),
             tainted: false,
             confirmation: None,
+            question: None,
+            usage: TaskUsage::default(),
             message: None,
             created_at_ms: at_ms,
             updated_at_ms: at_ms,
@@ -329,6 +409,19 @@ impl TaskStore {
         limit: usize,
         state: Option<TaskState>,
     ) -> (Vec<Task>, Option<TaskId>, u64) {
+        self.page_in(before, limit, state, None, None)
+    }
+
+    /// [`Self::page`], optionally restricted to the tasks of one thread
+    /// and to those submitted from one source.
+    pub fn page_in(
+        &self,
+        before: Option<TaskId>,
+        limit: usize,
+        state: Option<TaskState>,
+        thread: Option<TaskId>,
+        source: Option<&str>,
+    ) -> (Vec<Task>, Option<TaskId>, u64) {
         let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if limit == 0 {
             return (Vec::new(), None, guard.revision);
@@ -339,7 +432,9 @@ impl TaskStore {
             .range((std::ops::Bound::Unbounded, bound))
             .rev()
             .map(|(_, task)| task)
-            .filter(|task| state.is_none_or(|state| task.state == state));
+            .filter(|task| state.is_none_or(|state| task.state == state))
+            .filter(|task| thread.is_none_or(|thread| task.thread == thread))
+            .filter(|task| source.is_none_or(|source| task.intent.source.as_str() == source));
         let tasks: Vec<_> = matching.by_ref().take(limit).cloned().collect();
         let next = if matching.next().is_some() {
             tasks.last().map(|task| task.id)
@@ -347,6 +442,36 @@ impl TaskStore {
             None
         };
         (tasks, next, guard.revision)
+    }
+
+    /// Earlier tasks of the same thread as `id`, oldest first, at most the
+    /// `limit` most recent ones.
+    pub fn earlier_in_thread(&self, id: TaskId, limit: usize) -> Vec<Task> {
+        let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(thread) = guard.tasks.get(&id).map(|task| task.thread) else {
+            return Vec::new();
+        };
+        let mut earlier: Vec<Task> = guard
+            .tasks
+            .range(..id)
+            .rev()
+            .map(|(_, task)| task)
+            .filter(|task| task.thread == thread)
+            .take(limit)
+            .cloned()
+            .collect();
+        earlier.reverse();
+        earlier
+    }
+
+    /// The thread a task belongs to.
+    pub fn thread_of(&self, id: TaskId) -> Option<TaskId> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .tasks
+            .get(&id)
+            .map(|task| task.thread)
     }
 
     pub fn revision(&self) -> u64 {
@@ -400,6 +525,7 @@ impl TaskStore {
         let task = next.tasks.get_mut(&id).expect("task checked above");
         task.state = TaskState::Cancelled;
         task.confirmation = None;
+        task.question = None;
         task.updated_at_ms = now_ms().max(task.updated_at_ms);
         task.message =
             Some("任务已取消；后续步骤不会执行，已开始的能力调用可能仍产生结果。".into());
@@ -412,6 +538,16 @@ impl TaskStore {
             id,
         });
         Ok(cancelled)
+    }
+
+    /// The task's current state, without copying the task.
+    pub fn state(&self, id: TaskId) -> Option<TaskState> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .tasks
+            .get(&id)
+            .map(|task| task.state)
     }
 
     pub fn is_cancelled(&self, id: TaskId) -> bool {
@@ -452,8 +588,18 @@ fn validate_snapshot(snapshot: &Snapshot) -> io::Result<()> {
     if snapshot.schema_version >= 2 && snapshot.revision < snapshot.next_id - 1 {
         return Err(invalid_data("task revision precedes allocated task ids"));
     }
+    let roots: BTreeSet<TaskId> = snapshot
+        .tasks
+        .iter()
+        .filter(|task| task.thread == task.id)
+        .map(|task| task.id)
+        .collect();
     let mut ids = BTreeSet::new();
     for task in &snapshot.tasks {
+        // A thread is named by its first task, which must exist.
+        if task.thread > task.id || !roots.contains(&task.thread) {
+            return Err(invalid_data("task belongs to a thread that does not exist"));
+        }
         if task.id.0 == 0 || task.id.0 >= snapshot.next_id || !ids.insert(task.id) {
             return Err(invalid_data("invalid, duplicate, or unallocated task id"));
         }
@@ -500,6 +646,21 @@ fn validate_snapshot(snapshot: &Snapshot) -> io::Result<()> {
                 return Err(invalid_data("awaiting task has no confirmation"));
             }
             (Some(_), _) => return Err(invalid_data("confirmation attached to non-waiting task")),
+            (None, _) => {}
+        }
+        match (&task.question, task.state) {
+            (Some(question), TaskState::AwaitingInput) => {
+                if question.text.trim().is_empty()
+                    || question.step >= task.steps.len()
+                    || task.steps[question.step].state != StepState::Pending
+                {
+                    return Err(invalid_data("invalid pending question"));
+                }
+            }
+            (None, TaskState::AwaitingInput) => {
+                return Err(invalid_data("task awaiting input has no question"));
+            }
+            (Some(_), _) => return Err(invalid_data("question attached to non-waiting task")),
             (None, _) => {}
         }
     }
@@ -941,6 +1102,11 @@ mod tests {
         let mut snapshot: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         snapshot["schema_version"] = serde_json::json!(1);
         snapshot.as_object_mut().unwrap().remove("revision");
+        // Snapshots written before threads existed have no such field.
+        snapshot["tasks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("thread");
         snapshot["tasks"][0]["confirmation"]
             .as_object_mut()
             .unwrap()
@@ -950,15 +1116,95 @@ mod tests {
         let recovered = store.get(task.id).unwrap();
         assert_eq!(recovered.state, TaskState::Interrupted);
         assert!(recovered.confirmation.is_none());
+        assert_eq!(recovered.thread, task.id);
         let revision = store.revision();
         assert_eq!(revision, 2);
         let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(saved["schema_version"], 3);
+        assert_eq!(saved["schema_version"], SCHEMA_VERSION);
         assert_eq!(saved["revision"], revision);
         drop(store);
         let store = TaskStore::open(&dir.0).unwrap();
         assert_eq!(store.revision(), revision);
         assert_eq!(store.create(intent()).unwrap().id, TaskId(2));
         assert_eq!(store.revision(), revision + 1);
+    }
+
+    #[test]
+    fn a_task_continues_only_an_existing_thread_of_its_own_source() {
+        let store = TaskStore::memory();
+        let first = store.create(intent()).unwrap();
+        assert_eq!(first.thread, first.id);
+        let second = store.create_in(intent(), Some(first.id)).unwrap();
+        let third = store.create_in(intent(), Some(first.id)).unwrap();
+        assert_eq!((second.thread, third.thread), (first.id, first.id));
+        let other = store.create(intent()).unwrap();
+        assert_eq!(other.thread, other.id);
+        assert_eq!(
+            store
+                .earlier_in_thread(third.id, 8)
+                .iter()
+                .map(|task| task.id)
+                .collect::<Vec<_>>(),
+            vec![first.id, second.id]
+        );
+        assert_eq!(store.earlier_in_thread(third.id, 1)[0].id, second.id);
+        // A thread is named by its first task: a later task of it, or a task
+        // that does not exist, names no thread.
+        for missing in [second.id, TaskId(99)] {
+            assert_eq!(
+                store.create_in(intent(), Some(missing)).unwrap_err().kind(),
+                io::ErrorKind::NotFound
+            );
+        }
+        // Guards "conversations never mix": another source cannot join.
+        let stranger = Intent {
+            source: DeviceId::new("elsewhere"),
+            ..intent()
+        };
+        assert_eq!(
+            store
+                .create_in(stranger, Some(first.id))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(store.list().len(), 4);
+    }
+
+    #[test]
+    fn a_question_exists_exactly_while_a_task_awaits_input_and_never_survives_it() {
+        let dir = TempDir::new();
+        let store = TaskStore::open(&dir.0).unwrap();
+        let ask = |task: &mut Task| {
+            task.state = TaskState::AwaitingInput;
+            task.steps = vec![step(StepState::Pending)];
+            task.question = Some(Question {
+                step: 0,
+                text: "哪一天？".into(),
+            });
+        };
+        let waiting = store.create(intent()).unwrap();
+        store.update(waiting.id, ask).unwrap();
+        // Waiting without a question, or a question without waiting, is not
+        // a state a client could act on.
+        assert!(store
+            .update(waiting.id, |task| task.question = None)
+            .is_err());
+        assert!(store
+            .update(waiting.id, |task| task.state = TaskState::Running)
+            .is_err());
+        assert!(store.get(waiting.id).unwrap().question.is_some());
+        let cancelled = store.create(intent()).unwrap();
+        store.update(cancelled.id, ask).unwrap();
+        let cancelled = store.cancel(cancelled.id).unwrap();
+        assert_eq!(cancelled.state, TaskState::Cancelled);
+        assert!(cancelled.question.is_none());
+        drop(store);
+        // Guards "a restart interrupts": the planner conversation is gone,
+        // so nothing may still look answerable.
+        let store = TaskStore::open(&dir.0).unwrap();
+        let recovered = store.get(waiting.id).unwrap();
+        assert_eq!(recovered.state, TaskState::Interrupted);
+        assert!(recovered.question.is_none());
     }
 }

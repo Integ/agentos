@@ -3,7 +3,7 @@ use std::io;
 use agentos_cli::args::{self, Action};
 use agentos_cli::client::{Client, ClientError};
 use agentos_cli::wait::wait_for_task;
-use agentos_cli::{render, workbench};
+use agentos_cli::{mcp, render, workbench};
 use agentos_ipc::{Command, Reply};
 
 #[tokio::main]
@@ -26,8 +26,15 @@ async fn main() -> io::Result<()> {
             Ok(())
         }
         Action::Workbench => return workbench::run(client).await,
+        Action::Mcp { caller } => return mcp::serve(client.as_caller(caller)).await,
         Action::Request(mut command) => {
-            if let (true, Command::Approve { pin, .. }) = (options.pin_stdin, &mut command) {
+            if let (
+                true,
+                Command::Approve { pin, .. }
+                | Command::Preauthorize { pin, .. }
+                | Command::RegisterCaller { pin, .. },
+            ) = (options.pin_stdin, &mut command)
+            {
                 eprint!("PIN：");
                 let mut line = String::new();
                 std::io::stdin().read_line(&mut line)?;
@@ -35,8 +42,12 @@ async fn main() -> io::Result<()> {
             }
             request(&client, command, options.json).await
         }
-        Action::SubmitAndWait { text, timeout } => {
-            match submit_and_wait(&client, text, timeout, options.json).await {
+        Action::SubmitAndWait {
+            text,
+            thread,
+            timeout,
+        } => {
+            match submit_and_wait(&client, text, thread, timeout, options.json).await {
                 Ok(0) => Ok(()),
                 // The request itself worked; the status reports how the task
                 // ended, which is not an error of this command.
@@ -62,10 +73,11 @@ async fn main() -> io::Result<()> {
 async fn submit_and_wait(
     client: &Client,
     text: String,
+    thread: Option<agentos_runtime::TaskId>,
     timeout: std::time::Duration,
     json: bool,
 ) -> Result<i32, ClientError> {
-    let accepted = client.request(Command::Submit { text }).await?;
+    let accepted = client.request(Command::Submit { text, thread }).await?;
     let Reply::Accepted { task } = &accepted else {
         unreachable!("the client verifies that a submit is answered with an acceptance")
     };

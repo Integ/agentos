@@ -138,6 +138,8 @@ pub enum ExpressionKind {
     Plan,
     /// A request for the human to confirm an action.
     AskConfirm,
+    /// A question the agent needs the human to answer before it can go on.
+    AskInput,
     /// Something went wrong.
     Error,
 }
@@ -219,6 +221,17 @@ pub trait Capability: Send + Sync {
     /// before any side effect, so injected instructions cannot act silently.
     fn untrusted_output(&self) -> bool {
         false
+    }
+
+    /// Whether a call in flight may be abandoned when its task is cancelled.
+    /// Abandoning means the future returned by `invoke` is dropped, so this
+    /// must only be `true` when dropping it leaves nothing half-done that a
+    /// later call would trip over. A read-only call qualifies by definition.
+    /// A call with side effects runs to completion unless the capability says
+    /// that stopping it midway is what cancellation should do (a sandboxed
+    /// plugin is killed); its outcome is then recorded as unknown.
+    fn abortable(&self) -> bool {
+        self.spec().risk == RiskLevel::ReadOnly
     }
 }
 

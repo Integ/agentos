@@ -24,7 +24,7 @@ use agentos_runtime::{Task, TaskId, TaskState, TaskStore};
 use agentos_services::registry::CapabilityRegistry;
 use agentos_taskd::builtin;
 use agentos_taskd::butler::grant_manifest;
-use agentos_taskd::service::Service;
+use agentos_taskd::service::{Service, MAX_RUNNING_TASKS};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::io::{AsyncWriteExt, BufReader};
@@ -159,6 +159,8 @@ struct Connection {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
     next: u64,
+    /// Make every request as this registered caller.
+    caller: Option<String>,
 }
 impl Connection {
     async fn connect(path: &PathBuf) -> Self {
@@ -168,6 +170,7 @@ impl Connection {
             reader: BufReader::new(reader),
             writer,
             next: 0,
+            caller: None,
         }
     }
     async fn request(&mut self, command: Command) -> Response {
@@ -178,6 +181,7 @@ impl Connection {
                 version: VERSION,
                 id: self.next,
                 command,
+                caller: self.caller.clone(),
             },
         )
         .await
@@ -209,7 +213,13 @@ impl Connection {
         serde_json::from_slice(&frame).unwrap()
     }
     async fn submit(&mut self, text: &str) -> TaskId {
-        match self.ok(Command::Submit { text: text.into() }).await {
+        match self
+            .ok(Command::Submit {
+                text: text.into(),
+                thread: None,
+            })
+            .await
+        {
             Reply::Accepted { task } => task.id,
             _ => panic!("expected accepted task"),
         }
@@ -319,6 +329,7 @@ async fn pages_and_watchers_resynchronize_without_replaying_mutations() {
             before: None,
             limit: 3,
             state: None,
+            thread: None,
         })
         .await
     {
@@ -333,7 +344,7 @@ async fn pages_and_watchers_resynchronize_without_replaying_mutations() {
     assert_eq!(ids, vec![6, 5, 4]);
     assert_eq!(cursor, Some(TaskId(4)));
     assert!(
-        matches!(client.ok(Command::List { before: cursor, limit: 3, state: None }).await, Reply::Tasks { tasks, next_before: None, .. } if tasks.iter().map(|task| task.id.0).collect::<Vec<_>>() == vec![3,2,1])
+        matches!(client.ok(Command::List { before: cursor, limit: 3, state: None, thread: None }).await, Reply::Tasks { tasks, next_before: None, .. } if tasks.iter().map(|task| task.id.0).collect::<Vec<_>>() == vec![3,2,1])
     );
     let mut reconnect = harness.connect().await;
     reconnect
@@ -372,6 +383,7 @@ async fn malformed_versions_and_oversized_frames_cannot_break_the_service() {
             version: 999,
             id: 44,
             command: Command::Ping {},
+            caller: None,
         },
     )
     .await
@@ -384,10 +396,15 @@ async fn malformed_versions_and_oversized_frames_cannot_break_the_service() {
             before: None,
             limit: 0,
             state: None,
+            thread: None,
         },
-        Command::Submit { text: " ".into() },
+        Command::Submit {
+            text: " ".into(),
+            thread: None,
+        },
         Command::Submit {
             text: "x".repeat(MAX_TEXT_BYTES + 1),
+            thread: None,
         },
     ] {
         assert_eq!(
@@ -497,6 +514,7 @@ async fn persistent_daemon_does_not_reuse_native_socket_or_audit_configuration()
         reader: BufReader::new(reader),
         writer,
         next: 0,
+        caller: None,
     };
     assert!(matches!(
         client.ok(Command::Ping {}).await,
@@ -618,10 +636,13 @@ async fn a_full_queue_creates_no_phantom_tasks_and_cancellation_remains_availabl
     let gate = Arc::new(Gate::default());
     let mut harness = Harness::start(Box::new(SlowPlanner(gate.clone())), vec![]).await;
     let mut client = harness.connect().await;
-    let first = client.submit("slow blocked").await;
-    timeout(Duration::from_secs(3), gate.entered.notified())
-        .await
-        .unwrap();
+    // Occupy every worker; only then does further work wait in the queue.
+    let mut blocked = Vec::new();
+    for _ in 0..MAX_RUNNING_TASKS {
+        let id = client.submit("slow blocked").await;
+        harness.wait(id, TaskState::Planning).await;
+        blocked.push(id);
+    }
     for _ in 0..64 {
         client.submit("现在几点").await;
     }
@@ -629,21 +650,44 @@ async fn a_full_queue_creates_no_phantom_tasks_and_cancellation_remains_availabl
         error_code(
             client
                 .request(Command::Submit {
-                    text: "overflow".into()
+                    text: "overflow".into(),
+                    thread: None,
                 })
                 .await
         ),
         "queue_unavailable"
     );
-    assert_eq!(harness.tasks.list().len(), 65);
+    assert_eq!(harness.tasks.list().len(), MAX_RUNNING_TASKS + 64);
     for task in harness.tasks.list() {
         client.ok(Command::Cancel { id: task.id }).await;
     }
-    gate.release.notify_one();
-    assert_eq!(
-        harness.tasks.get(first).unwrap().state,
-        TaskState::Cancelled
-    );
+    for id in blocked {
+        assert_eq!(harness.tasks.get(id).unwrap().state, TaskState::Cancelled);
+    }
+    // Cancelled work does not hold a worker: new work runs although no
+    // blocked planner was ever released.
+    let next = timeout(Duration::from_secs(5), async {
+        loop {
+            // The cancelled items are still being taken off the queue; a
+            // refusal creates no task, so asking again is safe.
+            let response = client
+                .request(Command::Submit {
+                    text: "现在几点".into(),
+                    thread: None,
+                })
+                .await;
+            if let ResponseBody::Ok {
+                data: Reply::Accepted { task },
+            } = response.body
+            {
+                return task.id;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the queue drains after cancellation");
+    harness.wait(next, TaskState::Succeeded).await;
     harness.stop().await;
 }
 
@@ -769,7 +813,7 @@ async fn oversized_details_return_a_bounded_error_while_summary_pages_remain_usa
         "response_too_large"
     );
     assert!(
-        matches!(client.ok(Command::List { before: None, limit: 1, state: None }).await, Reply::Tasks { tasks, .. } if tasks.len() == 1 && tasks[0].text == "large result")
+        matches!(client.ok(Command::List { before: None, limit: 1, state: None, thread: None }).await, Reply::Tasks { tasks, .. } if tasks.len() == 1 && tasks[0].text == "large result")
     );
     assert!(matches!(
         client.ok(Command::Ping {}).await,
@@ -914,6 +958,7 @@ async fn an_intent_nobody_can_act_on_ends_unhandled_and_is_filterable() {
         before: None,
         limit: 10,
         state: Some(state),
+        thread: None,
     };
     let Reply::Tasks { tasks, .. } = client.ok(page(TaskState::Succeeded)).await else {
         panic!("expected tasks")
@@ -966,9 +1011,17 @@ async fn an_irreversible_step_is_approved_over_the_socket_only_with_the_pin() {
     });
     let mut registry = CapabilityRegistry::new();
     registry.register(wipe.clone());
+    registry.register(external());
     let id = AgentId::new("butler");
     let mut policy = PolicyEngine::new();
-    grant_manifest(&mut policy, &id, &[CapabilityName::new("disk.wipe")]);
+    grant_manifest(
+        &mut policy,
+        &id,
+        &[
+            CapabilityName::new("disk.wipe"),
+            CapabilityName::new("test.external"),
+        ],
+    );
     let pins = Arc::new(
         PinVault::open(dir.0.join("pin.json"))
             .unwrap()
@@ -1010,6 +1063,51 @@ async fn an_irreversible_step_is_approved_over_the_socket_only_with_the_pin() {
     };
 
     let mut client = Connection::connect(&path).await;
+    // A standing rule takes the PIN too, once one is set, and a PIN given
+    // for it vouches for nothing else.
+    let preauthorize = |pin: Option<&str>| Command::Preauthorize {
+        capability: CapabilityName::new("test.external"),
+        caller: None,
+        args: vec![agentos_ipc::ArgRule {
+            field: "recipient".into(),
+            matcher: agentos_ipc::Matcher::Equals(json!("alice")),
+        }],
+        other_args: false,
+        expires_in_seconds: None,
+        pin: pin.map(str::to_string),
+    };
+    assert_eq!(
+        error_code(client.request(preauthorize(None)).await),
+        "identity_required"
+    );
+    assert_eq!(
+        error_code(client.request(preauthorize(Some("111122223333"))).await),
+        "identity_rejected"
+    );
+    assert!(matches!(
+        client.ok(Command::Preauthorizations {}).await,
+        Reply::Preauthorizations { preauthorizations } if preauthorizations.is_empty()
+    ));
+    assert!(matches!(
+        client.ok(preauthorize(Some("918273645546"))).await,
+        Reply::Preauthorized { .. }
+    ));
+    // Guards "L3 is never pre-authorized": not even with the right PIN.
+    assert_eq!(
+        error_code(
+            client
+                .request(Command::Preauthorize {
+                    capability: CapabilityName::new("disk.wipe"),
+                    caller: None,
+                    args: vec![],
+                    other_args: true,
+                    expires_in_seconds: Some(60),
+                    pin: Some("918273645546".into()),
+                })
+                .await
+        ),
+        "not_preauthorizable"
+    );
     let id = client.submit("清除磁盘").await;
     let task = wait(id, TaskState::AwaitingConfirmation).await;
     let confirmation = task.confirmation.unwrap();
@@ -1048,7 +1146,518 @@ async fn an_irreversible_step_is_approved_over_the_socket_only_with_the_pin() {
     server.await.unwrap().unwrap();
     let audit = fs::read_to_string(&audit_path).unwrap();
     assert!(audit.contains("\"event\":\"identity_check\""));
+    assert!(audit.contains("\"event\":\"preauthorization_created\""));
     assert!(!audit.contains("918273645546") && !audit.contains("111122223333"));
     let stored = serde_json::to_string(&tasks.get(id).unwrap()).unwrap();
     assert!(!stored.contains("918273645546"));
+}
+
+#[tokio::test]
+async fn a_task_waiting_for_its_planner_does_not_hold_up_other_tasks() {
+    let gate = Arc::new(Gate::default());
+    let mut harness = Harness::start(Box::new(SlowPlanner(gate.clone())), vec![]).await;
+    let mut client = harness.connect().await;
+    let slow = client.submit("slow thinking").await;
+    timeout(Duration::from_secs(3), gate.entered.notified())
+        .await
+        .unwrap();
+    // Guards concurrency: a later task finishes while an earlier one is
+    // still planning.
+    let quick = client.submit("现在几点").await;
+    harness.wait(quick, TaskState::Succeeded).await;
+    assert_eq!(harness.tasks.get(slow).unwrap().state, TaskState::Planning);
+    gate.release.notify_one();
+    harness.wait(slow, TaskState::Succeeded).await;
+    harness.stop().await;
+}
+
+/// Asks one question for intents that start with "ask", then says what it
+/// was told; everything else goes to the rule planner.
+struct AskingPlanner;
+#[async_trait]
+impl Planner for AskingPlanner {
+    async fn plan(&self, intent: &Intent, available: &[CapabilitySpec]) -> Plan {
+        RulePlanner.plan(intent, available).await
+    }
+    async fn plan_turn(&self, conversation: &agentos_planner::Conversation<'_>) -> Plan {
+        match conversation.history.last() {
+            None if conversation.intent.text.starts_with("ask") => Plan {
+                steps: vec![Step::new(
+                    CapabilityName::new("ask.user"),
+                    json!({"question": "哪一天？"}),
+                )],
+                ..Plan::default()
+            },
+            None => self.plan(conversation.intent, conversation.available).await,
+            Some(round) if conversation.intent.text.starts_with("ask") => Plan {
+                reply: Some(format!("收到：{}", round.results[0].content)),
+                ..Plan::default()
+            },
+            Some(_) => Plan::default(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_question_is_answered_over_the_socket_once_and_only_for_its_step() {
+    let mut harness = Harness::start(Box::new(AskingPlanner), vec![]).await;
+    let mut client = harness.connect().await;
+    let id = client.submit("ask 日期").await;
+    let waiting = harness.wait(id, TaskState::AwaitingInput).await;
+    assert_eq!(waiting.question.as_ref().unwrap().text, "哪一天？");
+    let Reply::Task { task } = client.ok(Command::Get { id }).await else {
+        panic!("not a task")
+    };
+    assert_eq!(task.question.unwrap().step, 0);
+    // Guards "a reply is bound to one request": the wrong step, an empty
+    // answer and an unknown field are refused and change nothing.
+    for (step, text) in [(2, "周三"), (0, "周三")] {
+        let code = error_code(
+            client
+                .request(Command::Reply {
+                    id,
+                    step,
+                    text: text.into(),
+                })
+                .await,
+        );
+        assert!(
+            code == "invalid_reply" || code == "invalid_argument",
+            "{code}"
+        );
+    }
+    assert_eq!(
+        error_code(
+            client
+                .request(Command::Reply {
+                    id,
+                    step: 1,
+                    text: " ".into()
+                })
+                .await
+        ),
+        "invalid_argument"
+    );
+    assert_eq!(
+        harness.tasks.get(id).unwrap().state,
+        TaskState::AwaitingInput
+    );
+    // Another connection may answer: the question belongs to the task.
+    let mut other = harness.connect().await;
+    assert!(matches!(
+        other
+            .ok(Command::Reply {
+                id,
+                step: 1,
+                text: "周三".into()
+            })
+            .await,
+        Reply::ReplyQueued { step: 1, .. }
+    ));
+    let done = harness.wait(id, TaskState::Succeeded).await;
+    assert!(done.message.unwrap().contains("周三"));
+    assert_eq!(done.steps[0].result, Some(json!({"answer": "周三"})));
+    assert_eq!(
+        error_code(
+            client
+                .request(Command::Reply {
+                    id,
+                    step: 1,
+                    text: "周四".into()
+                })
+                .await
+        ),
+        "invalid_reply"
+    );
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn threads_are_continued_by_name_listed_apart_and_never_invented() {
+    let mut harness = Harness::start(Box::new(RulePlanner), vec![]).await;
+    let mut client = harness.connect().await;
+    let submit = |text: &str, thread| Command::Submit {
+        text: text.into(),
+        thread,
+    };
+    let Reply::Accepted { task: first } = client.ok(submit("记一下 茶", None)).await else {
+        panic!("not accepted")
+    };
+    assert_eq!(first.thread, first.id);
+    let Reply::Accepted { task: second } = client.ok(submit("看看笔记", Some(first.id))).await
+    else {
+        panic!("not accepted")
+    };
+    assert_eq!(second.thread, first.id);
+    let Reply::Accepted { task: apart } = client.ok(submit("现在几点", None)).await else {
+        panic!("not accepted")
+    };
+    assert_eq!(apart.thread, apart.id);
+    // A thread is named by its first task; anything else names nothing, and
+    // a refusal creates no task.
+    for missing in [second.id, TaskId(999)] {
+        assert_eq!(
+            error_code(client.request(submit("继续", Some(missing))).await),
+            "not_found"
+        );
+    }
+    assert_eq!(harness.tasks.list().len(), 3);
+    let Reply::Tasks { tasks, .. } = client
+        .ok(Command::List {
+            before: None,
+            limit: 10,
+            state: None,
+            thread: Some(first.id),
+        })
+        .await
+    else {
+        panic!("not a page")
+    };
+    assert_eq!(
+        tasks.iter().map(|task| task.id).collect::<Vec<_>>(),
+        vec![second.id, first.id]
+    );
+    assert!(tasks.iter().all(|task| task.thread == first.id));
+    // Guards order within a thread: the note was written before the notes
+    // were read, although both were submitted without waiting.
+    let read = harness.wait(second.id, TaskState::Succeeded).await;
+    assert_eq!(
+        read.steps[0].result.as_ref().unwrap()["notes"],
+        json!(["茶"])
+    );
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_thread_runs_in_order_without_holding_up_other_threads() {
+    let gate = Arc::new(Gate::default());
+    let mut harness = Harness::start(Box::new(SlowPlanner(gate.clone())), vec![]).await;
+    let mut client = harness.connect().await;
+    let slow = client.submit("slow first").await;
+    timeout(Duration::from_secs(3), gate.entered.notified())
+        .await
+        .unwrap();
+    let Reply::Accepted { task: behind } = client
+        .ok(Command::Submit {
+            text: "现在几点".into(),
+            thread: Some(slow),
+        })
+        .await
+    else {
+        panic!("not accepted")
+    };
+    // Another conversation is not held up...
+    let elsewhere = client.submit("现在几点").await;
+    harness.wait(elsewhere, TaskState::Succeeded).await;
+    // ...but the same one waits its turn, without having started.
+    assert_eq!(
+        harness.tasks.get(behind.id).unwrap().state,
+        TaskState::Queued
+    );
+    gate.release.notify_one();
+    harness.wait(slow, TaskState::Succeeded).await;
+    harness.wait(behind.id, TaskState::Succeeded).await;
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn preauthorizations_are_created_listed_and_revoked_only_within_their_limits() {
+    use agentos_ipc::{ArgRule, Matcher};
+    let capability = external();
+    let mut harness = Harness::start(Box::new(ExternalPlanner), vec![capability.clone()]).await;
+    let mut client = harness.connect().await;
+    let rule = |capability: &str, args: Vec<ArgRule>, expires_in_seconds| Command::Preauthorize {
+        capability: CapabilityName::new(capability),
+        caller: None,
+        args,
+        other_args: false,
+        expires_in_seconds,
+        pin: None,
+    };
+    let recipient = |who: &str| {
+        vec![ArgRule {
+            field: "recipient".into(),
+            matcher: Matcher::Equals(json!(who)),
+        }]
+    };
+    // Guards the limits: only a capability that exists and asks for a
+    // confirmation a rule may lift, and only a rule that narrows something.
+    for (command, code) in [
+        (rule("no.such", recipient("alice"), None), "not_found"),
+        (
+            rule("clock.now", recipient("alice"), None),
+            "not_preauthorizable",
+        ),
+        (rule("test.external", vec![], None), "invalid_argument"),
+        (rule("test.external", vec![], Some(0)), "invalid_argument"),
+        (
+            rule("test.external", recipient("alice"), Some(31 * 86_400)),
+            "invalid_argument",
+        ),
+    ] {
+        assert_eq!(error_code(client.request(command).await), code);
+    }
+    assert!(matches!(
+        client.ok(Command::Preauthorizations {}).await,
+        Reply::Preauthorizations { preauthorizations } if preauthorizations.is_empty()
+    ));
+
+    // Before the rule, the call waits for approval.
+    let asked = client.submit("send").await;
+    harness.wait(asked, TaskState::AwaitingConfirmation).await;
+    assert_eq!(capability.calls.load(Ordering::SeqCst), 0);
+
+    let Reply::Preauthorized { preauthorization } = client
+        .ok(rule("test.external", recipient("alice"), Some(600)))
+        .await
+    else {
+        panic!("not created")
+    };
+    assert_eq!(preauthorization.id, "pre-1");
+    assert!(preauthorization.expires_at_ms.is_some());
+    assert!(matches!(
+        client.ok(Command::Preauthorizations {}).await,
+        Reply::Preauthorizations { preauthorizations }
+            if preauthorizations == vec![preauthorization.clone()]
+    ));
+    // A rule is for calls checked from now on; it approves nothing that is
+    // already waiting for the human.
+    assert_eq!(
+        harness.tasks.get(asked).unwrap().state,
+        TaskState::AwaitingConfirmation
+    );
+    let allowed = client.submit("send").await;
+    harness.wait(allowed, TaskState::Succeeded).await;
+    assert_eq!(capability.calls.load(Ordering::SeqCst), 1);
+
+    // Guards "revocation is immediate".
+    assert!(matches!(
+        client
+            .ok(Command::RevokePreauthorization { id: "pre-1".into() })
+            .await,
+        Reply::PreauthorizationRevoked { id } if id == "pre-1"
+    ));
+    assert_eq!(
+        error_code(
+            client
+                .request(Command::RevokePreauthorization { id: "pre-1".into() })
+                .await
+        ),
+        "not_found"
+    );
+    let again = client.submit("send").await;
+    harness.wait(again, TaskState::AwaitingConfirmation).await;
+    assert_eq!(capability.calls.load(Ordering::SeqCst), 1);
+    harness.stop().await;
+}
+
+impl Harness {
+    /// A connection whose every request is made as the caller `id`.
+    async fn connect_as(&self, id: &str) -> Connection {
+        let mut connection = self.connect().await;
+        connection.caller = Some(id.into());
+        connection
+    }
+}
+
+fn register(id: &str, capabilities: &[&str], max_risk: RiskLevel) -> Command {
+    Command::RegisterCaller {
+        id: id.into(),
+        name: "测试助手".into(),
+        capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
+        max_risk,
+        pin: None,
+    }
+}
+
+#[tokio::test]
+async fn an_outside_caller_reaches_only_what_it_was_given_and_only_its_own_tasks() {
+    let mut harness = Harness::start(Box::new(RulePlanner), vec![]).await;
+    let mut user = harness.connect().await;
+    // Guards "a caller holds nothing it was not given": no wildcard for
+    // everything, and a name nobody registered is nobody.
+    assert_eq!(
+        error_code(
+            user.request(register("helper", &["*"], RiskLevel::ReadOnly))
+                .await
+        ),
+        "invalid_argument"
+    );
+    let mut nobody = harness.connect_as("helper").await;
+    assert_eq!(
+        error_code(nobody.request(Command::Ping {}).await),
+        "not_found"
+    );
+    let Reply::CallerRegistered { caller } = user
+        .ok(register(
+            "helper",
+            &["notes.list", "notes.append"],
+            RiskLevel::Reversible,
+        ))
+        .await
+    else {
+        panic!("not registered")
+    };
+    assert_eq!(caller.id, "helper");
+    assert!(matches!(
+        user.ok(Command::Callers {}).await,
+        Reply::Callers { callers } if callers == vec![caller.clone()]
+    ));
+
+    let mut helper = harness.connect_as("helper").await;
+    // What it may use is the manifest, plus asking back. Nothing else is
+    // even listed: no clock, no blackboard, no delegation.
+    let Reply::Capabilities { capabilities } = helper.ok(Command::Capabilities {}).await else {
+        panic!("not capabilities")
+    };
+    let mut names: Vec<_> = capabilities.iter().map(|s| s.name.to_string()).collect();
+    names.sort();
+    assert_eq!(names, vec!["ask.user", "notes.append", "notes.list"]);
+    // Reading is given like anything else.
+    assert!(matches!(
+        helper
+            .ok(Command::Read {
+                capability: CapabilityName::new("notes.list"),
+                args: json!({})
+            })
+            .await,
+        Reply::Value { .. }
+    ));
+    assert_eq!(
+        error_code(
+            helper
+                .request(Command::Read {
+                    capability: CapabilityName::new("clock.now"),
+                    args: json!({})
+                })
+                .await
+        ),
+        "not_found"
+    );
+
+    // Guards "confirmation, standing permission and registration are the
+    // human's": none of it is reachable as a caller.
+    for command in [
+        Command::Approve {
+            id: TaskId(1),
+            step: 1,
+            confirmation: "x".into(),
+            pin: None,
+        },
+        Command::Preauthorize {
+            capability: CapabilityName::new("notes.append"),
+            caller: Some("helper".into()),
+            args: vec![],
+            other_args: true,
+            expires_in_seconds: Some(60),
+            pin: None,
+        },
+        Command::Preauthorizations {},
+        Command::RevokePreauthorization { id: "pre-1".into() },
+        register("helper", &["notes.*"], RiskLevel::External),
+        Command::Callers {},
+        Command::RevokeCaller {
+            id: "helper".into(),
+        },
+        Command::Watch { after: None },
+    ] {
+        assert_eq!(error_code(helper.request(command).await), "forbidden");
+    }
+
+    // The user's tasks do not exist for it; its own do.
+    let private = user.submit("记一下 我的秘密").await;
+    harness.wait(private, TaskState::Succeeded).await;
+    for command in [
+        Command::Get { id: private },
+        Command::Cancel { id: private },
+    ] {
+        assert_eq!(error_code(helper.request(command).await), "not_found");
+    }
+    assert_eq!(
+        error_code(
+            helper
+                .request(Command::Submit {
+                    text: "看看笔记".into(),
+                    thread: Some(private),
+                })
+                .await
+        ),
+        "not_found"
+    );
+    let own = helper.submit("看看笔记").await;
+    let read = harness.wait(own, TaskState::Succeeded).await;
+    assert_eq!(read.intent.source.as_str(), "caller:helper");
+    let Reply::Tasks { tasks, .. } = helper
+        .ok(Command::List {
+            before: None,
+            limit: 10,
+            state: None,
+            thread: None,
+        })
+        .await
+    else {
+        panic!("not a page")
+    };
+    assert_eq!(tasks.iter().map(|t| t.id).collect::<Vec<_>>(), vec![own]);
+
+    // Guards "stricter than the user": the same reversible write the user's
+    // task just did on its own waits for the human here, the caller is not
+    // shown the token, and the human approves it.
+    let write = helper.submit("记一下 茶").await;
+    let waiting = harness.wait(write, TaskState::AwaitingConfirmation).await;
+    let Reply::Task { task: shown } = helper.ok(Command::Get { id: write }).await else {
+        panic!("not a task")
+    };
+    assert_eq!(shown.confirmation.unwrap().token, "");
+    let token = waiting.confirmation.unwrap().token;
+    assert!(matches!(
+        user.ok(Command::Approve {
+            id: write,
+            step: 1,
+            confirmation: token,
+            pin: None,
+        })
+        .await,
+        Reply::ApprovalQueued { .. }
+    ));
+    harness.wait(write, TaskState::Succeeded).await;
+
+    // A rule for the caller cannot reach beyond its manifest; within it,
+    // it lifts the confirmation for that caller.
+    let rule = |capability: &str| Command::Preauthorize {
+        capability: CapabilityName::new(capability),
+        caller: Some("helper".into()),
+        args: vec![],
+        other_args: true,
+        expires_in_seconds: Some(600),
+        pin: None,
+    };
+    assert_eq!(
+        error_code(user.request(rule("notes.clear")).await),
+        "not_found"
+    );
+    assert!(matches!(
+        user.ok(rule("notes.append")).await,
+        Reply::Preauthorized { .. }
+    ));
+    let allowed = helper.submit("记一下 糖").await;
+    harness.wait(allowed, TaskState::Succeeded).await;
+
+    // Revoked: it is nobody again, and its standing permission went with it.
+    assert!(matches!(
+        user.ok(Command::RevokeCaller {
+            id: "helper".into()
+        })
+        .await,
+        Reply::CallerRevoked { .. }
+    ));
+    assert!(matches!(
+        user.ok(Command::Preauthorizations {}).await,
+        Reply::Preauthorizations { preauthorizations } if preauthorizations.is_empty()
+    ));
+    assert_eq!(
+        error_code(helper.request(Command::Ping {}).await),
+        "not_found"
+    );
+    harness.stop().await;
 }

@@ -25,6 +25,8 @@ pub enum WaitOutcome {
     Settled(Task),
     /// The task is paused until a human approves a concrete step.
     NeedsApproval(Task),
+    /// The task is paused until someone answers the question it asked.
+    NeedsInput(Task),
     /// The limit passed first. The task is unaffected and keeps running.
     TimedOut(Task),
 }
@@ -32,7 +34,10 @@ pub enum WaitOutcome {
 impl WaitOutcome {
     pub fn task(&self) -> &Task {
         match self {
-            Self::Settled(task) | Self::NeedsApproval(task) | Self::TimedOut(task) => task,
+            Self::Settled(task)
+            | Self::NeedsApproval(task)
+            | Self::NeedsInput(task)
+            | Self::TimedOut(task) => task,
         }
     }
 
@@ -43,6 +48,7 @@ impl WaitOutcome {
             Self::Settled(_) => 3,
             Self::NeedsApproval(_) => 4,
             Self::TimedOut(_) => 5,
+            Self::NeedsInput(_) => 6,
         }
     }
 }
@@ -90,6 +96,9 @@ pub async fn wait_for_task(
         }
         if task.state == TaskState::AwaitingConfirmation {
             break Ok(WaitOutcome::NeedsApproval(task));
+        }
+        if task.state == TaskState::AwaitingInput {
+            break Ok(WaitOutcome::NeedsInput(task));
         }
         let now = Instant::now();
         if now >= deadline {
