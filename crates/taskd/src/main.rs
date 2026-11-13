@@ -267,7 +267,7 @@ async fn main() -> io::Result<()> {
     match options.mode {
         Mode::Serve => {}
         Mode::SetPin => {
-            std::fs::create_dir_all(&state_dir)?;
+            agentos_runtime::create_private_dir(&state_dir)?;
             return set_pin(&pin_path);
         }
         Mode::ClearPin => return clear_pin(&pin_path),
