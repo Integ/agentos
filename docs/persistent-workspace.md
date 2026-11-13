@@ -116,6 +116,8 @@ agentos revoke pre-1
 
 规则有 `--equals 字段=值`、`--one-of 字段=值1,值2`、`--prefix 字段=文本`、`--under 字段=目录`、`--any 字段`。没有写到的参数默认不允许出现，`--any-other-args` 才放开。必须至少限定一个参数或用 `--expires` 设置期限（最长 30 天）。设置了 PIN 时加 `--pin-stdin`。
 
+`caller add <id> --name 名字 [--allow 能力]…` 注册一个外部调用方，`agentos mcp --caller <id>` 以它的身份提供 MCP 服务；见 [mcp.md](mcp.md)。给调用方的预授权用 `preauthorize … --caller <id>`。
+
 `read <能力> [JSON 参数]` 直接查询一个只读（L0）能力，例如 `notes.list`、`clock.now`。它不创建任务、不经过规划器；有副作用的能力会被拒绝，需要用 `submit` 提交意图。`capabilities` 列出的风险等级写作 L0–L3。
 
 独立批准命令要求先读取任务详情，再显式提供其中的确认令牌：

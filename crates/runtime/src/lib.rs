@@ -409,16 +409,18 @@ impl TaskStore {
         limit: usize,
         state: Option<TaskState>,
     ) -> (Vec<Task>, Option<TaskId>, u64) {
-        self.page_in(before, limit, state, None)
+        self.page_in(before, limit, state, None, None)
     }
 
-    /// [`Self::page`], optionally restricted to the tasks of one thread.
+    /// [`Self::page`], optionally restricted to the tasks of one thread
+    /// and to those submitted from one source.
     pub fn page_in(
         &self,
         before: Option<TaskId>,
         limit: usize,
         state: Option<TaskState>,
         thread: Option<TaskId>,
+        source: Option<&str>,
     ) -> (Vec<Task>, Option<TaskId>, u64) {
         let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if limit == 0 {
@@ -431,7 +433,8 @@ impl TaskStore {
             .rev()
             .map(|(_, task)| task)
             .filter(|task| state.is_none_or(|state| task.state == state))
-            .filter(|task| thread.is_none_or(|thread| task.thread == thread));
+            .filter(|task| thread.is_none_or(|thread| task.thread == thread))
+            .filter(|task| source.is_none_or(|source| task.intent.source.as_str() == source));
         let tasks: Vec<_> = matching.by_ref().take(limit).cloned().collect();
         let next = if matching.next().is_some() {
             tasks.last().map(|task| task.id)

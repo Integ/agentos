@@ -16,8 +16,9 @@ use agentos_core::{
     Urgency,
 };
 use agentos_ipc::{
-    current_uid, read_frame, write_frame, Command, Event, EventKind, ProtocolError, Reply, Request,
-    Response, TaskSummary, MAX_CAPABILITY_NAME_BYTES, MAX_PAGE_SIZE, MAX_TEXT_BYTES, VERSION,
+    current_uid, read_frame, write_frame, Caller, Command, Event, EventKind, ProtocolError, Reply,
+    Request, Response, TaskSummary, MAX_CAPABILITY_NAME_BYTES, MAX_PAGE_SIZE, MAX_TEXT_BYTES,
+    VERSION,
 };
 use agentos_policy::{PolicyEngine, Subject};
 use agentos_runtime::{Task, TaskId, TaskState, TaskStore};
@@ -60,6 +61,8 @@ pub struct Server {
 }
 
 struct Controller {
+    /// For what only the butler knows: what a caller may use right now.
+    butler: Arc<Butler>,
     tasks: Arc<TaskStore>,
     audit: Arc<AuditLog>,
     /// What the butler can currently do; it keeps this current as plugins
@@ -124,8 +127,10 @@ impl Service {
     /// approval the butler then carries out.
     pub fn with_butler(butler: Butler, audit: Arc<AuditLog>, pins: Option<Arc<PinVault>>) -> Self {
         let (work_tx, work_rx) = mpsc::unbounded_channel();
+        let butler = Arc::new(butler);
         Self {
             controller: Arc::new(Controller {
+                butler: butler.clone(),
                 tasks: butler.tasks().clone(),
                 audit,
                 view: butler.view(),
@@ -135,7 +140,7 @@ impl Service {
                 admission: Arc::new(Semaphore::new(QUEUE_CAPACITY)),
             }),
             work_rx,
-            butler: Arc::new(butler),
+            butler,
             max_running: MAX_RUNNING_TASKS,
         }
     }
@@ -459,7 +464,59 @@ fn responder(uid: u32, text: String) -> Intent {
     }
 }
 
+/// Who a request is made as: the user, or the caller it narrowed itself to.
+fn actor_intent(uid: u32, actor: Option<&Caller>, text: String) -> Intent {
+    match actor {
+        Some(caller) => Intent {
+            source: DeviceId::new(caller.source()),
+            speaker: Some(caller.source()),
+            ..responder(uid, text)
+        },
+        None => responder(uid, text),
+    }
+}
+
+fn forbidden() -> ProtocolError {
+    protocol_error(
+        "forbidden",
+        "an outside caller cannot do this; it is for the user at this machine",
+    )
+}
+
 impl Controller {
+    /// The caller a request names, as it is registered now.
+    fn actor(&self, caller: Option<&str>) -> Result<Option<Caller>, ProtocolError> {
+        caller
+            .map(|id| {
+                self.butler
+                    .callers()
+                    .get(id)
+                    .ok_or_else(|| protocol_error("not_found", format!("no caller {id}")))
+            })
+            .transpose()
+    }
+
+    /// The task, if `actor` may see it. A caller sees the tasks it
+    /// submitted; for it, another task does not exist.
+    fn task_for(&self, id: TaskId, actor: Option<&Caller>) -> Result<Task, ProtocolError> {
+        let task = self.task(id)?;
+        match actor {
+            Some(caller) if task.intent.source.as_str() != caller.source() => {
+                Err(protocol_error("not_found", format!("no task {id}")))
+            }
+            _ => Ok(task),
+        }
+    }
+
+    /// The task as `actor` is shown it. The token of a pending approval is
+    /// what the human approves with; a caller never gets to hold it.
+    fn shown(mut task: Task, actor: Option<&Caller>) -> Task {
+        if let (Some(_), Some(confirmation)) = (actor, &mut task.confirmation) {
+            confirmation.token.clear();
+        }
+        task
+    }
+
     fn view(&self) -> std::sync::MutexGuard<'_, CapabilityView> {
         self.view.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -468,6 +525,25 @@ impl Controller {
         self.tasks
             .get(id)
             .ok_or_else(|| protocol_error("not_found", format!("no task {id}")))
+    }
+
+    /// A standing change (a rule, a caller) removes the human from later
+    /// decisions, so it takes the strongest proof of who is asking that
+    /// exists: the PIN, once one is set. The check vouches for nothing else.
+    fn identify(&self, pin: Option<String>) -> Result<(), ProtocolError> {
+        let Some(pins) = self.pins.as_ref().filter(|pins| pins.is_set()) else {
+            return Ok(());
+        };
+        let Some(pin) = pin else {
+            return Err(protocol_error(
+                "identity_required",
+                "a PIN is set; this change needs it",
+            ));
+        };
+        match pins.check(&pin) {
+            PinCheck::Ok => Ok(()),
+            other => Err(protocol_error("identity_rejected", other.message())),
+        }
     }
 
     /// A place in the bounded queue, or a refusal that changed nothing.
@@ -487,7 +563,28 @@ impl Controller {
         })
     }
 
-    fn handle(&self, command: Command, uid: u32) -> Result<Reply, ProtocolError> {
+    fn handle(
+        &self,
+        command: Command,
+        uid: u32,
+        actor: Option<&Caller>,
+    ) -> Result<Reply, ProtocolError> {
+        // Confirmation, standing permission and who may call at all are the
+        // human's: no caller reaches them, whatever its manifest says.
+        if actor.is_some()
+            && matches!(
+                command,
+                Command::Approve { .. }
+                    | Command::Preauthorize { .. }
+                    | Command::Preauthorizations {}
+                    | Command::RevokePreauthorization { .. }
+                    | Command::RegisterCaller { .. }
+                    | Command::Callers {}
+                    | Command::RevokeCaller { .. }
+            )
+        {
+            return Err(forbidden());
+        }
         match command {
             Command::Ping {} => Ok(Reply::Pong {
                 server_version: env!("CARGO_PKG_VERSION").into(),
@@ -503,7 +600,7 @@ impl Controller {
                 let place = self.admit("task queue is full or unavailable; no task was created")?;
                 let task = self
                     .tasks
-                    .create_in(responder(uid, text.trim().into()), thread)
+                    .create_in(actor_intent(uid, actor, text.trim().into()), thread)
                     .map_err(|error| match (error.kind(), thread) {
                         // Whether a thread is missing or someone else's is
                         // not this client's to learn.
@@ -517,7 +614,9 @@ impl Controller {
                         _ => storage_error(error),
                     })?;
                 self.enqueue(Work::Run(task.id), place)?;
-                Ok(Reply::Accepted { task })
+                Ok(Reply::Accepted {
+                    task: Self::shown(task, actor),
+                })
             }
             Command::List {
                 before,
@@ -531,8 +630,13 @@ impl Controller {
                         "page limit must be between 1 and 50",
                     ));
                 }
-                let (tasks, next_before, revision) =
-                    self.tasks.page_in(before, limit, state, thread);
+                let (tasks, next_before, revision) = self.tasks.page_in(
+                    before,
+                    limit,
+                    state,
+                    thread,
+                    actor.map(Caller::source).as_deref(),
+                );
                 Ok(Reply::Tasks {
                     tasks: tasks.iter().map(TaskSummary::from).collect(),
                     next_before,
@@ -540,9 +644,10 @@ impl Controller {
                 })
             }
             Command::Get { id } => Ok(Reply::Task {
-                task: self.task(id)?,
+                task: Self::shown(self.task_for(id, actor)?, actor),
             }),
             Command::Cancel { id } => {
+                self.task_for(id, actor)?;
                 let task = self.tasks.cancel(id).map_err(storage_error)?;
                 if task.state == TaskState::Cancelled {
                     self.audit
@@ -558,7 +663,9 @@ impl Controller {
                             )
                         })?;
                 }
-                Ok(Reply::Task { task })
+                Ok(Reply::Task {
+                    task: Self::shown(task, actor),
+                })
             }
             Command::Approve {
                 id,
@@ -622,8 +729,8 @@ impl Controller {
                         "reply must be non-empty and at most 64 KiB",
                     ));
                 }
-                let task = self.task(id)?;
-                let responder = responder(uid, format!("reply {id} {step}"));
+                let task = self.task_for(id, actor)?;
+                let responder = actor_intent(uid, actor, format!("reply {id} {step}"));
                 if !reply_matches(&task, index, &responder) {
                     return Err(protocol_error(
                         "invalid_reply",
@@ -644,14 +751,22 @@ impl Controller {
             }
             Command::Preauthorize {
                 capability,
+                caller,
                 args,
                 other_args,
                 expires_in_seconds,
                 pin,
             } => {
-                let risk = self
-                    .view()
-                    .specs
+                // A rule for a caller cannot reach beyond what the caller
+                // was given: outside its manifest there is nothing to lift.
+                let specs = match &caller {
+                    Some(id) => self
+                        .butler
+                        .caller_specs(id)
+                        .ok_or_else(|| protocol_error("not_found", format!("no caller {id}")))?,
+                    None => self.view().specs.clone(),
+                };
+                let risk = specs
                     .iter()
                     .find(|spec| spec.name == capability)
                     .map(|spec| spec.risk)
@@ -677,25 +792,12 @@ impl Controller {
                         ));
                     }
                 }
-                // A standing rule removes the human from later calls, so it
-                // takes the strongest proof of who is asking that exists.
-                if let Some(pins) = self.pins.as_ref().filter(|pins| pins.is_set()) {
-                    let Some(pin) = pin else {
-                        return Err(protocol_error(
-                            "identity_required",
-                            "a PIN is set; creating a pre-authorization needs it",
-                        ));
-                    };
-                    match pins.check(&pin) {
-                        PinCheck::Ok => {}
-                        other => return Err(protocol_error("identity_rejected", other.message())),
-                    }
-                }
+                self.identify(pin)?;
                 let created = self
                     .preauths
                     .create(
                         NewPreauthorization {
-                            subject: Subject::User,
+                            subject: caller.map_or(Subject::User, Subject::Caller),
                             capability,
                             args,
                             other_args,
@@ -752,8 +854,96 @@ impl Controller {
                     })?;
                 Ok(Reply::PreauthorizationRevoked { id: revoked.id })
             }
+            Command::RegisterCaller {
+                id,
+                name,
+                capabilities,
+                max_risk,
+                pin,
+            } => {
+                self.identify(pin)?;
+                let known = self.butler.callers().get(&id);
+                let registered = self
+                    .butler
+                    .callers()
+                    .put(Caller {
+                        // Changing what a caller may use does not make it new.
+                        created_at_ms: known.map_or_else(now_ms, |known| known.created_at_ms),
+                        id,
+                        name: name.trim().into(),
+                        capabilities,
+                        max_risk,
+                    })
+                    .map_err(|error| match error.kind() {
+                        io::ErrorKind::InvalidInput => {
+                            protocol_error("invalid_argument", error.to_string())
+                        }
+                        _ => storage_error(error),
+                    })?;
+                // Tasks under way follow the manifest as it is now.
+                self.butler.sync_caller(&registered.id);
+                self.audit
+                    .append(AuditEvent::CallerRegistered {
+                        caller: serde_json::to_value(&registered)
+                            .expect("a caller is serializable"),
+                        by: format!("uid:{uid}"),
+                    })
+                    .map_err(|error| {
+                        // Never registered without a record of who allowed it.
+                        let _ = self.butler.callers().remove(&registered.id);
+                        self.butler.sync_caller(&registered.id);
+                        protocol_error(
+                            "audit_unavailable",
+                            format!("the caller was not registered: {error}"),
+                        )
+                    })?;
+                Ok(Reply::CallerRegistered { caller: registered })
+            }
+            Command::Callers {} => Ok(Reply::Callers {
+                callers: self.butler.callers().list(),
+            }),
+            Command::RevokeCaller { id } => {
+                let revoked = self
+                    .butler
+                    .callers()
+                    .remove(&id)
+                    .map_err(storage_error)?
+                    .ok_or_else(|| protocol_error("not_found", format!("no caller {id}")))?;
+                // From here on it holds nothing, tasks under way included,
+                // and none of its standing permissions outlive it.
+                self.butler.sync_caller(&revoked.id);
+                let rules = self
+                    .preauths
+                    .revoke_subject(&Subject::Caller(revoked.id.clone()))
+                    .map_err(storage_error)?;
+                let by = format!("uid:{uid}");
+                let mut events = vec![AuditEvent::CallerRevoked {
+                    id: revoked.id.clone(),
+                    by: by.clone(),
+                }];
+                events.extend(
+                    rules
+                        .into_iter()
+                        .map(|rule| AuditEvent::PreauthorizationRevoked {
+                            id: rule.id,
+                            by: by.clone(),
+                        }),
+                );
+                for event in events {
+                    self.audit.append(event).map_err(|error| {
+                        protocol_error(
+                            "audit_unavailable",
+                            format!("the caller was revoked, but audit failed: {error}"),
+                        )
+                    })?;
+                }
+                Ok(Reply::CallerRevoked { id: revoked.id })
+            }
             Command::Capabilities {} => Ok(Reply::Capabilities {
-                capabilities: self.view().specs.clone(),
+                capabilities: match actor {
+                    Some(caller) => self.butler.caller_specs(&caller.id).unwrap_or_default(),
+                    None => self.view().specs.clone(),
+                },
             }),
             Command::Read { .. } | Command::Watch { .. } => {
                 unreachable!("read and watch are handled at the connection boundary")
@@ -764,7 +954,26 @@ impl Controller {
     /// Serve a client's query of local state. This is not an agent acting: no
     /// task, no planner, no approval and no audit record, like `get`/`list`.
     /// Only capabilities that cannot have a side effect are reachable here.
-    async fn read(&self, capability: CapabilityName, args: Value) -> Result<Reply, ProtocolError> {
+    async fn read(
+        &self,
+        capability: CapabilityName,
+        args: Value,
+        actor: Option<&Caller>,
+    ) -> Result<Reply, ProtocolError> {
+        // What comes back goes to the caller, so reading is something it
+        // must have been given like anything else.
+        if let Some(caller) = actor {
+            let given = self
+                .butler
+                .caller_specs(&caller.id)
+                .is_some_and(|specs| specs.iter().any(|spec| spec.name == capability));
+            if !given {
+                return Err(protocol_error(
+                    "not_found",
+                    format!("no capability {capability}"),
+                ));
+            }
+        }
         if capability.as_str().is_empty() || capability.as_str().len() > MAX_CAPABILITY_NAME_BYTES {
             return Err(protocol_error(
                 "invalid_argument",
@@ -871,6 +1080,34 @@ async fn serve_connection(stream: UnixStream, controller: Arc<Controller>) -> io
             .await?;
             continue;
         }
+        let actor = match controller.actor(request.caller.as_deref()) {
+            Ok(actor) => actor,
+            Err(error) => {
+                send_response(
+                    &mut writer,
+                    Response {
+                        version: VERSION,
+                        id: request.id,
+                        body: agentos_ipc::ResponseBody::Error { error },
+                    },
+                )
+                .await?;
+                continue;
+            }
+        };
+        // Change hints name every task; a caller reads its own instead.
+        if actor.is_some() && matches!(request.command, Command::Watch { .. }) {
+            send_response(
+                &mut writer,
+                Response {
+                    version: VERSION,
+                    id: request.id,
+                    body: agentos_ipc::ResponseBody::Error { error: forbidden() },
+                },
+            )
+            .await?;
+            continue;
+        }
         if let Command::Watch { after } = request.command {
             let mut changes = controller.tasks.subscribe();
             let revision = controller.tasks.revision();
@@ -904,8 +1141,10 @@ async fn serve_connection(stream: UnixStream, controller: Arc<Controller>) -> io
             }
         }
         let result = match request.command {
-            Command::Read { capability, args } => controller.read(capability, args).await,
-            command => controller.handle(command, uid),
+            Command::Read { capability, args } => {
+                controller.read(capability, args, actor.as_ref()).await
+            }
+            command => controller.handle(command, uid, actor.as_ref()),
         };
         let response = match result {
             Ok(reply) => Response::ok(request.id, reply),

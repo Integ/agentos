@@ -72,6 +72,8 @@ fn mutating(command: &Command) -> bool {
             | Command::Reply { .. }
             | Command::Preauthorize { .. }
             | Command::RevokePreauthorization { .. }
+            | Command::RegisterCaller { .. }
+            | Command::RevokeCaller { .. }
     )
 }
 
@@ -140,6 +142,12 @@ fn reply_matches(command: &Command, reply: &Reply) -> bool {
                 Command::RevokePreauthorization { .. },
                 Reply::PreauthorizationRevoked { .. }
             )
+            | (
+                Command::RegisterCaller { .. },
+                Reply::CallerRegistered { .. }
+            )
+            | (Command::Callers {}, Reply::Callers { .. })
+            | (Command::RevokeCaller { .. }, Reply::CallerRevoked { .. })
             | (Command::Capabilities {}, Reply::Capabilities { .. })
             | (Command::Read { .. }, Reply::Value { .. })
             | (Command::Watch { .. }, Reply::Watching { .. })
@@ -163,6 +171,8 @@ fn verify_response(response: Response, id: u64, ambiguous: bool) -> Result<Reply
 pub struct Client {
     path: PathBuf,
     next_id: Arc<AtomicU64>,
+    /// Make every request as this registered caller instead of as the user.
+    caller: Option<String>,
 }
 
 impl Client {
@@ -170,7 +180,15 @@ impl Client {
         Self {
             path: path.into(),
             next_id: Arc::new(AtomicU64::new(1)),
+            caller: None,
         }
+    }
+
+    /// Narrow this client to what the caller `id` was given. There is no
+    /// way back: a client made for a caller never speaks as the user.
+    pub fn as_caller(mut self, id: impl Into<String>) -> Self {
+        self.caller = Some(id.into());
+        self
     }
 
     pub fn path(&self) -> &Path {
@@ -187,6 +205,7 @@ impl Client {
             version: VERSION,
             id,
             command,
+            caller: self.caller.clone(),
         };
         timeout(REQUEST_TIMEOUT, write_frame(&mut stream, &request))
             .await
@@ -226,6 +245,10 @@ impl Client {
                 Command::RevokePreauthorization { id },
                 Reply::PreauthorizationRevoked { id: actual },
             ) => id == actual,
+            (Command::RevokeCaller { id }, Reply::CallerRevoked { id: actual }) => id == actual,
+            (Command::RegisterCaller { id, .. }, Reply::CallerRegistered { caller }) => {
+                id == &caller.id
+            }
             (
                 Command::Preauthorize { capability, .. },
                 Reply::Preauthorized { preauthorization },
@@ -254,6 +277,7 @@ impl Client {
             version: VERSION,
             id,
             command: Command::Watch { after },
+            caller: self.caller.clone(),
         };
         timeout(REQUEST_TIMEOUT, write_frame(&mut stream, &request))
             .await

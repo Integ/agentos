@@ -25,6 +25,7 @@ use agentos_services::plugin_store::PluginManager;
 use agentos_services::registry::CapabilityRegistry;
 use agentos_taskd::builtin;
 use agentos_taskd::butler::{grant_manifest, Budget, Butler};
+use agentos_taskd::callers::CallerStore;
 use agentos_taskd::preauth::PreauthStore;
 use agentos_taskd::service::Service;
 
@@ -357,7 +358,8 @@ async fn main() -> io::Result<()> {
     .with_budget(budget)
     .with_preauthorizations(Arc::new(PreauthStore::open(
         state_dir.join("preauthorizations.json"),
-    )?));
+    )?))
+    .with_callers(Arc::new(CallerStore::open(state_dir.join("callers.json"))?));
     // AGENTOS_JUDGE=1: a model reviews allowed L1+ steps before they run.
     let judge_on = std::env::var("AGENTOS_JUDGE").is_ok_and(|v| v == "1" || v == "on");
     let judge = match (&text_model, judge_on) {

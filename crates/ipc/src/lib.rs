@@ -9,7 +9,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use agentos_core::{CapabilityName, CapabilitySpec};
+use agentos_core::{CapabilityName, CapabilitySpec, RiskLevel};
 pub use agentos_policy::{ArgRule, Matcher, Preauthorization, Subject};
 use agentos_runtime::{StepState, Task, TaskId, TaskState};
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,45 @@ pub struct Request {
     pub version: u32,
     pub id: u64,
     pub command: Command,
+    /// Make this request as a registered outside caller instead of as the
+    /// user. It only ever narrows what the request may do, so it needs no
+    /// secret: whoever can reach the socket could have asked for more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<String>,
+}
+
+/// Where a caller's tasks say they come from: `caller:<id>`.
+pub const CALLER_SOURCE_PREFIX: &str = "caller:";
+
+/// An outside program the user lets submit intents, and what it may use.
+/// A caller holds nothing it was not given here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Caller {
+    pub id: String,
+    pub name: String,
+    /// Capability names, or prefixes ending in `*` (`notes.*`).
+    pub capabilities: Vec<String>,
+    /// The highest risk its tasks may touch at all.
+    pub max_risk: RiskLevel,
+    #[serde(default)]
+    pub created_at_ms: u64,
+}
+
+impl Caller {
+    /// Whether the caller was given `capability`.
+    pub fn wants(&self, capability: &str) -> bool {
+        self.capabilities
+            .iter()
+            .any(|pattern| match pattern.strip_suffix('*') {
+                Some(prefix) => capability.starts_with(prefix),
+                None => capability == pattern,
+            })
+    }
+
+    pub fn source(&self) -> String {
+        format!("{CALLER_SOURCE_PREFIX}{}", self.id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +125,10 @@ pub enum Command {
     /// can do this; no agent and no capability can.
     Preauthorize {
         capability: CapabilityName,
+        /// The registered caller whose tasks this applies to. Absent means
+        /// the user's own tasks. A rule never applies to both.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<String>,
         #[serde(default)]
         args: Vec<ArgRule>,
         /// Accept arguments that no rule mentions. Off unless stated.
@@ -100,6 +143,24 @@ pub enum Command {
     /// The pre-authorizations still in force.
     Preauthorizations {},
     RevokePreauthorization {
+        id: String,
+    },
+    /// Let an outside program submit intents with exactly these
+    /// capabilities, or replace what a registered one may use.
+    RegisterCaller {
+        id: String,
+        name: String,
+        #[serde(default)]
+        capabilities: Vec<String>,
+        max_risk: RiskLevel,
+        /// Required when a PIN is set. Checked and never stored or logged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pin: Option<String>,
+    },
+    Callers {},
+    /// Withdraw a caller. Its tasks under way lose everything at once, and
+    /// its pre-authorizations go with it.
+    RevokeCaller {
         id: String,
     },
     Capabilities {},
@@ -208,6 +269,15 @@ pub enum Reply {
         preauthorizations: Vec<Preauthorization>,
     },
     PreauthorizationRevoked {
+        id: String,
+    },
+    CallerRegistered {
+        caller: Caller,
+    },
+    Callers {
+        callers: Vec<Caller>,
+    },
+    CallerRevoked {
         id: String,
     },
     Watching {
@@ -394,6 +464,7 @@ mod tests {
                 confirmation: "nonce".into(),
                 pin: None,
             },
+            caller: None,
         };
         let value = serde_json::to_value(&request).unwrap();
         assert_eq!(value["command"]["method"], "approve");

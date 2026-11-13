@@ -26,7 +26,9 @@
 {"version":1,"id":7,"body":{"status":"error","error":{"code":"not_found","message":"no task task-99"}}}
 ```
 
-`version` 是协议版本，与程序的语义版本号分开。v0.3 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
+信封还可以带一个可选的 `caller`，表示以某个已注册的外部调用方的身份发出请求；见“外部调用方”。
+
+`version` 是协议版本，与程序的语义版本号分开。v0.3 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法；请求信封的 `caller`、`preauthorize` 的 `caller`，以及 `register_caller`、`callers`、`revoke_caller` 方法。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
 
 `id` 是客户端选择的无符号整数，仅用于关联响应，**不是幂等键**。重复发送同一个 `submit` 请求编号仍可能创建第二个任务。收到完整响应前连接断开时，结果可能已经落盘；客户端必须查询任务，不能自动重发变更请求。
 
@@ -46,6 +48,9 @@
 | `preauthorize` | `capability: string`，可选 `args: array`、`other_args: boolean`、`expires_in_seconds: integer`、`pin: string` | `preauthorized` | 创建一条预授权：符合规则的调用不再逐次确认 |
 | `preauthorizations` | 无 | `preauthorizations` | 仍然有效的预授权 |
 | `revoke_preauthorization` | `id: string` | `preauthorization_revoked` | 撤销一条预授权，立即生效 |
+| `register_caller` | `id: string`、`name: string`、`max_risk: string`，可选 `capabilities: array`、`pin: string` | `caller_registered` | 注册一个外部调用方，或整体替换它的清单 |
+| `callers` | 无 | `callers` | 已注册的外部调用方 |
+| `revoke_caller` | `id: string` | `caller_revoked` | 撤销调用方及它的预授权，立即生效 |
 | `capabilities` | 无 | `capabilities` | 已授权能力的名称、输入 schema、风险和描述 |
 | `read` | `capability: string`，可选 `args: object` | `value` | 直接查询一个已授权的只读（L0）能力，不创建任务 |
 | `watch` | 可选 `after: integer/null` | `watching`，随后事件 | 持续接收任务变更提示与重新同步通知 |
@@ -111,6 +116,36 @@ Agent 缺少只有用户知道的信息时可以提问。提问是任务的一�
 - 服务重启后，等待回答的任务和其他未完成任务一样标为 `interrupted`。
 - `reply` 是变更请求：连接中断后结果未知，客户端应查询任务，不能自动重发。界面只转交用户写下的回答，不代答。
 
+### 外部调用方
+
+外部调用方是用户允许提交意图的另一个程序，例如通过 MCP 接入的其他 Agent。它是一个被收窄的主体：它的任务只能使用它的清单列出、管家自己持有、并且不超过它风险上限的能力。清单默认是空的，只读能力也必须列出。
+
+```json
+{"version":1,"id":6,"command":{"method":"register_caller","id":"helper","name":"桌面助手",
+  "capabilities":["notes.list","home.*"],"max_risk":"read_only"}}
+{"version":1,"id":7,"caller":"helper","command":{"method":"submit","text":"看看笔记"}}
+```
+
+请求信封里的 `caller` 表示“以这个调用方的身份发出这个请求”。它只会缩小请求能做的事，所以不需要密钥：能连上 socket 的程序本来就能以用户身份提出更多。它防的是只能通过这个身份说话的程序（比如 MCP 另一端的 Agent），不防本机上以同一系统用户运行的任意程序。没有注册的 `caller` 返回 `not_found`。
+
+带 `caller` 的请求：
+
+- **能用的方法：** `ping`、`submit`、`list`、`get`、`cancel`、`reply`、`capabilities`、`read`。其余返回 `forbidden`：`approve`、预授权的三个方法、调用方的三个方法和 `watch`。
+- **只看得到自己的任务。** `list` 只列出它提交的任务；对别人的任务 `get`、`cancel`、`reply` 返回 `not_found`；它只能接着自己开启的线程说。
+- **`capabilities` 和 `read` 只覆盖清单。** 清单之外的能力对它不存在。
+- **拿不到批准令牌。** 返回给它的任务里，`confirmation.token` 是空字符串。
+
+调用方提交的任务：
+
+- 来源是 `caller:<id>`，界面和审计里都能看出不是用户本人提交的。
+- **比用户更严。** L0 自动执行；L1 及以上默认都要用户批准（用户自己的 L1 是自动执行的）。批准只能由用户做，调用方不能批准自己的请求；任务的提问 `ask.user` 可以由调用方或用户回答。
+- **预授权要专门给它。** `preauthorize` 带 `caller` 时，规则只适用于这个调用方，能力必须在它的清单内；给用户自己的预授权不适用于它。
+- **上下文隔离。** 规划时不会附上用户的其他任务；清单里有 `board.read` 才会附上黑板。它的任务也不会出现在用户任务的上下文里。
+- **不能委派子 Agent，不能写黑板，** 即使清单里写了 `agent.*` 或 `board.*`。
+- **撤销立即生效。** 调用方被撤销后，它进行中的任务的下一次调用就被拒绝，它的预授权一并撤销；重新注册同名调用方不会恢复它们。
+
+`max_risk` 取 `read_only`、`reversible`、`external`、`irreversible`。`id` 只能用小写字母、数字、`-` 和 `_`，最长 32 个字符；`capabilities` 的每一项是能力名或以 `*` 结尾的前缀，单独一个 `*` 不被接受；最多 32 个调用方。设置了 PIN 时，注册必须带 `pin`。注册和撤销各有一条审计记录，并且是变更请求：连接中断后先用 `callers` 查询，不要重发。
+
 ### 预授权
 
 预授权是用户事先给出的许可：某个能力的调用只要参数符合每一条规则，就不再逐次确认。它只做一件事，把“先问人”变成“放行”，并且只在这些条件下：
@@ -140,7 +175,7 @@ Agent 缺少只有用户知道的信息时可以提问。提问是任务的一�
 - 预授权必须至少限定一个参数（`any` 不算），或者带期限。期限最长 30 天，规则最多 16 条，有效的预授权最多 64 条。
 - 设置了 PIN 时，创建预授权必须带 `pin`，否则返回 `identity_required`；PIN 只用于这一次核对。
 - 预授权在每次调用时重新检查：撤销或过期后，进行中的任务也不再适用。它不会批准已经在等待批准的步骤。
-- 预授权只适用于用户自己提交的任务。
+- 不带 `caller` 的预授权只适用于用户自己提交的任务；带 `caller` 的只适用于那个调用方，见“外部调用方”。
 - 每次命中都在审计里记下所用预授权的 `id`；创建和撤销也各有一条审计记录。
 - 这三个方法只能由用户的客户端调用；没有任何能力可以创建或撤销预授权，Web Shell 也不提供。
 - `preauthorize` 和 `revoke_preauthorization` 是变更请求：连接中断后先用 `preauthorizations` 查询，不要重发。
@@ -264,9 +299,10 @@ PIN 由服务端核对，不保存、不写入任务或审计；核对通过只�
 | `error.code` | 含义与客户端处理 |
 | --- | --- |
 | `invalid_request` | JSON、字段、方法或字段类型不合法；纠正协议请求 |
+| `forbidden` | 请求带着 `caller`，而这个方法只属于用户本人（批准、预授权、调用方管理、`watch`） |
 | `unsupported_version` | `version` 不受支持；不要以另一种格式盲目重试变更 |
 | `invalid_argument` | 空/超长意图、分页数量越界、步骤从 0 开始、`read` 的参数不是对象或不被能力接受等参数问题 |
-| `not_found` | 任务不存在；`submit` 指定的线程不存在或不属于这个来源；或 `read` 指定的能力不存在、未授权 |
+| `not_found` | 任务不存在，或对这个调用方不可见；`submit` 指定的线程不存在或不属于这个来源；`read` 指定的能力不存在、未授权；`caller` 或预授权编号不存在 |
 | `not_preauthorizable` | 这个能力是只读的（本来就不需要确认），或不可逆（每次都要确认并核对 PIN） |
 | `not_readable` | `read` 指定的能力不是只读能力，或其输出属于不可信的外部内容；改为提交意图 |
 | `capability_failed` | `read` 调用的能力返回了错误或超时；没有副作用，可以明确决定是否重试 |

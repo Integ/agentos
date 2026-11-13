@@ -1,5 +1,7 @@
 use agentos_core::{now_ms, RiskLevel};
-use agentos_ipc::{Event, EventKind, Matcher, Preauthorization, Reply, TaskSummary};
+use agentos_ipc::{
+    Caller, Event, EventKind, Matcher, Preauthorization, Reply, Subject, TaskSummary,
+};
 use agentos_runtime::{StepState, Task, TaskId, TaskState};
 
 use crate::wait::WaitOutcome;
@@ -225,6 +227,26 @@ pub fn task_detail(task: &Task, include_token: bool) -> String {
     lines.join("\n")
 }
 
+/// One caller and exactly what it was given.
+pub fn caller_line(caller: &Caller) -> String {
+    format!(
+        "{} · {} · 最高 {} · {}",
+        one_line(&caller.id, 40),
+        one_line(&caller.name, 80),
+        risk_label(caller.max_risk),
+        if caller.capabilities.is_empty() {
+            "没有任何能力".to_string()
+        } else {
+            caller
+                .capabilities
+                .iter()
+                .map(|pattern| one_line(pattern, 80))
+                .collect::<Vec<_>>()
+                .join("、")
+        }
+    )
+}
+
 /// One pre-authorization, with every rule spelled out: what is not written
 /// here is not permitted by it.
 pub fn preauthorization_line(pre: &Preauthorization) -> String {
@@ -255,8 +277,12 @@ pub fn preauthorization_line(pre: &Preauthorization) -> String {
         Some(at) => format!("剩余 {} 分钟", at.saturating_sub(now_ms()).div_ceil(60_000)),
         None => "不过期".into(),
     };
+    let subject = match &pre.subject {
+        Subject::User => "你自己的任务".to_string(),
+        Subject::Caller(id) => format!("调用方 {} 的任务", one_line(id, 40)),
+    };
     format!(
-        "{} · {} · {} · {expiry}",
+        "{} · {subject} · {} · {} · {expiry}",
         one_line(&pre.id, 40),
         one_line(pre.capability.as_str(), 100),
         rules.join("；")
@@ -414,6 +440,22 @@ pub fn reply_text(reply: &Reply) -> String {
             .join("\n"),
         Reply::PreauthorizationRevoked { id } => format!(
             "{} 已撤销，立即生效；进行中的任务也不再适用。",
+            one_line(id, 40)
+        ),
+        Reply::CallerRegistered { caller } => format!(
+            "已注册外部调用方，它只能使用列出的能力：\n{}\n接入：agentos mcp --caller {}　撤销：agentos caller remove {}",
+            caller_line(caller),
+            one_line(&caller.id, 40),
+            one_line(&caller.id, 40)
+        ),
+        Reply::Callers { callers } if callers.is_empty() => "没有注册外部调用方。".into(),
+        Reply::Callers { callers } => callers
+            .iter()
+            .map(caller_line)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Reply::CallerRevoked { id } => format!(
+            "调用方 {} 已撤销；它进行中的任务不再能调用任何能力，它的预授权也一并撤销。",
             one_line(id, 40)
         ),
         Reply::Watching { revision } => {

@@ -19,20 +19,35 @@ pub enum Command {
 /// never queue an approval before its concrete confirmation request exists.
 pub fn approval_matches(task: &Task, step: usize, responder: &Intent, at_ms: u64) -> bool {
     task.state == TaskState::AwaitingConfirmation
-        && task.intent.source == responder.source
-        && task.intent.speaker == responder.speaker
+        && may_approve(task, responder)
         && task
             .confirmation
             .as_ref()
             .is_some_and(|c| c.step == step && at_ms < c.expires_at_ms)
 }
 
+fn submitted_by(task: &Task, responder: &Intent) -> bool {
+    task.intent.source == responder.source && task.intent.speaker == responder.speaker
+}
+
+/// Whoever submitted a task approves its steps, with one exception: a task
+/// an outside caller submitted is approved by the human at this machine and
+/// never by a caller, itself included. Confirmation always returns to a
+/// person.
+fn may_approve(task: &Task, responder: &Intent) -> bool {
+    match crate::butler::caller_of(&task.intent) {
+        Some(_) => crate::butler::caller_of(responder).is_none(),
+        None => submitted_by(task, responder),
+    }
+}
+
 /// A reply answers one concrete question: the one this task is waiting on
 /// now, asked at this step, and only from whoever submitted the task.
 pub fn reply_matches(task: &Task, step: usize, responder: &Intent) -> bool {
+    // A caller's question is about its own request: it may answer, and so
+    // may the human, who can always speak for their own machine.
     task.state == TaskState::AwaitingInput
-        && task.intent.source == responder.source
-        && task.intent.speaker == responder.speaker
+        && (submitted_by(task, responder) || may_approve(task, responder))
         && task.question.as_ref().is_some_and(|q| q.step == step)
 }
 

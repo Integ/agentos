@@ -87,6 +87,16 @@ pub enum AuditEvent {
         capability: CapabilityName,
         preauthorization: String,
     },
+    /// The human let an outside program submit intents (or changed what it
+    /// may use). The whole manifest is recorded.
+    CallerRegistered {
+        caller: Value,
+        by: String,
+    },
+    CallerRevoked {
+        id: String,
+        by: String,
+    },
     /// One model request made for a task: who asked, why, and what it
     /// consumed. A count the service did not report is absent, never zero.
     ModelUsage {

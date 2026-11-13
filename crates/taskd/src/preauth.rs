@@ -187,6 +187,23 @@ impl PreauthStore {
         Ok(created)
     }
 
+    /// Remove every rule given for `subject`, and say which they were. A
+    /// caller that is withdrawn takes its standing permissions with it, so
+    /// registering the same name again starts from nothing.
+    pub fn revoke_subject(&self, subject: &Subject) -> io::Result<Vec<Preauthorization>> {
+        let mut state = self.lock();
+        let (removed, kept): (Vec<_>, Vec<_>) = state
+            .items
+            .iter()
+            .cloned()
+            .partition(|item| &item.subject == subject);
+        if !removed.is_empty() {
+            self.persist(state.next_id, &kept)?;
+            state.items = kept;
+        }
+        Ok(removed)
+    }
+
     /// Remove a rule. `None` if there is no such rule (any more).
     pub fn revoke(&self, id: &str) -> io::Result<Option<Preauthorization>> {
         let mut state = self.lock();

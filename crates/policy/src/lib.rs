@@ -285,8 +285,14 @@ impl PolicyEngine {
 }
 
 impl PolicyEngine {
-    /// [`Self::check`] for one concrete call, taking the human's standing
-    /// pre-authorizations into account. They are looked at last and can only
+    /// [`Self::check`] for one concrete call, taking into account whose task
+    /// it belongs to and the human's standing pre-authorizations.
+    ///
+    /// A task submitted by an outside caller has no human behind its words,
+    /// so anything it does beyond reading asks the human first, where the
+    /// user's own reversible calls would simply run.
+    ///
+    /// Pre-authorizations are looked at last and can only
     /// do one thing: turn "ask first" into "allow" for a reversible or
     /// external call in an untainted context. A denial stays a denial, an
     /// irreversible call still needs the human and their identity, and a
@@ -300,7 +306,15 @@ impl PolicyEngine {
         ctx: CallContext,
         standing: Standing<'_>,
     ) -> Checked {
-        let decision = self.check(agent, spec, ctx);
+        let decision = match (self.check(agent, spec, ctx), standing.subject) {
+            (Decision::Allow, Subject::Caller(caller)) if spec.risk > RiskLevel::ReadOnly => {
+                Decision::NeedsConfirmation {
+                    reason: format!("外部调用方 {caller} 请求执行有副作用的操作"),
+                    verify_identity: false,
+                }
+            }
+            (decision, _) => decision,
+        };
         let liftable = matches!(
             decision,
             Decision::NeedsConfirmation {
@@ -525,6 +539,59 @@ mod tests {
         assert!(matches!(
             check(&a, &l2, Subject::Caller("other".into())),
             Decision::NeedsConfirmation { .. }
+        ));
+    }
+
+    #[test]
+    fn an_outside_caller_reads_freely_and_asks_for_everything_else_unless_preauthorized() {
+        let a = AgentId::new("caller:helper");
+        let l0 = spec("l0", RiskLevel::ReadOnly);
+        let l1 = spec("l1", RiskLevel::Reversible);
+        let l3 = spec("l3", RiskLevel::Irreversible);
+        let e = engine_with(&a, &[&l0, &l1, &l3]);
+        let caller = Subject::Caller("helper".into());
+        let args = json!({"x": 1});
+        let mut for_caller = pre("l1", vec![("x", Matcher::Equals(json!(1)))]);
+        for_caller.subject = caller.clone();
+        let for_user = pre("l1", vec![("x", Matcher::Equals(json!(1)))]);
+        let check = |spec: &CapabilitySpec, subject: &Subject, rules: &[Preauthorization]| {
+            e.check_call(
+                &a,
+                spec,
+                &args,
+                CallContext::default(),
+                Standing {
+                    subject,
+                    preauthorizations: rules,
+                    now_ms: 2_000,
+                },
+            )
+        };
+        assert_eq!(check(&l0, &caller, &[]).decision, Decision::Allow);
+        // The user's own reversible call just runs; a caller's asks.
+        assert_eq!(check(&l1, &Subject::User, &[]).decision, Decision::Allow);
+        assert!(matches!(
+            check(&l1, &caller, &[]).decision,
+            Decision::NeedsConfirmation {
+                verify_identity: false,
+                ..
+            }
+        ));
+        // Guards "not across subjects": the user's rule is not the caller's.
+        assert!(matches!(
+            check(&l1, &caller, std::slice::from_ref(&for_user)).decision,
+            Decision::NeedsConfirmation { .. }
+        ));
+        let lifted = check(&l1, &caller, std::slice::from_ref(&for_caller));
+        assert_eq!(lifted.decision, Decision::Allow);
+        assert_eq!(lifted.preauthorization.as_deref(), Some("pre-1"));
+        // Irreversible stays with the human and their identity.
+        assert!(matches!(
+            check(&l3, &caller, &[for_caller]).decision,
+            Decision::NeedsConfirmation {
+                verify_identity: true,
+                ..
+            }
         ));
     }
 

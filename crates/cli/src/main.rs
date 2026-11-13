@@ -3,7 +3,7 @@ use std::io;
 use agentos_cli::args::{self, Action};
 use agentos_cli::client::{Client, ClientError};
 use agentos_cli::wait::wait_for_task;
-use agentos_cli::{render, workbench};
+use agentos_cli::{mcp, render, workbench};
 use agentos_ipc::{Command, Reply};
 
 #[tokio::main]
@@ -26,9 +26,14 @@ async fn main() -> io::Result<()> {
             Ok(())
         }
         Action::Workbench => return workbench::run(client).await,
+        Action::Mcp { caller } => return mcp::serve(client.as_caller(caller)).await,
         Action::Request(mut command) => {
-            if let (true, Command::Approve { pin, .. } | Command::Preauthorize { pin, .. }) =
-                (options.pin_stdin, &mut command)
+            if let (
+                true,
+                Command::Approve { pin, .. }
+                | Command::Preauthorize { pin, .. }
+                | Command::RegisterCaller { pin, .. },
+            ) = (options.pin_stdin, &mut command)
             {
                 eprint!("PIN：");
                 let mut line = String::new();

@@ -16,3 +16,10 @@ agentos-runtime.workspace = true
 agentos-ipc.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+agentos-audit.workspace = true
+agentos-planner.workspace = true
+agentos-policy.workspace = true
+agentos-services.workspace = true
+agentos-taskd = { path = "../taskd" }

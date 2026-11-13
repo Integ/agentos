@@ -159,6 +159,8 @@ struct Connection {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
     next: u64,
+    /// Make every request as this registered caller.
+    caller: Option<String>,
 }
 impl Connection {
     async fn connect(path: &PathBuf) -> Self {
@@ -168,6 +170,7 @@ impl Connection {
             reader: BufReader::new(reader),
             writer,
             next: 0,
+            caller: None,
         }
     }
     async fn request(&mut self, command: Command) -> Response {
@@ -178,6 +181,7 @@ impl Connection {
                 version: VERSION,
                 id: self.next,
                 command,
+                caller: self.caller.clone(),
             },
         )
         .await
@@ -379,6 +383,7 @@ async fn malformed_versions_and_oversized_frames_cannot_break_the_service() {
             version: 999,
             id: 44,
             command: Command::Ping {},
+            caller: None,
         },
     )
     .await
@@ -509,6 +514,7 @@ async fn persistent_daemon_does_not_reuse_native_socket_or_audit_configuration()
         reader: BufReader::new(reader),
         writer,
         next: 0,
+        caller: None,
     };
     assert!(matches!(
         client.ok(Command::Ping {}).await,
@@ -1061,6 +1067,7 @@ async fn an_irreversible_step_is_approved_over_the_socket_only_with_the_pin() {
     // for it vouches for nothing else.
     let preauthorize = |pin: Option<&str>| Command::Preauthorize {
         capability: CapabilityName::new("test.external"),
+        caller: None,
         args: vec![agentos_ipc::ArgRule {
             field: "recipient".into(),
             matcher: agentos_ipc::Matcher::Equals(json!("alice")),
@@ -1091,6 +1098,7 @@ async fn an_irreversible_step_is_approved_over_the_socket_only_with_the_pin() {
             client
                 .request(Command::Preauthorize {
                     capability: CapabilityName::new("disk.wipe"),
+                    caller: None,
                     args: vec![],
                     other_args: true,
                     expires_in_seconds: Some(60),
@@ -1360,6 +1368,7 @@ async fn preauthorizations_are_created_listed_and_revoked_only_within_their_limi
     let mut client = harness.connect().await;
     let rule = |capability: &str, args: Vec<ArgRule>, expires_in_seconds| Command::Preauthorize {
         capability: CapabilityName::new(capability),
+        caller: None,
         args,
         other_args: false,
         expires_in_seconds,
@@ -1439,5 +1448,216 @@ async fn preauthorizations_are_created_listed_and_revoked_only_within_their_limi
     let again = client.submit("send").await;
     harness.wait(again, TaskState::AwaitingConfirmation).await;
     assert_eq!(capability.calls.load(Ordering::SeqCst), 1);
+    harness.stop().await;
+}
+
+impl Harness {
+    /// A connection whose every request is made as the caller `id`.
+    async fn connect_as(&self, id: &str) -> Connection {
+        let mut connection = self.connect().await;
+        connection.caller = Some(id.into());
+        connection
+    }
+}
+
+fn register(id: &str, capabilities: &[&str], max_risk: RiskLevel) -> Command {
+    Command::RegisterCaller {
+        id: id.into(),
+        name: "测试助手".into(),
+        capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
+        max_risk,
+        pin: None,
+    }
+}
+
+#[tokio::test]
+async fn an_outside_caller_reaches_only_what_it_was_given_and_only_its_own_tasks() {
+    let mut harness = Harness::start(Box::new(RulePlanner), vec![]).await;
+    let mut user = harness.connect().await;
+    // Guards "a caller holds nothing it was not given": no wildcard for
+    // everything, and a name nobody registered is nobody.
+    assert_eq!(
+        error_code(
+            user.request(register("helper", &["*"], RiskLevel::ReadOnly))
+                .await
+        ),
+        "invalid_argument"
+    );
+    let mut nobody = harness.connect_as("helper").await;
+    assert_eq!(
+        error_code(nobody.request(Command::Ping {}).await),
+        "not_found"
+    );
+    let Reply::CallerRegistered { caller } = user
+        .ok(register(
+            "helper",
+            &["notes.list", "notes.append"],
+            RiskLevel::Reversible,
+        ))
+        .await
+    else {
+        panic!("not registered")
+    };
+    assert_eq!(caller.id, "helper");
+    assert!(matches!(
+        user.ok(Command::Callers {}).await,
+        Reply::Callers { callers } if callers == vec![caller.clone()]
+    ));
+
+    let mut helper = harness.connect_as("helper").await;
+    // What it may use is the manifest, plus asking back. Nothing else is
+    // even listed: no clock, no blackboard, no delegation.
+    let Reply::Capabilities { capabilities } = helper.ok(Command::Capabilities {}).await else {
+        panic!("not capabilities")
+    };
+    let mut names: Vec<_> = capabilities.iter().map(|s| s.name.to_string()).collect();
+    names.sort();
+    assert_eq!(names, vec!["ask.user", "notes.append", "notes.list"]);
+    // Reading is given like anything else.
+    assert!(matches!(
+        helper
+            .ok(Command::Read {
+                capability: CapabilityName::new("notes.list"),
+                args: json!({})
+            })
+            .await,
+        Reply::Value { .. }
+    ));
+    assert_eq!(
+        error_code(
+            helper
+                .request(Command::Read {
+                    capability: CapabilityName::new("clock.now"),
+                    args: json!({})
+                })
+                .await
+        ),
+        "not_found"
+    );
+
+    // Guards "confirmation, standing permission and registration are the
+    // human's": none of it is reachable as a caller.
+    for command in [
+        Command::Approve {
+            id: TaskId(1),
+            step: 1,
+            confirmation: "x".into(),
+            pin: None,
+        },
+        Command::Preauthorize {
+            capability: CapabilityName::new("notes.append"),
+            caller: Some("helper".into()),
+            args: vec![],
+            other_args: true,
+            expires_in_seconds: Some(60),
+            pin: None,
+        },
+        Command::Preauthorizations {},
+        Command::RevokePreauthorization { id: "pre-1".into() },
+        register("helper", &["notes.*"], RiskLevel::External),
+        Command::Callers {},
+        Command::RevokeCaller {
+            id: "helper".into(),
+        },
+        Command::Watch { after: None },
+    ] {
+        assert_eq!(error_code(helper.request(command).await), "forbidden");
+    }
+
+    // The user's tasks do not exist for it; its own do.
+    let private = user.submit("记一下 我的秘密").await;
+    harness.wait(private, TaskState::Succeeded).await;
+    for command in [
+        Command::Get { id: private },
+        Command::Cancel { id: private },
+    ] {
+        assert_eq!(error_code(helper.request(command).await), "not_found");
+    }
+    assert_eq!(
+        error_code(
+            helper
+                .request(Command::Submit {
+                    text: "看看笔记".into(),
+                    thread: Some(private),
+                })
+                .await
+        ),
+        "not_found"
+    );
+    let own = helper.submit("看看笔记").await;
+    let read = harness.wait(own, TaskState::Succeeded).await;
+    assert_eq!(read.intent.source.as_str(), "caller:helper");
+    let Reply::Tasks { tasks, .. } = helper
+        .ok(Command::List {
+            before: None,
+            limit: 10,
+            state: None,
+            thread: None,
+        })
+        .await
+    else {
+        panic!("not a page")
+    };
+    assert_eq!(tasks.iter().map(|t| t.id).collect::<Vec<_>>(), vec![own]);
+
+    // Guards "stricter than the user": the same reversible write the user's
+    // task just did on its own waits for the human here, the caller is not
+    // shown the token, and the human approves it.
+    let write = helper.submit("记一下 茶").await;
+    let waiting = harness.wait(write, TaskState::AwaitingConfirmation).await;
+    let Reply::Task { task: shown } = helper.ok(Command::Get { id: write }).await else {
+        panic!("not a task")
+    };
+    assert_eq!(shown.confirmation.unwrap().token, "");
+    let token = waiting.confirmation.unwrap().token;
+    assert!(matches!(
+        user.ok(Command::Approve {
+            id: write,
+            step: 1,
+            confirmation: token,
+            pin: None,
+        })
+        .await,
+        Reply::ApprovalQueued { .. }
+    ));
+    harness.wait(write, TaskState::Succeeded).await;
+
+    // A rule for the caller cannot reach beyond its manifest; within it,
+    // it lifts the confirmation for that caller.
+    let rule = |capability: &str| Command::Preauthorize {
+        capability: CapabilityName::new(capability),
+        caller: Some("helper".into()),
+        args: vec![],
+        other_args: true,
+        expires_in_seconds: Some(600),
+        pin: None,
+    };
+    assert_eq!(
+        error_code(user.request(rule("notes.clear")).await),
+        "not_found"
+    );
+    assert!(matches!(
+        user.ok(rule("notes.append")).await,
+        Reply::Preauthorized { .. }
+    ));
+    let allowed = helper.submit("记一下 糖").await;
+    harness.wait(allowed, TaskState::Succeeded).await;
+
+    // Revoked: it is nobody again, and its standing permission went with it.
+    assert!(matches!(
+        user.ok(Command::RevokeCaller {
+            id: "helper".into()
+        })
+        .await,
+        Reply::CallerRevoked { .. }
+    ));
+    assert!(matches!(
+        user.ok(Command::Preauthorizations {}).await,
+        Reply::Preauthorizations { preauthorizations } if preauthorizations.is_empty()
+    ));
+    assert_eq!(
+        error_code(helper.request(Command::Ping {}).await),
+        "not_found"
+    );
     harness.stop().await;
 }

@@ -23,6 +23,7 @@ use agentos_services::judge::{Judge, Review, Verdict};
 use agentos_services::registry::CapabilityRegistry;
 use agentos_taskd::builtin::{self, NoteStore};
 use agentos_taskd::butler::{grant_manifest, Budget, Butler};
+use agentos_taskd::callers::CallerStore;
 use agentos_taskd::preauth::{NewPreauthorization, PreauthStore};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -203,6 +204,7 @@ struct Options {
     pin: Option<&'static str>,
     budget: Option<Budget>,
     preauths: Option<Arc<PreauthStore>>,
+    callers: Option<Arc<CallerStore>>,
 }
 
 impl Harness {
@@ -258,6 +260,9 @@ impl Harness {
         }
         if let Some(preauths) = options.preauths {
             butler = butler.with_preauthorizations(preauths);
+        }
+        if let Some(callers) = options.callers {
+            butler = butler.with_callers(callers);
         }
         Self {
             butler,
@@ -1481,4 +1486,227 @@ async fn a_preauthorization_gives_way_to_taint_irreversibility_and_the_judge() {
     assert_eq!(r.kind, ExpressionKind::AskConfirm);
     assert!(h.notes().is_empty());
     assert!(uses(&h.audit()).is_empty());
+}
+
+fn caller_store(capabilities: &[&str], max_risk: RiskLevel) -> Arc<CallerStore> {
+    let store = Arc::new(CallerStore::memory());
+    store
+        .put(agentos_ipc::Caller {
+            id: "helper".into(),
+            name: "测试助手".into(),
+            capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
+            max_risk,
+            created_at_ms: now_ms(),
+        })
+        .unwrap();
+    store
+}
+
+impl Harness {
+    /// Submit `text` the way the service does for the caller `helper`.
+    async fn say_as_caller(&self, text: &str) -> TaskId {
+        let intent = Intent {
+            source: DeviceId::new("caller:helper"),
+            speaker: Some("caller:helper".into()),
+            ..Self::intent(text)
+        };
+        let task = self.butler.tasks().create(intent).unwrap();
+        self.butler.execute(task.id).await;
+        task.id
+    }
+
+    fn last(&self) -> Expression {
+        self.out.0.lock().unwrap().last().cloned().unwrap()
+    }
+}
+
+#[tokio::test]
+async fn a_callers_task_plans_and_acts_within_its_manifest_and_a_human_confirms() {
+    let h = Harness::with(
+        "caller",
+        |s| match (s.task.as_str(), s.rounds) {
+            ("读", 0) => call("notes.list", json!({})),
+            ("写", 0) => call("notes.append", json!({"text": "来自调用方"})),
+            ("越界", 0) => call("notes.clear", json!({})),
+            ("委派", 0) => call("agent.notes", json!({"task": "清空笔记"})),
+            _ => answer("好了"),
+        },
+        Options {
+            callers: Some(caller_store(
+                &["notes.list", "notes.append", "agent.*", "board.*"],
+                RiskLevel::Reversible,
+            )),
+            ..Options::default()
+        },
+    );
+    let read = h.say_as_caller("读").await;
+    assert_eq!(h.task(read.0).state, TaskState::Succeeded);
+    // Guards "only narrower": the planner is offered the manifest and
+    // nothing else. Delegation and writing the blackboard stay out even
+    // though the manifest asks for them.
+    let mut tools = h.seen.lock().unwrap()[0].tools.clone();
+    tools.sort();
+    assert_eq!(
+        tools,
+        vec!["ask.user", "board.read", "notes.append", "notes.list"]
+    );
+
+    // A reversible write, which the user's own task would just do, asks.
+    let write = h.say_as_caller("写").await;
+    let asked = h.last();
+    assert_eq!(asked.kind, ExpressionKind::AskConfirm);
+    // The human can tell who is asking.
+    assert!(
+        asked.text.contains("〔外部调用方 helper〕"),
+        "{}",
+        asked.text
+    );
+    assert!(h.notes().is_empty());
+    let step = h.task(write.0).confirmation.unwrap().step;
+    // Guards "confirmation returns to a person": the caller cannot approve
+    // its own request.
+    let as_caller = Intent {
+        source: DeviceId::new("caller:helper"),
+        speaker: Some("caller:helper".into()),
+        ..Harness::intent("approve")
+    };
+    h.butler.approve(write, step, &as_caller).await;
+    assert_eq!(h.task(write.0).state, TaskState::AwaitingConfirmation);
+    assert!(h.notes().is_empty());
+    h.butler
+        .approve(write, step, &Harness::intent("approve"))
+        .await;
+    assert_eq!(h.task(write.0).state, TaskState::Succeeded);
+    assert_eq!(h.notes(), vec!["来自调用方".to_string()]);
+
+    // Outside the manifest nothing runs, whatever the planner asks for.
+    for text in ["越界", "委派"] {
+        let id = h.say_as_caller(text).await;
+        let task = h.task(id.0);
+        assert_eq!(task.state, TaskState::Failed, "{text}");
+        assert!(task.steps.is_empty(), "{text}");
+    }
+    assert_eq!(h.notes(), vec!["来自调用方".to_string()]);
+}
+
+#[tokio::test]
+async fn a_callers_task_and_the_users_tasks_are_told_nothing_of_each_other() {
+    let mut h = Harness::with(
+        "caller-context",
+        |s| match (s.task.as_str(), s.rounds) {
+            ("记到黑板", 0) => call(
+                "board.write",
+                json!({"op": "set", "path": "secret", "value": "蓝色的门"}),
+            ),
+            _ => answer("知道了"),
+        },
+        Options {
+            callers: Some(caller_store(&["notes.list"], RiskLevel::ReadOnly)),
+            ..Options::default()
+        },
+    );
+    h.say("我的银行密码提示是蓝色").await;
+    h.say("记到黑板").await;
+    assert_eq!(h.task(2).state, TaskState::Succeeded);
+    h.say_as_caller("调用方想知道些什么").await;
+    let told = h.system_for("调用方想知道些什么");
+    // Guards "no channel between the two": none of the user's recent tasks,
+    // and not the blackboard, which this caller was not given.
+    assert!(told.contains("外部程序「helper」"), "{told}");
+    assert!(
+        !told.contains("银行密码") && !told.contains("蓝色的门"),
+        "{told}"
+    );
+    assert!(!told.contains("最近结束的其他任务（旧的在前"), "{told}");
+
+    h.say("接着做我自己的事").await;
+    let told = h.system_for("接着做我自己的事");
+    assert!(told.contains("银行密码"));
+    assert!(!told.contains("调用方想知道些什么"), "{told}");
+}
+
+#[tokio::test]
+async fn a_revoked_or_unknown_caller_holds_nothing_even_mid_task() {
+    let reads = Fixed::new(
+        "demo.read",
+        RiskLevel::ReadOnly,
+        Ok(json!({"message": "读到了"})),
+    );
+    let callers = caller_store(&["demo.read"], RiskLevel::ReadOnly);
+    let revoking = callers.clone();
+    let h = Harness::with(
+        "caller-revoke",
+        move |s| match s.rounds {
+            0 => call("demo.read", json!({})),
+            1 => {
+                // The human withdraws the caller while its task is under way.
+                revoking.remove("helper").unwrap();
+                call("demo.read", json!({}))
+            }
+            _ => answer("读了两次"),
+        },
+        Options {
+            capabilities: vec![reads.clone()],
+            callers: Some(callers),
+            ..Options::default()
+        },
+    );
+    let id = h.say_as_caller("读两次").await;
+    // Guards "revocation is immediate": the first read ran, the second,
+    // planned after the revocation, did not.
+    assert_eq!(reads.count(), 1);
+    assert_eq!(h.task(id.0).state, TaskState::Failed);
+    // A task that arrives for a caller that is no longer registered does
+    // not start at all.
+    let late = h.say_as_caller("再读").await;
+    let task = h.task(late.0);
+    assert_eq!(task.state, TaskState::Failed);
+    assert!(task.message.unwrap().contains("没有注册或已被撤销"));
+    assert_eq!(reads.count(), 1);
+}
+
+#[tokio::test]
+async fn a_rule_for_a_caller_lifts_its_confirmation_and_the_users_rule_does_not() {
+    let rule = |subject: Subject| NewPreauthorization {
+        subject,
+        capability: CapabilityName::new("notes.append"),
+        args: vec![ArgRule {
+            field: "text".into(),
+            matcher: Matcher::Prefix("[helper]".into()),
+        }],
+        other_args: false,
+        expires_in_ms: None,
+    };
+    let script = |s: &Seen| match (s.task.as_str(), s.rounds) {
+        ("合规", 0) => call("notes.append", json!({"text": "[helper] 一条"})),
+        ("不合规", 0) => call("notes.append", json!({"text": "别的内容"})),
+        _ => answer("好了"),
+    };
+    let store = Arc::new(PreauthStore::memory());
+    // Guards "not across subjects": a rule the user made for themselves.
+    store.create(rule(Subject::User), now_ms()).unwrap();
+    let h = Harness::with(
+        "caller-preauth",
+        script,
+        Options {
+            callers: Some(caller_store(&["notes.append"], RiskLevel::Reversible)),
+            preauths: Some(store.clone()),
+            ..Options::default()
+        },
+    );
+    let id = h.say_as_caller("合规").await;
+    assert_eq!(h.task(id.0).state, TaskState::AwaitingConfirmation);
+    assert!(h.notes().is_empty());
+
+    store
+        .create(rule(Subject::Caller("helper".into())), now_ms())
+        .unwrap();
+    let id = h.say_as_caller("合规").await;
+    assert_eq!(h.task(id.0).state, TaskState::Succeeded);
+    assert_eq!(h.notes(), vec!["[helper] 一条".to_string()]);
+    assert_eq!(uses(&h.audit()), vec!["pre-2".to_string()]);
+    // The rule's limits are the caller's limits.
+    let id = h.say_as_caller("不合规").await;
+    assert_eq!(h.task(id.0).state, TaskState::AwaitingConfirmation);
+    assert_eq!(h.notes().len(), 1);
 }
