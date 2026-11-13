@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 agentos-core.workspace = true
 agentos-runtime.workspace = true
+agentos-policy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

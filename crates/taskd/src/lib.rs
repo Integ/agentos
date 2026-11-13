@@ -7,4 +7,5 @@
 pub mod builtin;
 pub mod butler;
 pub mod control;
+pub mod preauth;
 pub mod service;

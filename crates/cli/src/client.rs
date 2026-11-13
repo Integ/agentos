@@ -66,7 +66,12 @@ impl std::error::Error for ClientError {}
 fn mutating(command: &Command) -> bool {
     matches!(
         command,
-        Command::Submit { .. } | Command::Cancel { .. } | Command::Approve { .. }
+        Command::Submit { .. }
+            | Command::Cancel { .. }
+            | Command::Approve { .. }
+            | Command::Reply { .. }
+            | Command::Preauthorize { .. }
+            | Command::RevokePreauthorization { .. }
     )
 }
 
@@ -125,6 +130,16 @@ fn reply_matches(command: &Command, reply: &Reply) -> bool {
                 Reply::Task { .. }
             )
             | (Command::Approve { .. }, Reply::ApprovalQueued { .. })
+            | (Command::Reply { .. }, Reply::ReplyQueued { .. })
+            | (Command::Preauthorize { .. }, Reply::Preauthorized { .. })
+            | (
+                Command::Preauthorizations {},
+                Reply::Preauthorizations { .. }
+            )
+            | (
+                Command::RevokePreauthorization { .. },
+                Reply::PreauthorizationRevoked { .. }
+            )
             | (Command::Capabilities {}, Reply::Capabilities { .. })
             | (Command::Read { .. }, Reply::Value { .. })
             | (Command::Watch { .. }, Reply::Watching { .. })
@@ -200,6 +215,21 @@ impl Client {
                     step: actual_step,
                 },
             ) => id == actual && step == actual_step,
+            (
+                Command::Reply { id, step, .. },
+                Reply::ReplyQueued {
+                    id: actual,
+                    step: actual_step,
+                },
+            ) => id == actual && step == actual_step,
+            (
+                Command::RevokePreauthorization { id },
+                Reply::PreauthorizationRevoked { id: actual },
+            ) => id == actual,
+            (
+                Command::Preauthorize { capability, .. },
+                Reply::Preauthorized { preauthorization },
+            ) => capability == &preauthorization.capability,
             (
                 Command::Read { capability, .. },
                 Reply::Value {
@@ -329,6 +359,7 @@ mod tests {
         let error = Client::new(&path)
             .request(Command::Submit {
                 text: "记一下 买牛奶".into(),
+                thread: None,
             })
             .await
             .unwrap_err();

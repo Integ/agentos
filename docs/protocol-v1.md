@@ -26,7 +26,7 @@
 {"version":1,"id":7,"body":{"status":"error","error":{"code":"not_found","message":"no task task-99"}}}
 ```
 
-`version` 是协议版本，与程序的语义版本号分开。v0.3 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`。旧服务会以 `invalid_request` 拒绝 `read` 和带 `pin` 的 `approve`；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
+`version` 是协议版本，与程序的语义版本号分开。v0.3 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
 
 `id` 是客户端选择的无符号整数，仅用于关联响应，**不是幂等键**。重复发送同一个 `submit` 请求编号仍可能创建第二个任务。收到完整响应前连接断开时，结果可能已经落盘；客户端必须查询任务，不能自动重发变更请求。
 
@@ -37,16 +37,20 @@
 | `command.method` | 其他字段 | 成功 `data.type` | 含义 |
 | --- | --- | --- | --- |
 | `ping` | 无 | `pong` | 程序版本和当前任务 revision |
-| `submit` | `text: string` | `accepted` | 持久创建任务并排队，返回创建时的完整 `task` |
-| `list` | `limit: integer`，可选 `before: integer/null`、`state: string/null` | `tasks` | 按任务 ID 倒序分页 |
+| `submit` | `text: string`，可选 `thread: integer` | `accepted` | 持久创建任务并排队，返回创建时的完整 `task`；`thread` 表示接着哪个线程说，省略则开一个新线程 |
+| `list` | `limit: integer`，可选 `before: integer/null`、`state: string/null`、`thread: integer` | `tasks` | 按任务 ID 倒序分页；`thread` 只列出这个线程的任务 |
 | `get` | `id: integer` | `task` | 完整意图、计划、步骤、结果、状态和确认请求 |
-| `cancel` | `id: integer` | `task` | 停止后续步骤，返回持久任务 |
+| `cancel` | `id: integer` | `task` | 停止后续步骤，打断正在等待的模型请求和可中止的调用，返回持久任务 |
 | `approve` | `id: integer`、`step: integer`、`confirmation: string`，可选 `pin: string` | `approval_queued` | 校验当前具体确认请求（不可逆步骤还要核对 PIN）后，将批准排入执行队列 |
+| `reply` | `id: integer`、`step: integer`、`text: string` | `reply_queued` | 回答任务当前正在等待的那个提问，将回答排入执行队列 |
+| `preauthorize` | `capability: string`，可选 `args: array`、`other_args: boolean`、`expires_in_seconds: integer`、`pin: string` | `preauthorized` | 创建一条预授权：符合规则的调用不再逐次确认 |
+| `preauthorizations` | 无 | `preauthorizations` | 仍然有效的预授权 |
+| `revoke_preauthorization` | `id: string` | `preauthorization_revoked` | 撤销一条预授权，立即生效 |
 | `capabilities` | 无 | `capabilities` | 已授权能力的名称、输入 schema、风险和描述 |
 | `read` | `capability: string`，可选 `args: object` | `value` | 直接查询一个已授权的只读（L0）能力，不创建任务 |
 | `watch` | 可选 `after: integer/null` | `watching`，随后事件 | 持续接收任务变更提示与重新同步通知 |
 
-`accepted` 表示任务已保存并接收执行；不表示任务已经成功。`approval_queued` 同样只表示批准请求已入队，执行 worker 仍会再次检查 token、来源、期限与 grant。
+`accepted` 表示任务已保存并接收执行；不表示任务已经成功。`approval_queued` 同样只表示批准请求已入队，执行 worker 仍会再次检查 token、来源、期限与 grant。`reply_queued` 只表示回答已入队，不表示任务拿它做了什么。
 
 ### 提交与读取
 
@@ -58,7 +62,9 @@
 
 上面表示三条独立请求，每条都有自己的响应。提交响应的 `data` 形如 `{"type":"accepted","task":{...}}`，读取与取消形如 `{"type":"task","task":{...}}`；省略号仅用于本文解释，不是有效线上 JSON。
 
-一个 task 包含 `id`、原始 `intent`、`state`、顺序 `steps`、`tainted`、可选 `confirmation`、`message`、`created_at_ms` 与 `updated_at_ms`。时间戳是 Unix 毫秒。状态为 `queued`、`planning`、`running`、`awaiting_confirmation`、`succeeded`、`unhandled`、`failed`、`cancelled`、`interrupted`。单个步骤包含 `capability`、`args`、`state`、可选 `result`，以及任务内唯一的 `id`；由子 Agent 执行的步骤带 `agent`（它的 id），管家自己的步骤没有这个字段。步骤状态为 `pending`、`running`、`succeeded`、`failed`、`skipped`。
+一个 task 包含 `id`、所属 `thread`、原始 `intent`、`state`、顺序 `steps`、`tainted`、可选 `confirmation`、可选 `question`、`usage`、`message`、`created_at_ms` 与 `updated_at_ms`。时间戳是 Unix 毫秒。状态为 `queued`、`planning`、`running`、`awaiting_confirmation`、`awaiting_input`、`succeeded`、`unhandled`、`failed`、`cancelled`、`interrupted`。单个步骤包含 `capability`、`args`、`state`、可选 `result`，以及任务内唯一的 `id`；由子 Agent 执行的步骤带 `agent`（它的 id），管家自己的步骤没有这个字段。步骤状态为 `pending`、`running`、`succeeded`、`failed`、`skipped`。
+
+`usage` 是任务到目前为止的消耗：`model_calls`（模型请求次数）、`unmetered_calls`（其中没有报告用量的次数）、`input_tokens`、`output_tokens` 和 `active_ms`（执行时长，不含等待人和排队的时间）。`unmetered_calls` 大于 0 时，token 数只是下限，不能当作完整用量。任务结束后 `active_ms` 还会更新一次。
 
 规划是多轮的，所以 `steps` 会随着任务推进而增长：每一轮计划追加一组步骤。一步失败后，同一轮里排在它后面的步骤标为 `skipped`（从未开始）；规划器随后可以再规划一轮。委派给子 Agent 的步骤（`agent.<id>`）在子 Agent 工作期间保持 `running`，子 Agent 的步骤紧跟着记在它后面，所以新步骤可能插在列表中间。客户端应按 `id` 而不是下标来对应同一个步骤。
 
@@ -68,11 +74,76 @@
 | --- | --- |
 | `succeeded` | 计划的每一步都已执行成功；或规划器不需要工具，直接给出了回答（`steps` 为空，`message` 是回答） |
 | `unhandled` | 规划器没有办法处理这个意图。没有执行任何步骤，也没有出错；`message` 说明当前能做什么。`steps` 必为空 |
-| `failed` | 规划失败（模型不可达、拒绝或响应无效）、计划无效、被策略拒绝，或某一步执行失败 |
-| `cancelled` | 被取消；已经开始的步骤可能仍产生了结果 |
+| `failed` | 规划失败（模型不可达、拒绝或响应无效）、计划无效、被策略拒绝、某一步执行失败，或任务用完了预算（`message` 以“超出预算”开头并写明是哪一项） |
+| `cancelled` | 被取消；已经开始的步骤可能仍产生了结果，被打断的步骤是 `failed` 并写明结果未知 |
 | `interrupted` | 服务停止或重启时尚未完成；不会自动重复执行 |
 
 `unhandled` 不能显示成“已完成”，也不应被脚本当作成功。
+
+### 并发与取消
+
+不同线程的任务互相独立地并行执行，先提交的不保证先结束。同一线程的任务按提交顺序开始：前一个还在排队或执行时，后一个保持 `queued`，不占执行名额。前一个任务挂起（等待批准或等待回答）时，后一个可以开始；被批准或回答后恢复的任务与当时正在执行的任务并行。
+
+`cancel` 立即把任务保存为 `cancelled`，并尽快停止它正在做的事：
+
+- 正在等待的模型请求（规划、裁判）被放弃；
+- 正在执行的调用，如果能力声明自己可中止，则被放弃。这一步记为 `failed`，结果写明它在执行中被打断；有副作用的调用还会写明“是否已经生效未知”。只读能力默认可中止，沙箱插件会被终止；
+- 其他调用运行到自己结束，结果照常记在这一步上，任务仍是 `cancelled`。此时这一步在一段时间内可能仍显示 `running`。
+
+无论哪种情况，取消都不回滚已经发生的事，后续步骤保持 `pending`。
+
+### 线程与提问
+
+线程是一段对话：一组有先后的任务。线程用它第一个任务的编号命名，所以开启线程的任务的 `thread` 等于自己的 `id`。`submit` 带上 `thread` 就是接着这段对话说：规划器会拿到这个线程里此前任务的意图和结局。指定的线程不存在，或者不是同一来源开启的，返回 `not_found`，不创建任务。
+
+线程里此前的某个任务读过外部内容（`tainted`）时，接着它说的任务从一开始就是 `tainted`：它拿到的上文来自用户控制之外，之后有副作用的步骤都需要批准。其他线程只会被告知那个任务发生过，不会拿到它的结果。
+
+Agent 缺少只有用户知道的信息时可以提问。提问是任务的一步，能力名为 `ask.user`，参数是 `{"question": "..."}`。任务进入 `awaiting_input`，`question` 为 `{"step": 下标, "text": 问题}`，`message` 也是这个问题，被问的那一步保持 `pending`。
+
+```json
+{"version":1,"id":4,"command":{"method":"reply","id":1,"step":1,"text":"周三"}}
+```
+
+- `step` 是面向人的编号，从 1 开始，等于 `question.step + 1`。回答必须对上任务当前的提问、步骤和提交任务的系统用户，否则返回 `invalid_reply`，什么也不改变。问题换了，旧回答就无效。
+- 回答成为那一步的结果 `{"answer": "..."}`，这一步变为 `succeeded`，任务继续。
+- `awaiting_input` 不是结局，也没有期限：不回答，任务就一直等着；取消后是 `cancelled`。等待中的任务不占执行名额。
+- 子 Agent 的提问同样回到用户这里，被问的步骤带着它的 `agent`。
+- 服务重启后，等待回答的任务和其他未完成任务一样标为 `interrupted`。
+- `reply` 是变更请求：连接中断后结果未知，客户端应查询任务，不能自动重发。界面只转交用户写下的回答，不代答。
+
+### 预授权
+
+预授权是用户事先给出的许可：某个能力的调用只要参数符合每一条规则，就不再逐次确认。它只做一件事，把“先问人”变成“放行”，并且只在这些条件下：
+
+- 能力是 L1 或 L2。L0 本来就不问，L3 永远逐次确认并核对 PIN；对它们创建预授权返回 `not_preauthorizable`。
+- 任务没有被污染。读过外部内容的任务，有副作用的步骤照旧需要批准。
+- Agent 持有这个能力的授权。预授权不能把拒绝变成放行。
+- 裁判没有提出异议。裁判仍可以把命中预授权的调用改成需要确认。
+
+```json
+{"version":1,"id":5,"command":{"method":"preauthorize","capability":"mail.send",
+  "args":[{"field":"to","match":{"one_of":["me@example.com"]}},{"field":"body","match":"any"}],
+  "expires_in_seconds":3600}}
+```
+
+`args` 里每条规则针对调用的一个顶层参数，`match` 是下列之一：
+
+| `match` | 含义 |
+| --- | --- |
+| `{"equals": 值}` | 与这个值完全相同 |
+| `{"one_of": [值, ...]}` | 是其中之一；参数是数组时，每个元素都必须在其中 |
+| `{"prefix": "文本"}` | 是以这段文本开头的字符串。只是文本比较，路径请用 `under` |
+| `{"under": "目录"}` | 是这个目录本身或其下的路径；含 `.` 或 `..` 的路径一律不符合 |
+| `"any"` | 任意值；表示这个参数已被考虑并放开 |
+
+- 规则里的参数必须出现在调用里并符合规则。调用里出现了规则没有提到的参数，就不符合；`other_args: true` 才放开未提到的参数。
+- 预授权必须至少限定一个参数（`any` 不算），或者带期限。期限最长 30 天，规则最多 16 条，有效的预授权最多 64 条。
+- 设置了 PIN 时，创建预授权必须带 `pin`，否则返回 `identity_required`；PIN 只用于这一次核对。
+- 预授权在每次调用时重新检查：撤销或过期后，进行中的任务也不再适用。它不会批准已经在等待批准的步骤。
+- 预授权只适用于用户自己提交的任务。
+- 每次命中都在审计里记下所用预授权的 `id`；创建和撤销也各有一条审计记录。
+- 这三个方法只能由用户的客户端调用；没有任何能力可以创建或撤销预授权，Web Shell 也不提供。
+- `preauthorize` 和 `revoke_preauthorization` 是变更请求：连接中断后先用 `preauthorizations` 查询，不要重发。
 
 ### 分页与筛选
 
@@ -167,18 +238,20 @@ PIN 由服务端核对，不保存、不写入任务或审计；核对通过只�
 
 `after` 只表达客户端已知的 revision，**不请求持久事件回放**。订阅时服务端先建立接收器，再读取当前 revision；若 `after` 不等于当前值（包括缺省），在 `watching` 后发送 `resync_required`。刚好相等则只发送后续变更。慢消费者落后超过有界通知缓冲后，同样得到重新同步通知。
 
-可靠客户端可以先建立 watch，再读取页面与 revision，并持续处理后续通知。重新连接时刷新权威页面；不要为了补齐通知去重放 `submit`、`cancel` 或 `approve`。终端工作台遵循这一原则，断线后清除已展示的批准请求，重新展示详情后才允许批准。
+可靠客户端可以先建立 watch，再读取页面与 revision，并持续处理后续通知。重新连接时刷新权威页面；不要为了补齐通知去重放 `submit`、`cancel`、`approve` 或 `reply`。终端工作台遵循这一原则，断线后清除已展示的批准请求，重新展示详情后才允许批准。
 
 ## 资源界限与背压
 
 | 项目 | v0.3 限制与行为 |
 | --- | --- |
 | 单帧 | 最多 1,048,576 字节，不含末尾换行；接收和响应序列化均有界 |
-| 意图文本 | 非空，最多 65,536 字节，按解码后的 UTF-8 字节数计算 |
+| 意图与回答文本 | 非空，最多 65,536 字节，按解码后的 UTF-8 字节数计算 |
 | 分页 | 每页 1–50 条，任务摘要最多 120 个字符 |
 | 直接读取 | 能力名 1–128 字节；单次调用最多等待 10 秒，超时返回 `capability_failed` |
 | 并发连接 | 最多 64 条，含 watch；超额新连接直接关闭 |
-| 执行队列 | 最多 64 个等待项，worker 串行执行；满时拒绝，不先创建任务 |
+| 执行队列 | 最多 64 个等待项；满时拒绝，不先创建任务 |
+| 每任务预算 | 管家 8 轮规划；token 默认 2,000,000；执行时长默认 30 分钟。超出即 `failed`，已完成的步骤保留 |
+| 同时执行 | 最多 4 个任务（含正在执行的批准）；其余在执行队列里等待。等待批准的任务不占名额 |
 | 变更通知 | 每个 store 使用 256 条有界广播缓冲，落后触发重新同步 |
 | 普通请求读入 | 每帧等待最多 60 秒；超时关闭连接 |
 | 响应/事件写出 | 每帧最多等待 5 秒；不读取的客户端被断开 |
@@ -193,12 +266,14 @@ PIN 由服务端核对，不保存、不写入任务或审计；核对通过只�
 | `invalid_request` | JSON、字段、方法或字段类型不合法；纠正协议请求 |
 | `unsupported_version` | `version` 不受支持；不要以另一种格式盲目重试变更 |
 | `invalid_argument` | 空/超长意图、分页数量越界、步骤从 0 开始、`read` 的参数不是对象或不被能力接受等参数问题 |
-| `not_found` | 任务不存在；或 `read` 指定的能力不存在、未授权 |
+| `not_found` | 任务不存在；`submit` 指定的线程不存在或不属于这个来源；或 `read` 指定的能力不存在、未授权 |
+| `not_preauthorizable` | 这个能力是只读的（本来就不需要确认），或不可逆（每次都要确认并核对 PIN） |
 | `not_readable` | `read` 指定的能力不是只读能力，或其输出属于不可信的外部内容；改为提交意图 |
 | `capability_failed` | `read` 调用的能力返回了错误或超时；没有副作用，可以明确决定是否重试 |
-| `queue_unavailable` | 执行/批准队列满或 worker 不可用；此次未入队，明确决定是否稍后重试 |
+| `queue_unavailable` | 执行/批准/回答队列满或 worker 不可用；此次未入队，明确决定是否稍后重试 |
+| `invalid_reply` | 任务没有在等回答，或步骤、来源与当前的提问不匹配；重新读取任务 |
 | `invalid_confirmation` | 未处于等待确认、步骤/token/来源不匹配，或批准过期；重新读取和展示详情 |
-| `identity_required` | 这一步不可逆，批准时必须带 `pin`；确认请求仍有效 |
+| `identity_required` | 这一步不可逆，批准时必须带 `pin`，确认请求仍有效；或设置了 PIN 而创建预授权时没有带 |
 | `identity_rejected` | PIN 不对或已锁定；确认请求仍有效，按消息提示重试 |
 | `identity_unavailable` | 服务没有配置身份核验，无法批准这一步 |
 | `storage_unavailable` | 状态读写失败；检查本地存储与任务实际状态 |

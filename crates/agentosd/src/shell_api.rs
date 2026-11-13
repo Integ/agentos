@@ -69,6 +69,8 @@ fn kind_label(k: &ExpressionKind) -> &'static str {
         ExpressionKind::Plan => "plan",
         ExpressionKind::Report => "report",
         ExpressionKind::AskConfirm => "ask_confirm",
+        // Only the task service lets an agent ask; this daemon never does.
+        ExpressionKind::AskInput => "report",
         ExpressionKind::Error => "error",
     }
 }

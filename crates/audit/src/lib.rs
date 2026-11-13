@@ -68,6 +68,60 @@ pub enum AuditEvent {
         ok: bool,
         result: Value,
     },
+    /// The human gave standing permission for a class of calls. The whole
+    /// rule is recorded, so the log says what was permitted even after the
+    /// rule is revoked.
+    PreauthorizationCreated {
+        preauthorization: Value,
+        by: String,
+    },
+    PreauthorizationRevoked {
+        id: String,
+        by: String,
+    },
+    /// A call ran without asking because a pre-authorization covered it.
+    /// Follows the `PolicyDecision` it explains.
+    PreauthorizationUsed {
+        intent: IntentId,
+        agent: AgentId,
+        capability: CapabilityName,
+        preauthorization: String,
+    },
+    /// One model request made for a task: who asked, why, and what it
+    /// consumed. A count the service did not report is absent, never zero.
+    ModelUsage {
+        intent: IntentId,
+        agent: AgentId,
+        /// `plan` for a planning round, `judge` for a judge's review.
+        purpose: String,
+        model: Option<String>,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        duration_ms: u64,
+    },
+    /// An agent asked the user a question and its task now waits for the
+    /// answer.
+    InputRequested {
+        intent: IntentId,
+        agent: AgentId,
+        question: String,
+    },
+    /// The user answered the question a task was waiting on. `step` is the
+    /// id of the step that asked.
+    UserReplied {
+        intent: IntentId,
+        step: String,
+        text: String,
+    },
+    /// A call that had started was abandoned because its task was cancelled.
+    /// It closes the matching `CapabilityStarted` without claiming a result:
+    /// the call may or may not have taken effect.
+    CapabilityInterrupted {
+        intent: IntentId,
+        agent: AgentId,
+        capability: CapabilityName,
+        args: Value,
+    },
     /// An agent handed part of an intent to another agent.
     Delegated {
         intent: IntentId,

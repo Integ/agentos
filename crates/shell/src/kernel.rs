@@ -125,8 +125,9 @@ pub fn translate(
                 "index": index, "status": status,
             }));
         }
-        // A step that just settled says what it did.
-        if before != Some(step.state) {
+        // A step that just settled says what it did. The answer to a question
+        // is the user's own words, which the page already shows.
+        if before != Some(step.state) && step.capability.as_str() != "ask.user" {
             match (step.state, &step.result) {
                 (StepState::Succeeded, Some(result)) => events.push(json!({
                     "type": "expression", "kind": "report", "intent": id,
@@ -161,6 +162,22 @@ pub fn translate(
                 "verify_identity": confirmation.verify_identity,
                 "pin_required": confirmation.verify_identity,
                 "args": step.args,
+            }));
+        }
+    }
+    // A new question: the page has no separate control for it, so the bridge
+    // says how it will be answered.
+    if let Some(question) = &task.question {
+        let asked_before = previous.is_some_and(|p| p.question.as_ref() == Some(question));
+        if !asked_before {
+            let from = task
+                .steps
+                .get(question.step)
+                .and_then(|step| step.agent.as_ref())
+                .map_or("butler", |agent| agent.as_str());
+            events.push(json!({
+                "type": "expression", "kind": "report", "intent": id, "task": id, "from": from,
+                "text": format!("{}\n（你输入的下一句话会作为对这个问题的回答。）", question.text),
             }));
         }
     }
@@ -222,6 +239,8 @@ struct Session {
     specs: HashMap<String, CapabilitySpec>,
     /// What the page last saw of each task.
     shown: BTreeMap<u64, Task>,
+    /// The conversation of this window: one run of the shell is one thread.
+    thread: Option<TaskId>,
 }
 
 impl Session {
@@ -260,6 +279,7 @@ impl Session {
                 before: None,
                 limit: 20,
                 state: None,
+                thread: None,
             })
             .await?
         else {
@@ -269,7 +289,12 @@ impl Session {
             let id = summary.id.0;
             let task = self.task(id).await?;
             let known = self.shown.contains_key(&id);
-            if known || task.state == TaskState::AwaitingConfirmation {
+            if known
+                || matches!(
+                    task.state,
+                    TaskState::AwaitingConfirmation | TaskState::AwaitingInput
+                )
+            {
                 for event in translate(self.shown.get(&id), &task, &self.specs) {
                     emit(event);
                 }
@@ -282,14 +307,36 @@ impl Session {
 
     async fn handle(&mut self, request: Request, emit: &impl Fn(Value) -> bool) {
         let result = match request {
-            Request::Intent(text) => match self.client.request(Command::Submit { text }).await {
-                Ok(Reply::Accepted { task }) => {
-                    self.shown.insert(task.id.0, task);
-                    Ok(())
+            Request::Intent(text) => {
+                // The page told the user that their next words answer the
+                // newest open question; they go to exactly that task and
+                // step, and nowhere else.
+                let asked = self.shown.values().rev().find_map(|task| {
+                    let question = task.question.as_ref()?;
+                    (task.state == TaskState::AwaitingInput).then_some((task.id, question.step))
+                });
+                let command = match asked {
+                    Some((id, step)) => Command::Reply {
+                        id,
+                        step: step + 1,
+                        text,
+                    },
+                    None => Command::Submit {
+                        text,
+                        thread: self.thread,
+                    },
+                };
+                match self.client.request(command).await {
+                    Ok(Reply::Accepted { task }) => {
+                        self.thread = Some(task.thread);
+                        self.shown.insert(task.id.0, task);
+                        Ok(())
+                    }
+                    Ok(Reply::ReplyQueued { id, .. }) => self.refresh(id.0, emit).await,
+                    Ok(_) => Ok(()),
+                    Err(error) => Err(error),
                 }
-                Ok(_) => Ok(()),
-                Err(error) => Err(error),
-            },
+            }
             Request::Confirm {
                 approved,
                 task,
@@ -371,6 +418,7 @@ pub fn run(
             client: Client::new(socket),
             specs: HashMap::new(),
             shown: BTreeMap::new(),
+            thread: None,
         };
         loop {
             let connected = async {
@@ -568,6 +616,42 @@ mod tests {
                 "step:1:cancelled",
                 "done:failed"
             ]
+        );
+    }
+
+    #[test]
+    fn a_question_is_said_once_and_its_answer_is_not_echoed_as_a_result() {
+        let (fixture, queued) = Fixture::new("记一下开会的事");
+        let asking = fixture.update(|t| {
+            t.state = TaskState::AwaitingInput;
+            t.steps = vec![step("call-1", "ask.user", StepState::Pending, None)];
+            t.message = Some("哪一天开会？".into());
+            t.question = Some(agentos_runtime::Question {
+                step: 0,
+                text: "哪一天开会？".into(),
+            });
+        });
+        let events = translate(Some(&queued), &asking, &specs());
+        let said: Vec<&str> = events
+            .iter()
+            .filter(|e| e["type"] == "expression")
+            .map(|e| e["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(said.len(), 1);
+        // The page has no control of its own for answering: it is told how.
+        assert!(said[0].starts_with("哪一天开会？") && said[0].contains("下一句话"));
+        // Seeing the same question again says nothing new.
+        assert!(translate(Some(&asking), &asking, &specs()).is_empty());
+        let answered = fixture.update(|t| {
+            t.state = TaskState::Running;
+            t.question = None;
+            t.message = None;
+            t.steps[0].state = StepState::Succeeded;
+            t.steps[0].result = Some(json!({"answer": "周三"}));
+        });
+        assert_eq!(
+            kinds(&translate(Some(&asking), &answered, &specs())),
+            vec!["step:0:done"]
         );
     }
 

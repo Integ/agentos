@@ -498,7 +498,7 @@ async fn unavailable_audit_storage_prevents_capability_execution() {
     let recorder = Arc::new(Recorder::default());
     let mut expr = ExpressionHub::new(audit.clone());
     expr.add_output(recorder.clone());
-    let mut butler = Butler::new(
+    let butler = Butler::new(
         id,
         registry,
         policy,

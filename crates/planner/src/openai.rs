@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::llm::{send_with_retry, Retry, TextModel};
-use crate::{capability_name, tool_name, Conversation, Plan, Planner, Step, SYSTEM_PROMPT};
+use crate::{capability_name, tool_name, Conversation, Plan, Planner, Step, Usage, SYSTEM_PROMPT};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -212,6 +212,25 @@ pub fn parse_response(body: &Value) -> Plan {
     }
 }
 
+/// What a Chat Completions response says it consumed. Compatible services
+/// often leave `usage` out; the counts are then unknown.
+pub fn response_usage(model: &str, body: &Value) -> Usage {
+    let count = |name: &str| {
+        body.pointer(&format!("/usage/{name}"))
+            .and_then(Value::as_u64)
+    };
+    Usage {
+        model: Some(
+            body.get("model")
+                .and_then(Value::as_str)
+                .unwrap_or(model)
+                .to_string(),
+        ),
+        input_tokens: count("prompt_tokens"),
+        output_tokens: count("completion_tokens"),
+    }
+}
+
 pub struct OpenAiPlanner {
     cfg: OpenAiConfig,
     http: reqwest::Client,
@@ -282,6 +301,14 @@ impl OpenAiPlanner {
 #[async_trait]
 impl TextModel for OpenAiPlanner {
     async fn complete(&self, system: &str, user: &str) -> Result<String, String> {
+        self.complete_metered(system, user).await.0
+    }
+
+    async fn complete_metered(
+        &self,
+        system: &str,
+        user: &str,
+    ) -> (Result<String, String>, Option<Usage>) {
         let body = json!({
             "model": self.cfg.model,
             "messages": [
@@ -289,18 +316,23 @@ impl TextModel for OpenAiPlanner {
                 { "role": "user", "content": user },
             ],
         });
-        let resp = self.call(&body).await?;
-        let msg = resp
-            .pointer("/choices/0/message")
-            .ok_or("模型没有返回任何内容。")?;
+        let resp = match self.call(&body).await {
+            Ok(resp) => resp,
+            Err(error) => return (Err(error), Some(Usage::unknown(&self.cfg.model))),
+        };
+        let usage = Some(response_usage(&self.cfg.model, &resp));
+        let Some(msg) = resp.pointer("/choices/0/message") else {
+            return (Err("模型没有返回任何内容。".into()), usage);
+        };
         if let Some(r) = msg.get("refusal").and_then(Value::as_str) {
-            return Err(format!("模型拒绝了这个请求：{r}"));
+            return (Err(format!("模型拒绝了这个请求：{r}")), usage);
         }
-        Ok(msg
+        let text = msg
             .get("content")
             .and_then(Value::as_str)
             .unwrap_or_default()
-            .to_string())
+            .to_string();
+        (Ok(text), usage)
     }
 }
 
@@ -318,9 +350,17 @@ impl Planner for OpenAiPlanner {
 
     async fn plan_turn(&self, conv: &Conversation<'_>) -> Plan {
         let body = build_turn_request(&self.cfg, conv);
+        // A refusal or an unusable answer was paid for like any other, and
+        // a request that failed may have been: neither is recorded as free.
         match self.call(&body).await {
-            Ok(resp) => parse_response(&resp),
-            Err(e) => Plan::failed(e),
+            Ok(resp) => Plan {
+                usage: Some(response_usage(&self.cfg.model, &resp)),
+                ..parse_response(&resp)
+            },
+            Err(e) => Plan {
+                usage: Some(Usage::unknown(&self.cfg.model)),
+                ..Plan::failed(e)
+            },
         }
     }
 }
@@ -551,5 +591,21 @@ mod tests {
         }}]}));
         assert!(plan.steps.is_empty());
         assert!(plan.error.is_some());
+    }
+    #[test]
+    fn usage_is_read_when_reported_and_unknown_when_a_service_leaves_it_out() {
+        let reported = response_usage(
+            "asked-for",
+            &json!({"model": "answered", "usage": {"prompt_tokens": 12, "completion_tokens": 3}}),
+        );
+        assert_eq!(reported.model.as_deref(), Some("answered"));
+        assert_eq!(
+            (reported.input_tokens, reported.output_tokens),
+            (Some(12), Some(3))
+        );
+        // Guards "unknown is not zero": many compatible services report nothing.
+        let silent = response_usage("asked-for", &json!({"choices": []}));
+        assert_eq!(silent.model.as_deref(), Some("asked-for"));
+        assert_eq!((silent.input_tokens, silent.output_tokens), (None, None));
     }
 }

@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::llm::{send_with_retry, Retry, TextModel};
-use crate::{capability_name, tool_name, Conversation, Plan, Planner, Step, SYSTEM_PROMPT};
+use crate::{capability_name, tool_name, Conversation, Plan, Planner, Step, Usage, SYSTEM_PROMPT};
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -195,6 +195,31 @@ pub fn parse_response(body: &Value) -> Plan {
     }
 }
 
+/// What a Messages API response says it consumed. Cached input is input the
+/// model read all the same, so it is counted.
+pub fn response_usage(model: &str, body: &Value) -> Usage {
+    let count = |name: &str| {
+        body.pointer(&format!("/usage/{name}"))
+            .and_then(Value::as_u64)
+    };
+    let input = count("input_tokens").map(|fresh| {
+        fresh
+            + count("cache_creation_input_tokens").unwrap_or(0)
+            + count("cache_read_input_tokens").unwrap_or(0)
+    });
+    Usage {
+        // A fallback may have answered instead of the requested model.
+        model: Some(
+            body.get("model")
+                .and_then(Value::as_str)
+                .unwrap_or(model)
+                .to_string(),
+        ),
+        input_tokens: input,
+        output_tokens: count("output_tokens"),
+    }
+}
+
 pub struct ClaudePlanner {
     cfg: ClaudeConfig,
     http: reqwest::Client,
@@ -259,6 +284,14 @@ impl ClaudePlanner {
 #[async_trait]
 impl TextModel for ClaudePlanner {
     async fn complete(&self, system: &str, user: &str) -> Result<String, String> {
+        self.complete_metered(system, user).await.0
+    }
+
+    async fn complete_metered(
+        &self,
+        system: &str,
+        user: &str,
+    ) -> (Result<String, String>, Option<Usage>) {
         let body = json!({
             "model": self.cfg.model,
             "max_tokens": self.cfg.max_tokens,
@@ -267,9 +300,13 @@ impl TextModel for ClaudePlanner {
             "fallbacks": "default",
             "messages": [{ "role": "user", "content": user }],
         });
-        let resp = self.call(&body).await?;
+        let resp = match self.call(&body).await {
+            Ok(resp) => resp,
+            Err(error) => return (Err(error), Some(Usage::unknown(&self.cfg.model))),
+        };
+        let usage = Some(response_usage(&self.cfg.model, &resp));
         if resp.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
-            return Err("模型拒绝了这个请求。".into());
+            return (Err("模型拒绝了这个请求。".into()), usage);
         }
         let text: String = resp
             .get("content")
@@ -279,7 +316,7 @@ impl TextModel for ClaudePlanner {
             .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
             .filter_map(|b| b.get("text").and_then(Value::as_str))
             .collect();
-        Ok(text)
+        (Ok(text), usage)
     }
 }
 
@@ -297,9 +334,17 @@ impl Planner for ClaudePlanner {
 
     async fn plan_turn(&self, conv: &Conversation<'_>) -> Plan {
         let body = build_turn_request(&self.cfg, conv);
+        // A refusal or an unusable answer was paid for like any other, and
+        // a request that failed may have been: neither is recorded as free.
         match self.call(&body).await {
-            Ok(resp) => parse_response(&resp),
-            Err(e) => Plan::failed(e),
+            Ok(resp) => Plan {
+                usage: Some(response_usage(&self.cfg.model, &resp)),
+                ..parse_response(&resp)
+            },
+            Err(e) => Plan {
+                usage: Some(Usage::unknown(&self.cfg.model)),
+                ..Plan::failed(e)
+            },
         }
     }
 }
@@ -513,5 +558,24 @@ mod tests {
         ]}));
         assert_eq!(plan.steps.len(), 1);
         assert!(plan.error.is_none());
+    }
+    #[test]
+    fn usage_counts_cached_input_and_leaves_unreported_counts_unknown() {
+        let reported = response_usage(
+            "asked-for",
+            &json!({"model": "answered", "usage": {
+                "input_tokens": 10, "cache_creation_input_tokens": 5,
+                "cache_read_input_tokens": 100, "output_tokens": 7
+            }}),
+        );
+        assert_eq!(reported.model.as_deref(), Some("answered"));
+        assert_eq!(
+            (reported.input_tokens, reported.output_tokens),
+            (Some(115), Some(7))
+        );
+        // Guards "unknown is not zero".
+        let silent = response_usage("asked-for", &json!({"content": []}));
+        assert_eq!(silent.model.as_deref(), Some("asked-for"));
+        assert_eq!((silent.input_tokens, silent.output_tokens), (None, None));
     }
 }

@@ -49,8 +49,10 @@ cargo run -p agentos-cli -- --state-dir /tmp/agentos-demo workbench
 | `/tasks`、`/refresh` | 刷新当前任务页和详情 |
 | `/next`、`/prev`、`/latest` | 更早历史、返回上一页、最新任务 |
 | `/task task-1` | 选中任务，显示意图、计划参数、步骤结果与确认请求 |
-| `/cancel task-1` | 停止后续步骤；已经开始的步骤可能仍完成 |
+| `/cancel task-1` | 停止后续步骤，不再等模型；已经开始的步骤可能仍完成 |
 | `/approve task-1 1` | 批准当前已展示详情中的具体确认请求 |
+| `/reply task-1 1 周三` | 回答任务在第 1 步提出的问题；任务在原地继续 |
+| `/new` | 另起一段对话；不输入它时，工作台里的每句话都接着同一段对话说 |
 | `/capabilities`、`/help` | 查看能力与帮助 |
 | `/quit` | 退出工作台，任务服务继续运行 |
 
@@ -100,6 +102,19 @@ agentos watch
 | 3 | `submit --wait`：任务结束但没有成功（`unhandled`、`failed`、`cancelled`、`interrupted`） |
 | 4 | `submit --wait`：任务在等待批准，需要人来处理 |
 | 5 | `submit --wait`：等待超时，任务仍在后台继续 |
+| 6 | `submit --wait`：任务在等待回答，需要人用 `agentos reply` 回答 |
+
+`submit --thread task-N` 接着一段对话说（`task-N` 是这段对话第一个任务的编号，`submit` 的输出里会给出）；`tasks --thread task-N` 只列出这段对话的任务。Agent 提问时任务显示为“等待回答”，用 `agentos reply task-N 步骤 <回答>` 回答。
+
+`preauthorize <能力>` 事先许可一类调用，之后符合规则的调用不再逐次确认；只适用于 L1/L2，不适用于读过外部内容的任务。例如只允许给自己发邮件、两小时内有效：
+
+```sh
+agentos preauthorize mail.send --one-of to=me@example.com --any body --expires 2h
+agentos preauthorizations
+agentos revoke pre-1
+```
+
+规则有 `--equals 字段=值`、`--one-of 字段=值1,值2`、`--prefix 字段=文本`、`--under 字段=目录`、`--any 字段`。没有写到的参数默认不允许出现，`--any-other-args` 才放开。必须至少限定一个参数或用 `--expires` 设置期限（最长 30 天）。设置了 PIN 时加 `--pin-stdin`。
 
 `read <能力> [JSON 参数]` 直接查询一个只读（L0）能力，例如 `notes.list`、`clock.now`。它不创建任务、不经过规划器；有副作用的能力会被拒绝，需要用 `submit` 提交意图。`capabilities` 列出的风险等级写作 L0–L3。
 
@@ -155,6 +170,8 @@ cargo run -p agentos-taskd -- --planner claude
 cargo run -p agentos-taskd -- --planner openai
 ```
 
+每个任务的预算用环境变量设置：`AGENTOS_TASK_TOKENS`（输入加输出 token，默认 2000000）和 `AGENTOS_TASK_SECONDS`（执行时长，默认 1800），`0` 表示不限制，写错会拒绝启动而不是当作不限制。任务详情里的“用量”一行显示它已经消耗了多少。
+
 `--planner` 优先于 `AGENTOS_PLANNER`。未指定时，有 `ANTHROPIC_API_KEY` 则选 Claude，否则有完整 OpenAI 兼容配置则选该接口，其余使用规则规划器。显式指定但配置不完整会报错。
 
 | 规划器 | 配置 |
@@ -178,4 +195,4 @@ node --test crates/web-shell/assets/*.test.mjs
 
 测试覆盖持久化、快照迁移、取消竞态、批准与撤权、审计故障、协议帧限制、真实 Unix socket 交互和客户端断线行为。CI 配置 Linux/macOS 检查及 Rust 1.88 最低版本编译。
 
-当前为单用户、单 worker 的用户态服务，能力仍在守护进程内运行（插件在沙箱里）。完整的结构与尚未合并的部分见[架构](architecture.md)。
+当前为单用户的用户态服务，任务并行执行，能力仍在守护进程内运行（插件在沙箱里）。完整的结构与尚未合并的部分见[架构](architecture.md)。

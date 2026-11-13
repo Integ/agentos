@@ -407,6 +407,12 @@ impl Capability for PluginCapability {
         self.manifest.permissions.network || self.sandbox == SandboxMode::None
     }
 
+    /// The plugin process is killed when its call is dropped, so cancelling
+    /// a task stops the plugin instead of waiting out its timeout.
+    fn abortable(&self) -> bool {
+        true
+    }
+
     async fn invoke(&self, args: Value) -> Result<Value, CapabilityError> {
         if self.manifest.permissions.storage {
             std::fs::create_dir_all(&self.data_dir)

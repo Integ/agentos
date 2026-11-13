@@ -375,6 +375,13 @@ struct Approval {
     pin: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Answer {
+    step: usize,
+    text: String,
+}
+
 fn command(request: &Request) -> Result<Command, HttpError> {
     let (path, parameters) = request
         .target
@@ -413,6 +420,7 @@ fn command(request: &Request) -> Result<Command, HttpError> {
                 before,
                 limit,
                 state,
+                thread: None,
             })
         }
         // Reading state is a query, not an intent: the browser may refresh
@@ -440,7 +448,9 @@ fn command(request: &Request) -> Result<Command, HttpError> {
             if text.is_empty() || text.len() > MAX_TEXT_BYTES {
                 return Err(HttpError::bad("意图不能为空，且不得超过 64 KiB"));
             }
-            Ok(Command::Submit { text })
+            // Every intent from the browser starts its own thread: its
+            // buttons submit fixed intents that are not one conversation.
+            Ok(Command::Submit { text, thread: None })
         }
         (method, path) if path.starts_with("/api/tasks/") && parameters.is_empty() => {
             let parts: Vec<_> = path["/api/tasks/".len()..].split('/').collect();
@@ -454,6 +464,21 @@ fn command(request: &Request) -> Result<Command, HttpError> {
                         return Err(HttpError::bad("取消操作需要空 JSON 对象"));
                     }
                     Ok(Command::Cancel { id })
+                }
+                ("POST", [_, "reply"]) => {
+                    let answer: Answer = serde_json::from_slice(&request.body)
+                        .map_err(|_| HttpError::bad("需要 step 与 text"))?;
+                    let text = answer.text.trim().to_string();
+                    if answer.step == 0 || text.is_empty() || text.len() > MAX_TEXT_BYTES {
+                        return Err(HttpError::bad(
+                            "回答的步骤从 1 开始，内容不能为空，且不得超过 64 KiB",
+                        ));
+                    }
+                    Ok(Command::Reply {
+                        id,
+                        step: answer.step,
+                        text,
+                    })
                 }
                 ("POST", [_, "approve"]) => {
                     let approval: Approval = serde_json::from_slice(&request.body)
@@ -784,6 +809,23 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_names_its_task_and_step_and_is_passed_on_as_typed() {
+        let reply = |body| command(&request("POST", "/api/tasks/task-7/reply", body));
+        assert!(matches!(
+            reply(json!({"step": 2, "text": " 周三 "})).unwrap(),
+            Command::Reply { id: TaskId(7), step: 2, text } if text == "周三"
+        ));
+        for body in [
+            json!({"step": 0, "text": "周三"}),
+            json!({"step": 1, "text": " "}),
+            json!({"step": 1}),
+            json!({"step": 1, "text": "周三", "extra": true}),
+        ] {
+            assert!(reply(body).is_err());
+        }
+    }
+
+    #[test]
     fn bounded_queries_and_exact_approval_tokens_map_to_protocol() {
         assert!(matches!(
             command(&request("GET", "/api/tasks?state=unhandled", Value::Null)).unwrap(),
@@ -933,7 +975,9 @@ mod tests {
             let mut reader = BufReader::new(stream);
             let frame = agentos_ipc::read_frame(&mut reader).await.unwrap().unwrap();
             let request: agentos_ipc::Request = serde_json::from_slice(&frame).unwrap();
-            assert!(matches!(request.command, Command::Submit { text } if text == "记一下 茶"));
+            assert!(
+                matches!(request.command, Command::Submit { text, thread: None } if text == "记一下 茶")
+            );
             drop(reader);
             assert!(
                 tokio::time::timeout(Duration::from_millis(100), listener.accept())

@@ -196,6 +196,17 @@ impl PinVault {
     /// Check `pin`; on success, vouch for the next approval of `task` (or of
     /// any task, for `None`) within a minute.
     pub fn verify_for(&self, task: Option<u64>, pin: &str) -> PinCheck {
+        self.verify(pin, task, true)
+    }
+
+    /// Check `pin` for something that is not the approval of a task. Unlike
+    /// [`Self::verify_for`] it vouches for nothing afterwards: a correct PIN
+    /// entered for one purpose must not let a later approval through.
+    pub fn check(&self, pin: &str) -> PinCheck {
+        self.verify(pin, None, false)
+    }
+
+    fn verify(&self, pin: &str, task: Option<u64>, vouch: bool) -> PinCheck {
         let now = now_ms();
         let result = {
             let mut s = self.lock();
@@ -209,7 +220,9 @@ impl PinVault {
                     if same(&derive(&r.salt, r.rounds, pin), &r.hash) {
                         s.failures = 0;
                         s.grants.retain(|(_, exp)| *exp > now);
-                        s.grants.push((task, now + GRANT_MS));
+                        if vouch {
+                            s.grants.push((task, now + GRANT_MS));
+                        }
                         PinCheck::Ok
                     } else {
                         s.failures += 1;
@@ -382,5 +395,24 @@ mod tests {
             .collect();
         assert_eq!(oks, vec![false, true]);
         cleanup(&p);
+    }
+
+    #[test]
+    fn a_pin_checked_for_another_purpose_vouches_for_no_approval() {
+        let path = std::env::temp_dir().join(format!(
+            "agentos-pin-check-{}-{}.json",
+            std::process::id(),
+            now_ms()
+        ));
+        let vault = PinVault::open(&path).unwrap();
+        vault.set("246813").unwrap();
+        assert_eq!(vault.check("246813"), PinCheck::Ok);
+        assert!(!vault.take_grant(7));
+        assert!(matches!(vault.check("000000"), PinCheck::Wrong { .. }));
+        // The ordinary path still vouches, once.
+        assert_eq!(vault.verify_for(Some(7), "246813"), PinCheck::Ok);
+        assert!(vault.take_grant(7));
+        assert!(!vault.take_grant(7));
+        let _ = std::fs::remove_file(path);
     }
 }

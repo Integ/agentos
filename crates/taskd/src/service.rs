@@ -1,5 +1,7 @@
 //! A bounded, local control service. Connections never own task lifetimes.
+//! Admitted tasks run on a bounded pool of workers, independently of each other.
 
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, DirBuilder};
 use std::future::Future;
 use std::io;
@@ -10,23 +12,25 @@ use std::time::Duration;
 
 use agentos_audit::{AuditEvent, AuditLog};
 use agentos_core::{
-    now_ms, AgentId, CapabilityError, CapabilityName, DeviceId, Intent, IntentId, Urgency,
+    now_ms, AgentId, CapabilityError, CapabilityName, DeviceId, Intent, IntentId, RiskLevel,
+    Urgency,
 };
 use agentos_ipc::{
     current_uid, read_frame, write_frame, Command, Event, EventKind, ProtocolError, Reply, Request,
     Response, TaskSummary, MAX_CAPABILITY_NAME_BYTES, MAX_PAGE_SIZE, MAX_TEXT_BYTES, VERSION,
 };
-use agentos_policy::PolicyEngine;
+use agentos_policy::{PolicyEngine, Subject};
 use agentos_runtime::{Task, TaskId, TaskState, TaskStore};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWrite, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, mpsc, Semaphore};
+use tokio::sync::{broadcast, mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 use crate::butler::{Butler, CapabilityView};
-use crate::control::approval_matches_with_token;
+use crate::control::{approval_matches_with_token, reply_matches};
+use crate::preauth::{NewPreauthorization, PreauthStore};
 use agentos_planner::Planner;
 use agentos_services::expression::ExpressionHub;
 use agentos_services::identity::{PinCheck, PinVault};
@@ -34,6 +38,9 @@ use agentos_services::registry::CapabilityRegistry;
 
 const MAX_CONNECTIONS: usize = 64;
 const QUEUE_CAPACITY: usize = 64;
+/// Tasks (and approvals being carried out) that run at the same time unless
+/// the embedder says otherwise. Each may hold a model request open.
+pub const MAX_RUNNING_TASKS: usize = 4;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -41,8 +48,9 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct Service {
     controller: Arc<Controller>,
-    work_rx: mpsc::Receiver<Work>,
-    butler: Butler,
+    work_rx: mpsc::UnboundedReceiver<Admitted>,
+    butler: Arc<Butler>,
+    max_running: usize,
 }
 
 pub struct Server {
@@ -59,7 +67,12 @@ struct Controller {
     view: Arc<Mutex<CapabilityView>>,
     /// Proves identity for approvals of irreversible steps.
     pins: Option<Arc<PinVault>>,
-    work_tx: mpsc::Sender<Work>,
+    preauths: Arc<PreauthStore>,
+    work_tx: mpsc::UnboundedSender<Admitted>,
+    /// Bounds work that has been admitted and has not started. The channel
+    /// itself is unbounded because the scheduler takes work off it at once,
+    /// to keep the tasks of a thread in order; the bound is this.
+    admission: Arc<Semaphore>,
 }
 
 enum Work {
@@ -70,6 +83,18 @@ enum Work {
         responder: Intent,
         token: String,
     },
+    Reply {
+        id: TaskId,
+        step: usize,
+        responder: Intent,
+        text: String,
+    },
+}
+
+/// Work with its place in the queue, which it gives up when it starts.
+struct Admitted {
+    work: Work,
+    place: OwnedSemaphorePermit,
 }
 
 impl Service {
@@ -98,18 +123,28 @@ impl Service {
     /// the vault the butler was given, so a PIN checked here vouches for the
     /// approval the butler then carries out.
     pub fn with_butler(butler: Butler, audit: Arc<AuditLog>, pins: Option<Arc<PinVault>>) -> Self {
-        let (work_tx, work_rx) = mpsc::channel(QUEUE_CAPACITY);
+        let (work_tx, work_rx) = mpsc::unbounded_channel();
         Self {
             controller: Arc::new(Controller {
                 tasks: butler.tasks().clone(),
                 audit,
                 view: butler.view(),
                 pins,
+                preauths: butler.preauthorizations().clone(),
                 work_tx,
+                admission: Arc::new(Semaphore::new(QUEUE_CAPACITY)),
             }),
             work_rx,
-            butler,
+            butler: Arc::new(butler),
+            max_running: MAX_RUNNING_TASKS,
         }
+    }
+
+    /// How many tasks may run at the same time; at least one. Work beyond
+    /// that waits in the bounded queue.
+    pub fn with_max_running(mut self, max_running: usize) -> Self {
+        self.max_running = max_running.max(1);
+        self
     }
 
     /// Bind without starting the worker. Only stale sockets belonging to this
@@ -201,26 +236,11 @@ impl Server {
         } = self;
         let Service {
             controller,
-            mut work_rx,
-            mut butler,
+            work_rx,
+            butler,
+            max_running,
         } = service;
-        let mut worker = tokio::spawn(async move {
-            while let Some(work) = work_rx.recv().await {
-                match work {
-                    Work::Run(id) => butler.execute(id).await,
-                    Work::Approve {
-                        id,
-                        step,
-                        responder,
-                        token,
-                    } => {
-                        butler
-                            .approve_with_token(id, step, &responder, &token)
-                            .await
-                    }
-                }
-            }
-        });
+        let mut worker = tokio::spawn(run_workers(work_rx, butler, max_running));
         let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         let mut connections = JoinSet::new();
         tokio::pin!(shutdown);
@@ -265,9 +285,11 @@ impl Server {
                 }
                 Err(_) => {
                     worker.abort();
-                    // Current capabilities are asynchronous. Bound this final
-                    // cancellation wait too, so a future blocking plugin cannot
-                    // keep the control service alive indefinitely.
+                    // Aborting the dispatcher drops, and so aborts, every
+                    // running task. Current capabilities are asynchronous.
+                    // Bound this final cancellation wait too, so a future
+                    // blocking plugin cannot keep the control service alive
+                    // indefinitely.
                     let _ = timeout(Duration::from_millis(250), &mut worker).await;
                 }
             }
@@ -278,6 +300,7 @@ impl Server {
                     if !task.state.is_terminal() {
                         task.state = TaskState::Interrupted;
                         task.confirmation = None;
+                        task.question = None;
                         task.message =
                             Some("后台服务已停止；任务未完成，不会自动重复执行。".into());
                     }
@@ -290,6 +313,103 @@ impl Server {
             }
         }
         outcome
+    }
+}
+
+/// Run admitted work, at most `max_running` items at a time, until the queue
+/// closes and everything admitted has finished.
+///
+/// Tasks of one thread start in the order they were submitted: a task waits
+/// here, holding no worker, while an earlier task of its thread is queued or
+/// running. A task that pauses for the human lets the next one start; being
+/// approved or answered later resumes it alongside whatever runs then.
+async fn run_workers(
+    mut work_rx: mpsc::UnboundedReceiver<Admitted>,
+    butler: Arc<Butler>,
+    max_running: usize,
+) {
+    let mut ready: VecDeque<(Admitted, Option<TaskId>)> = VecDeque::new();
+    // Threads with a task that is ready or running, and what waits behind it.
+    let mut threads: HashMap<TaskId, VecDeque<Admitted>> = HashMap::new();
+    let mut running: JoinSet<Option<TaskId>> = JoinSet::new();
+    let mut open = true;
+    loop {
+        while running.len() < max_running {
+            let Some((admitted, thread)) = ready.pop_front() else {
+                break;
+            };
+            let Admitted { work, place } = admitted;
+            // Started: its place in the queue is free again.
+            drop(place);
+            let butler = butler.clone();
+            running.spawn(async move {
+                match work {
+                    Work::Run(id) => butler.execute(id).await,
+                    Work::Approve {
+                        id,
+                        step,
+                        responder,
+                        token,
+                    } => {
+                        butler
+                            .approve_with_token(id, step, &responder, &token)
+                            .await
+                    }
+                    Work::Reply {
+                        id,
+                        step,
+                        responder,
+                        text,
+                    } => butler.reply(id, step, &responder, &text).await,
+                }
+                thread
+            });
+        }
+        if !open && running.is_empty() && ready.is_empty() {
+            break;
+        }
+        tokio::select! {
+            admitted = work_rx.recv(), if open => {
+                let Some(admitted) = admitted else {
+                    open = false;
+                    continue;
+                };
+                let thread = match &admitted.work {
+                    Work::Run(id) => butler.tasks().thread_of(*id),
+                    Work::Approve { .. } | Work::Reply { .. } => None,
+                };
+                match thread {
+                    Some(thread) => match threads.get_mut(&thread) {
+                        Some(behind) => behind.push_back(admitted),
+                        None => {
+                            threads.insert(thread, VecDeque::new());
+                            ready.push_back((admitted, Some(thread)));
+                        }
+                    },
+                    None => ready.push_back((admitted, None)),
+                }
+            }
+            Some(finished) = running.join_next(), if !running.is_empty() => {
+                let thread = match finished {
+                    Ok(thread) => thread,
+                    // A panic while running a task is a bug in the kernel,
+                    // not in the task: it is passed on so the service stops
+                    // instead of running on damaged.
+                    Err(error) if error.is_panic() => {
+                        std::panic::resume_unwind(error.into_panic())
+                    }
+                    Err(_) => None,
+                };
+                if let Some(thread) = thread {
+                    match threads.get_mut(&thread).and_then(VecDeque::pop_front) {
+                        Some(next) => ready.push_back((next, Some(thread))),
+                        None => {
+                            threads.remove(&thread);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -350,36 +470,60 @@ impl Controller {
             .ok_or_else(|| protocol_error("not_found", format!("no task {id}")))
     }
 
+    /// A place in the bounded queue, or a refusal that changed nothing.
+    fn admit(&self, refusal: &str) -> Result<OwnedSemaphorePermit, ProtocolError> {
+        self.admission
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| protocol_error("queue_unavailable", refusal))
+    }
+
+    fn enqueue(&self, work: Work, place: OwnedSemaphorePermit) -> Result<(), ProtocolError> {
+        self.work_tx.send(Admitted { work, place }).map_err(|_| {
+            protocol_error(
+                "queue_unavailable",
+                "the service is stopping; the request was saved but will not run",
+            )
+        })
+    }
+
     fn handle(&self, command: Command, uid: u32) -> Result<Reply, ProtocolError> {
         match command {
             Command::Ping {} => Ok(Reply::Pong {
                 server_version: env!("CARGO_PKG_VERSION").into(),
                 revision: self.tasks.revision(),
             }),
-            Command::Submit { text } => {
+            Command::Submit { text, thread } => {
                 if text.trim().is_empty() || text.len() > MAX_TEXT_BYTES {
                     return Err(protocol_error(
                         "invalid_argument",
                         "intent must be non-empty and at most 64 KiB",
                     ));
                 }
-                let permit = self.work_tx.try_reserve().map_err(|_| {
-                    protocol_error(
-                        "queue_unavailable",
-                        "task queue is full or unavailable; no task was created",
-                    )
-                })?;
+                let place = self.admit("task queue is full or unavailable; no task was created")?;
                 let task = self
                     .tasks
-                    .create(responder(uid, text.trim().into()))
-                    .map_err(storage_error)?;
-                permit.send(Work::Run(task.id));
+                    .create_in(responder(uid, text.trim().into()), thread)
+                    .map_err(|error| match (error.kind(), thread) {
+                        // Whether a thread is missing or someone else's is
+                        // not this client's to learn.
+                        (
+                            io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied,
+                            Some(thread),
+                        ) => protocol_error(
+                            "not_found",
+                            format!("no thread {thread}; no task was created"),
+                        ),
+                        _ => storage_error(error),
+                    })?;
+                self.enqueue(Work::Run(task.id), place)?;
                 Ok(Reply::Accepted { task })
             }
             Command::List {
                 before,
                 limit,
                 state,
+                thread,
             } => {
                 if !(1..=MAX_PAGE_SIZE).contains(&limit) {
                     return Err(protocol_error(
@@ -387,7 +531,8 @@ impl Controller {
                         "page limit must be between 1 and 50",
                     ));
                 }
-                let (tasks, next_before, revision) = self.tasks.page(before, limit, state);
+                let (tasks, next_before, revision) =
+                    self.tasks.page_in(before, limit, state, thread);
                 Ok(Reply::Tasks {
                     tasks: tasks.iter().map(TaskSummary::from).collect(),
                     next_before,
@@ -454,19 +599,158 @@ impl Controller {
                         other => return Err(protocol_error("identity_rejected", other.message())),
                     }
                 }
-                let permit = self.work_tx.try_reserve().map_err(|_| {
-                    protocol_error(
-                        "queue_unavailable",
-                        "approval queue is full or unavailable; retry explicitly",
-                    )
-                })?;
-                permit.send(Work::Approve {
-                    id,
-                    step: index,
-                    responder,
-                    token: confirmation,
-                });
+                let place =
+                    self.admit("approval queue is full or unavailable; retry explicitly")?;
+                self.enqueue(
+                    Work::Approve {
+                        id,
+                        step: index,
+                        responder,
+                        token: confirmation,
+                    },
+                    place,
+                )?;
                 Ok(Reply::ApprovalQueued { id, step })
+            }
+            Command::Reply { id, step, text } => {
+                let index = step
+                    .checked_sub(1)
+                    .ok_or_else(|| protocol_error("invalid_argument", "step numbers start at 1"))?;
+                if text.trim().is_empty() || text.len() > MAX_TEXT_BYTES {
+                    return Err(protocol_error(
+                        "invalid_argument",
+                        "reply must be non-empty and at most 64 KiB",
+                    ));
+                }
+                let task = self.task(id)?;
+                let responder = responder(uid, format!("reply {id} {step}"));
+                if !reply_matches(&task, index, &responder) {
+                    return Err(protocol_error(
+                        "invalid_reply",
+                        "reply must match the question the task is waiting on now, its step and the OS user",
+                    ));
+                }
+                let place = self.admit("reply queue is full or unavailable; retry explicitly")?;
+                self.enqueue(
+                    Work::Reply {
+                        id,
+                        step: index,
+                        responder,
+                        text: text.trim().into(),
+                    },
+                    place,
+                )?;
+                Ok(Reply::ReplyQueued { id, step })
+            }
+            Command::Preauthorize {
+                capability,
+                args,
+                other_args,
+                expires_in_seconds,
+                pin,
+            } => {
+                let risk = self
+                    .view()
+                    .specs
+                    .iter()
+                    .find(|spec| spec.name == capability)
+                    .map(|spec| spec.risk)
+                    .ok_or_else(|| {
+                        protocol_error("not_found", format!("no capability {capability}"))
+                    })?;
+                // A rule for a call that never asks would do nothing, and an
+                // irreversible call is confirmed with identity every time.
+                match risk {
+                    RiskLevel::Reversible | RiskLevel::External => {}
+                    RiskLevel::ReadOnly => {
+                        return Err(protocol_error(
+                            "not_preauthorizable",
+                            format!("{capability} is read-only and never asks for confirmation"),
+                        ));
+                    }
+                    RiskLevel::Irreversible => {
+                        return Err(protocol_error(
+                            "not_preauthorizable",
+                            format!(
+                                "{capability} is irreversible; it is confirmed with the PIN every time"
+                            ),
+                        ));
+                    }
+                }
+                // A standing rule removes the human from later calls, so it
+                // takes the strongest proof of who is asking that exists.
+                if let Some(pins) = self.pins.as_ref().filter(|pins| pins.is_set()) {
+                    let Some(pin) = pin else {
+                        return Err(protocol_error(
+                            "identity_required",
+                            "a PIN is set; creating a pre-authorization needs it",
+                        ));
+                    };
+                    match pins.check(&pin) {
+                        PinCheck::Ok => {}
+                        other => return Err(protocol_error("identity_rejected", other.message())),
+                    }
+                }
+                let created = self
+                    .preauths
+                    .create(
+                        NewPreauthorization {
+                            subject: Subject::User,
+                            capability,
+                            args,
+                            other_args,
+                            expires_in_ms: expires_in_seconds
+                                .map(|seconds| seconds.saturating_mul(1_000)),
+                        },
+                        now_ms(),
+                    )
+                    .map_err(|error| match error.kind() {
+                        io::ErrorKind::InvalidInput => {
+                            protocol_error("invalid_argument", error.to_string())
+                        }
+                        _ => storage_error(error),
+                    })?;
+                self.audit
+                    .append(AuditEvent::PreauthorizationCreated {
+                        preauthorization: serde_json::to_value(&created)
+                            .expect("a pre-authorization is serializable"),
+                        by: format!("uid:{uid}"),
+                    })
+                    .map_err(|error| {
+                        // Never in force without a record of who allowed it.
+                        let _ = self.preauths.revoke(&created.id);
+                        protocol_error(
+                            "audit_unavailable",
+                            format!("the pre-authorization was not created: {error}"),
+                        )
+                    })?;
+                Ok(Reply::Preauthorized {
+                    preauthorization: created,
+                })
+            }
+            Command::Preauthorizations {} => Ok(Reply::Preauthorizations {
+                preauthorizations: self.preauths.active(now_ms()),
+            }),
+            Command::RevokePreauthorization { id } => {
+                let revoked = self
+                    .preauths
+                    .revoke(&id)
+                    .map_err(storage_error)?
+                    .ok_or_else(|| {
+                        protocol_error("not_found", format!("no pre-authorization {id}"))
+                    })?;
+                self.audit
+                    .append(AuditEvent::PreauthorizationRevoked {
+                        id: revoked.id.clone(),
+                        by: format!("uid:{uid}"),
+                    })
+                    .map_err(|error| {
+                        protocol_error(
+                            "audit_unavailable",
+                            format!("the pre-authorization was revoked, but audit failed: {error}"),
+                        )
+                    })?;
+                Ok(Reply::PreauthorizationRevoked { id: revoked.id })
             }
             Command::Capabilities {} => Ok(Reply::Capabilities {
                 capabilities: self.view().specs.clone(),

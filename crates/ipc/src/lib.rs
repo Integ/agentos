@@ -10,6 +10,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use agentos_core::{CapabilityName, CapabilitySpec};
+pub use agentos_policy::{ArgRule, Matcher, Preauthorization, Subject};
 use agentos_runtime::{StepState, Task, TaskId, TaskState};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,6 +42,10 @@ pub enum Command {
     Ping {},
     Submit {
         text: String,
+        /// The thread this intent continues, named by its first task. Absent
+        /// starts a new thread.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread: Option<TaskId>,
     },
     List {
         #[serde(default)]
@@ -48,6 +53,9 @@ pub enum Command {
         limit: usize,
         #[serde(default)]
         state: Option<TaskState>,
+        /// Only tasks of this thread.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread: Option<TaskId>,
     },
     Get {
         id: TaskId,
@@ -65,6 +73,34 @@ pub enum Command {
         /// the service and never stored, logged or echoed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pin: Option<String>,
+    },
+    /// Answer the question a task in `awaiting_input` is waiting on.
+    Reply {
+        id: TaskId,
+        /// Human-facing, one-based number of the step that asked.
+        step: usize,
+        text: String,
+    },
+    /// Give standing permission for calls of one capability whose arguments
+    /// satisfy every rule, so they stop asking. Only the user's own client
+    /// can do this; no agent and no capability can.
+    Preauthorize {
+        capability: CapabilityName,
+        #[serde(default)]
+        args: Vec<ArgRule>,
+        /// Accept arguments that no rule mentions. Off unless stated.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        other_args: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_in_seconds: Option<u64>,
+        /// Required when a PIN is set. Checked and never stored or logged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pin: Option<String>,
+    },
+    /// The pre-authorizations still in force.
+    Preauthorizations {},
+    RevokePreauthorization {
+        id: String,
     },
     Capabilities {},
     /// Query a granted read-only (L0) capability directly. A client reading
@@ -112,6 +148,9 @@ impl Response {
     }
 }
 
+// A response is built, written and dropped. Boxing the common case to shrink
+// the rare error would cost an allocation per reply and change nothing else.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResponseBody {
@@ -156,6 +195,21 @@ pub enum Reply {
         id: TaskId,
         step: usize,
     },
+    /// The answer was accepted for the task's current question. It does not
+    /// say what the task did with it.
+    ReplyQueued {
+        id: TaskId,
+        step: usize,
+    },
+    Preauthorized {
+        preauthorization: Preauthorization,
+    },
+    Preauthorizations {
+        preauthorizations: Vec<Preauthorization>,
+    },
+    PreauthorizationRevoked {
+        id: String,
+    },
     Watching {
         revision: u64,
     },
@@ -165,6 +219,10 @@ pub enum Reply {
 #[serde(deny_unknown_fields)]
 pub struct TaskSummary {
     pub id: TaskId,
+    /// The thread the task belongs to. Absent from older services, where
+    /// every task was its own thread.
+    #[serde(default)]
+    pub thread: TaskId,
     pub text: String,
     pub state: TaskState,
     pub completed_steps: usize,
@@ -177,6 +235,7 @@ impl From<&Task> for TaskSummary {
     fn from(task: &Task) -> Self {
         Self {
             id: task.id,
+            thread: task.thread,
             text: task.intent.text.chars().take(120).collect(),
             state: task.state,
             completed_steps: task

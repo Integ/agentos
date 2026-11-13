@@ -37,7 +37,7 @@ const state = {
   generatedScene: null, generatedKey: '',
 };
 const sceneLabels = { overview: ['01', '此刻'], focus: ['02', '专注空间'], memory: ['03', '记忆'], activity: ['04', '任务轨迹'], clock: ['05', '时间'], help: ['06', '能力'], task: ['04', '意图执行'], note: ['03', '记忆'] };
-const stateLabels = { queued: '等待执行', planning: '正在规划', running: '正在执行', succeeded: '已完成', unhandled: '没有听懂', failed: '执行失败', awaiting_confirmation: '等待你的批准', cancelled: '已取消', interrupted: '已中断', pending: '尚未开始', skipped: '未执行' };
+const stateLabels = { queued: '等待执行', planning: '正在规划', running: '正在执行', succeeded: '已完成', unhandled: '没有听懂', failed: '执行失败', awaiting_confirmation: '等待你的批准', awaiting_input: '等待你的回答', cancelled: '已取消', interrupted: '已中断', pending: '尚未开始', skipped: '未执行' };
 const terminalStates = new Set(['succeeded', 'unhandled', 'failed', 'cancelled', 'interrupted']);
 let orbFrame = 0;
 let orbResizeObserver = null;
@@ -48,6 +48,7 @@ let taskSelectionVersion = 0;
 let sceneRequestVersion = 0;
 let lastAnnouncedTask = '';
 let lastAnnouncedConfirmation = '';
+let lastAnnouncedQuestion = '';
 let canvasDirty = false;
 let layoutStatusInFlight = false;
 let viewportTimer;
@@ -204,7 +205,7 @@ function renderMemory(scene, withHeader = true) {
   const items = panel?.items || notes;
   return `${withHeader ? sceneHeader(scene) : ''}<div class="memory-toolbar"><span class="count-label">${String(items.length).padStart(2, '0')} 个念头 · ${state.connected ? '后台持久笔记' : '保存在这个浏览器'}</span><div><button class="text-button" data-intent="恢复笔记">恢复上次清空</button><button class="primary-button" id="new-note">${icon('spark')}记下灵感</button></div></div>${state.connected && !state.remoteNotesLoaded ? '<p class="system-mode-note">正在从后台读取笔记…</p>' : ''}<div class="notes-grid">${items.length ? items.map((text, i) => `<article class="note-card"><span class="note-index">THOUGHT ${String(i + 1).padStart(2, '0')}</span><p>${e(text)}</p><footer><span>${state.connected ? 'AgentOS · 持久记忆' : '本地 · 灵感'}</span>${state.connected ? icon('memory') : `<button data-delete-note="${e(state.notes[i]?.id)}" aria-label="删除第 ${i + 1} 条笔记">移除</button>`}</footer></article>`).join('') : `<div class="empty-state">${icon('memory')}<h3>给一个念头，留个位置。</h3><p>点击“记下灵感”，或者说“记一下 明天去散步”。<br>不需要文件夹，也不用给它取名字。</p></div>`}</div>${items.length ? '<div class="inline-note"><button class="text-button" data-intent="清空笔记">清空全部笔记（可恢复一次）</button></div>' : ''}`;
 }
-function statusIcon(task) { return icon(task.state === 'succeeded' ? 'check' : task.state === 'unhandled' ? 'question' : task.state === 'awaiting_confirmation' ? 'lock' : ['failed', 'cancelled', 'interrupted'].includes(task.state) ? 'close' : 'activity'); }
+function statusIcon(task) { return icon(task.state === 'succeeded' ? 'check' : task.state === 'unhandled' ? 'question' : task.state === 'awaiting_confirmation' ? 'lock' : task.state === 'awaiting_input' ? 'question' : ['failed', 'cancelled', 'interrupted'].includes(task.state) ? 'close' : 'activity'); }
 function renderTaskDetail(task) {
   if (!task) return `<div class="empty-state">${icon('orbit')}<h3>每个意图，都有来处。</h3><p>选择一条轨迹，查看它的执行过程。</p></div>`;
   const id = taskId(task);
@@ -212,7 +213,12 @@ function renderTaskDetail(task) {
   const noteResult = (task.steps || []).findLast(s => s.capability === 'notes.list' && s.state === 'succeeded' && Array.isArray(s.result?.notes));
   const confirmation = state.approval?.id === task.id && state.approval?.token === task.confirmation?.token && state.approval.expires_at_ms > Date.now() ? state.approval : null;
   const approval = task.state === 'awaiting_confirmation' ? `<section class="approval-panel"><h3>这一步，需要你的明确批准。</h3><p>请查看具体能力、参数和原因。批准仅针对这一任务的这一步。</p>${confirmation ? `<pre class="json-output">${e(JSON.stringify({ capability: task.steps?.[confirmation.step]?.capability, args: task.steps?.[confirmation.step]?.args, reason: task.message }, null, 2))}</pre>${confirmation.verify_identity ? '<p>这一步不可逆，需要输入 PIN 才能批准。PIN 只发给本机后台核对，不会保存。</p><label class="count-label" for="approve-pin">PIN</label> <input id="approve-pin" type="password" inputmode="numeric" autocomplete="off" maxlength="12">' : ''}<button class="primary-button" id="approve-task" data-task-id="${e(id)}">批准第 ${confirmation.step + 1} 步</button><p>批准请求将在 ${e(formatTime(new Date(confirmation.expires_at_ms)))} 过期。</p>` : '<button class="secondary-button" id="refresh-approval">读取并查看当前批准请求</button>'}</section>` : '';
-  return `<div class="detail-kicker">${e(id.toUpperCase())} <span> / ${e(stateLabels[task.state] || task.state)}</span></div><h2>${e(taskText(task))}</h2>${task.message ? `<p class="detail-message">${e(task.message)}</p>` : ''}${stepRows ? `<div class="steps">${stepRows}</div>` : ''}${noteResult ? `<div class="result-notes"><span class="eyebrow">返回的笔记</span>${noteResult.result.notes.length ? noteResult.result.notes.map(n => `<p>${e(n)}</p>`).join('') : '<p>笔记本是空的。</p>'}</div>` : ''}${approval}${state.connected && !terminalStates.has(task.state) ? `<div style="margin-top:20px"><button class="secondary-button" id="cancel-task" data-task-id="${e(id)}">停止后续步骤</button></div>` : ''}${task.local ? '<p class="inline-note">此操作在浏览器内完成，不属于后台任务。</p>' : ''}`;
+  const used = task.usage;
+  const usage = used?.model_calls > 0 ? `<p class="inline-note">用量：${e(used.model_calls)} 次模型请求 · 输入 ${e(used.input_tokens)} / 输出 ${e(used.output_tokens)} token · 执行 ${e(Math.floor((used.active_ms || 0) / 1000))} 秒${used.unmetered_calls > 0 ? `（其中 ${e(used.unmetered_calls)} 次没有报告用量，token 数只是下限）` : ''}</p>` : '';
+  // The question is the task's message, shown above; the answer goes to
+  // exactly this task and this step.
+  const question = task.state === 'awaiting_input' && task.question ? `<section class="approval-panel"><h3>它在等你的回答。</h3><p>不回答，这个任务就不会继续；你也可以停止它。</p><label class="count-label" for="reply-text">你的回答</label> <textarea id="reply-text" rows="3" maxlength="4000"></textarea><button class="primary-button" id="reply-task" data-task-id="${e(id)}" data-step="${e(task.question.step + 1)}">回答第 ${task.question.step + 1} 步的问题</button></section>` : '';
+  return `<div class="detail-kicker">${e(id.toUpperCase())} <span> / ${e(stateLabels[task.state] || task.state)}</span></div><h2>${e(taskText(task))}</h2>${task.message ? `<p class="detail-message">${e(task.message)}</p>` : ''}${stepRows ? `<div class="steps">${stepRows}</div>` : ''}${noteResult ? `<div class="result-notes"><span class="eyebrow">返回的笔记</span>${noteResult.result.notes.length ? noteResult.result.notes.map(n => `<p>${e(n)}</p>`).join('') : '<p>笔记本是空的。</p>'}</div>` : ''}${approval}${question}${usage}${state.connected && !terminalStates.has(task.state) ? `<div style="margin-top:20px"><button class="secondary-button" id="cancel-task" data-task-id="${e(id)}">停止后续步骤</button></div>` : ''}${task.local ? '<p class="inline-note">此操作在浏览器内完成，不属于后台任务。</p>' : ''}`;
 }
 function renderActivity(scene) {
   const tasks = currentTasks();
@@ -457,6 +463,10 @@ function processTask(task) {
     lastAnnouncedConfirmation = `${task.id}:${task.confirmation?.token}`;
     respond('计划已暂停。请在任务详情里查看并批准这一具体步骤。', true);
   }
+  else if (task.state === 'awaiting_input' && `${task.id}:${task.question?.step}` !== lastAnnouncedQuestion) {
+    lastAnnouncedQuestion = `${task.id}:${task.question?.step}`;
+    respond(`${task.question?.text || task.message || '我需要你补充一点信息。'} 请在任务详情里回答。`, true);
+  }
   else if (terminalStates.has(task.state) && `${task.id}:${task.state}` !== lastAnnouncedTask) {
     lastAnnouncedTask = `${task.id}:${task.state}`;
     // Not understood is neither done nor broken: say so plainly instead of
@@ -659,6 +669,7 @@ function voiceTaskFacts(task) {
   return { id: taskId(task), text: taskText(task).slice(0, 700), state: task.state,
     message: String(task.message || '').slice(0, 700),
     awaiting_confirmation: task.state === 'awaiting_confirmation',
+    awaiting_input: task.state === 'awaiting_input',
     steps: (task.steps || []).slice(0, 6).map(step => ({ capability: step.capability, state: step.state,
       ...(typeof step.result?.message === 'string' ? { message: step.result.message.slice(0, 700) } : {}),
       ...(Number.isFinite(step.result?.unix_ms) ? { unix_ms: step.result.unix_ms } : {}),
@@ -888,6 +899,13 @@ document.addEventListener('click', async event => {
       await api(`/tasks/${encodeURIComponent(button.dataset.taskId)}/approve`, { step: shown.step + 1, confirmation: shown.token, ...(shown.verify_identity ? { pin } : {}) });
       respond('这一具体步骤的批准已入队，后台会再次校验。'); await refreshTasks(); render();
     } catch (error) { state.approval = null; handleError(error); render(); } return;
+  }
+  if (button.id === 'reply-task') {
+    const input = $('#reply-text'); const text = input ? input.value.trim() : '';
+    if (!text) { toast('请先写下你的回答。'); input?.focus(); return; }
+    button.disabled = true;
+    // Sent once. If the question changed meanwhile the service refuses it.
+    try { await api(`/tasks/${encodeURIComponent(button.dataset.taskId)}/reply`, { step: Number(button.dataset.step), text }); respond('回答已交给后台，任务会接着进行。'); await refreshTasks(); render(); } catch (error) { handleError(error); render(); } return;
   }
   if (button.id === 'cancel-task') {
     button.disabled = true;

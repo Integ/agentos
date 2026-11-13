@@ -38,6 +38,7 @@ name = "agentos-ipc"
 version = "0.3.0"
 dependencies = [
  "agentos-core",
+ "agentos-policy",
  "agentos-runtime",
  "serde",
  "serde_json",
@@ -61,6 +62,7 @@ name = "agentos-policy"
 version = "0.3.0"
 dependencies = [
  "agentos-core",
+ "serde",
  "serde_json",
 ]
 

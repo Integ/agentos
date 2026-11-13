@@ -224,3 +224,18 @@ test('confirmation promotion keeps both task approval and the current space prim
   assert.equal(new Set(scene.panels.map(panel => panel.type)).size, 8);
   assert.deepEqual(scene.panels.map(panel => panel.priority), [1, 2, 3, 4, 5, 6, 7, 8]);
 });
+
+test('a task waiting for an answer keeps its question and cannot be hidden by a model scene', () => {
+  const task = { id: 9, intent: { text: '记一下开会的事' }, state: 'awaiting_input', message: '哪一天开会？',
+    question: { step: 0, text: '哪一天开会？' },
+    steps: [{ capability: 'ask.user', state: 'pending', args: { question: '哪一天开会？' }, result: null }] };
+  const normalized = normalizeTask(task);
+  assert.equal(normalized.state, 'awaiting_input');
+  assert.deepEqual(normalized.question, { step: 0, text: '哪一天开会？' });
+  assert.equal(normalizeTask({ ...task, question: { step: 'x', text: 1 } }).question, undefined);
+  const eightOtherTypes = ['welcome', 'insight', 'suggestions', 'notes', 'activity', 'clock', 'focus', 'capabilities'];
+  const full = bindModelScene(modelScene('overview', 'ambient', eightOtherTypes), { kind: 'overview', task });
+  assert.equal(full.panels[0].type, 'task');
+  assert.equal(full.panels[0].title, '等待你的回答');
+  assert.equal(full.panels.filter(panel => panel.type === 'task').length, 1);
+});

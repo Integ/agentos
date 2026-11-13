@@ -3,10 +3,22 @@
 
 use async_trait::async_trait;
 
+use crate::Usage;
+
 #[async_trait]
 pub trait TextModel: Send + Sync {
     /// One system prompt + one user message in, the model's text out.
     async fn complete(&self, system: &str, user: &str) -> Result<String, String>;
+
+    /// [`Self::complete`], with what the request consumed. `None` means the
+    /// implementation cannot tell, not that it cost nothing.
+    async fn complete_metered(
+        &self,
+        system: &str,
+        user: &str,
+    ) -> (Result<String, String>, Option<Usage>) {
+        (self.complete(system, user).await, None)
+    }
 }
 
 /// How a model client retries transient failures.

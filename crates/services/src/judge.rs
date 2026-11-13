@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use agentos_planner::llm::TextModel;
+use agentos_planner::Usage;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -38,6 +39,12 @@ pub struct Review<'a> {
 #[async_trait]
 pub trait Judge: Send + Sync {
     async fn review(&self, r: &Review<'_>) -> Result<Verdict, String>;
+
+    /// [`Self::review`], with what the model request behind it consumed.
+    /// `None` means no model was asked, or the judge cannot tell.
+    async fn review_metered(&self, r: &Review<'_>) -> (Result<Verdict, String>, Option<Usage>) {
+        (self.review(r).await, None)
+    }
 }
 
 const JUDGE_PROMPT: &str = "你是 AgentOS 的安全裁判。一个 Agent 正要执行一个已经通过权限检查、不会再问用户的操作。\
@@ -73,6 +80,10 @@ pub fn parse_verdict(text: &str) -> Verdict {
 #[async_trait]
 impl Judge for LlmJudge {
     async fn review(&self, r: &Review<'_>) -> Result<Verdict, String> {
+        self.review_metered(r).await.0
+    }
+
+    async fn review_metered(&self, r: &Review<'_>) -> (Result<Verdict, String>, Option<Usage>) {
         let user = format!(
             "Agent：{}\n任务：{}\n操作：{}（{}，风险 {:?}）\n参数：{}\n上下文含不可信的外部内容：{}",
             r.agent,
@@ -83,8 +94,8 @@ impl Judge for LlmJudge {
             r.args,
             if r.tainted { "是" } else { "否" }
         );
-        let out = self.model.complete(JUDGE_PROMPT, &user).await?;
-        Ok(parse_verdict(&out))
+        let (out, usage) = self.model.complete_metered(JUDGE_PROMPT, &user).await;
+        (out.map(|text| parse_verdict(&text)), usage)
     }
 }
 
