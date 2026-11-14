@@ -1,12 +1,10 @@
 # MCP 工具
 
-> **在任务服务上。** `agentos-taskd` 读取状态目录里的 `mcp.json`（默认 `~/.local/state/agentos/mcp.json`），格式和行为与下文相同；修改后重启 `agentos-taskd`。下文的数据目录指旧的 `agentosd`。
-
 任何通过 stdio 通信的 [MCP](https://modelcontextprotocol.io) server 都可以把自己的工具借给管家。每个工具注册成一个能力，名字是 `mcp.<server>.<工具>`，和其他能力一样经过策略引擎、审计和确认。
 
 ## 配置
 
-在数据目录（默认 `~/.local/share/agentos`，装机镜像里是 agent 用户的同一位置）放一个 `mcp.json`，格式和 Claude Desktop 的 `mcpServers` 相同，另外可以加 AgentOS 自己的风险设置：
+在任务服务的状态目录（默认 `~/.local/state/agentos`，装机镜像里是 agent 用户的同一位置）放一个 `mcp.json`，格式和 Claude Desktop 的 `mcpServers` 相同，另外可以加 AgentOS 自己的风险设置：
 
 ```json
 {
@@ -27,7 +25,7 @@
 }
 ```
 
-重启 agentosd 后，控制台会显示每个 server 注册了几个工具。
+重启任务服务（`systemctl --user restart agentos-taskd`）后，它的日志（`journalctl --user -u agentos-taskd`）会显示每个 server 注册了几个工具。
 
 | 字段 | 含义 |
 | --- | --- |
@@ -83,4 +81,4 @@ agentos caller remove desk-helper
 
 - 只支持 stdio 传输，暂不支持 HTTP/SSE 远程 server。
 - 只用到工具（tools）；资源（resources）、提示（prompts）和 server 向客户端发起的请求（sampling 等）暂不支持。
-- server 退出后不会自动重启，重启 agentosd 即可。
+- server 退出后不会自动重启，重启 `agentos-taskd` 即可。

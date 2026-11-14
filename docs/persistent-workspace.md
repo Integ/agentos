@@ -1,6 +1,6 @@
 # AgentOS
 
-本文介绍任务内核 `agentos-taskd` 以及它的客户端：`agentos` CLI、`agentos-web-shell` 和原生桌面 `agentos-shell --taskd`。多轮规划、子 Agent、黑板、MCP、插件、智能家居和 PIN 都由这个服务提供。旧的 `agentosd` 只为本机语音和现有镜像保留，使用另一个状态目录，参见[架构](architecture.md#尚未合并的部分)。
+本文介绍任务内核 `agentos-taskd` 以及它的客户端：`agentos` CLI、`agentos-web-shell` 和原生桌面 `agentos-shell`。多轮规划、子 Agent、黑板、MCP、插件、智能家居、PIN、按住说话和朗读都由这个服务提供；它是唯一的守护进程，见[架构](architecture.md)。
 
 AgentOS 探索以人的意图为入口、以 Agent 为执行者的操作系统：人交付目标，系统协调模型、能力、设备和权限，并持续解释执行状态。目标架构是 **Linux 内核 + Rust 用户态 Agent OS 层**；当前是可运行的单用户本地任务服务。
 
@@ -23,7 +23,9 @@ systemctl --user status agentos-taskd     # 服务状态
 journalctl --user -u agentos-taskd        # 服务日志
 ```
 
-修改 `agentos.env` 后用 `systemctl --user restart agentos-taskd` 生效。设置助理里设置的 PIN 同时用于 `agentosd` 和任务服务。图形桌面默认仍连接 `agentosd`；加一行 `AGENTOS_DESKTOP=taskd` 并重新登录，桌面改为连接任务服务（暂时没有按住说话的语音）。`agentos-web-shell` 不会自动启动。
+修改 `agentos.env` 后用 `systemctl --user restart agentos-taskd` 生效。设置助理里设置的 PIN 就是任务服务的 PIN。图形桌面和文本模式都连接这个服务。`agentos-web-shell` 不会自动启动。
+
+从带 `agentosd` 的旧版本升级上来时，任务服务第一次启动会把 `~/.local/share/agentos` 里的笔记、PIN、插件、黑板、`mcp.json` 和自定义子 Agent 迁到 `~/.local/state/agentos`：已有的不覆盖，旧目录不改动，做了什么写在 `~/.local/state/agentos/.migrated-from-agentosd` 里，也会出现在服务日志里。
 
 ## 快速体验
 
@@ -211,4 +213,4 @@ node --test crates/web-shell/assets/*.test.mjs
 
 测试覆盖持久化、快照迁移、取消竞态、批准与撤权、审计故障、协议帧限制、真实 Unix socket 交互和客户端断线行为。CI 配置 Linux/macOS 检查及 Rust 1.88 最低版本编译。
 
-当前为单用户的用户态服务，任务并行执行，能力仍在守护进程内运行（插件在沙箱里）。完整的结构与尚未合并的部分见[架构](architecture.md)。
+当前为单用户的用户态服务，任务并行执行，能力仍在守护进程内运行（插件在沙箱里）。完整的结构见[架构](architecture.md)。

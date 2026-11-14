@@ -15,7 +15,7 @@ node --test crates/web-shell/assets/*.test.mjs
 
 - 最低 Rust 版本是 1.88，CI 会用它编译；不要用更新版本才有的标准库 API。
 - 改了依赖要提交 `Cargo.lock`，CI 用 `--locked`。
-- `agentos-services` 里插件沙箱的测试，以及 `agentosd` 的 `evolution_flow`，需要 Linux 和 bubblewrap。在 macOS 上有 9 个测试会因为无法启动插件而失败，这是环境原因；其余测试必须通过。
+- `agentos-services` 里插件沙箱的测试需要 Linux 和 bubblewrap。在 macOS 上有 7 个测试会因为无法启动插件而失败，这是环境原因；其余测试必须通过。
 - `agentos-shell` 在 Linux 上需要 `libwebkit2gtk-4.1-dev` 和 `libgtk-3-dev`。
 - 用临时状态目录运行，不要动 `~/.local/state/agentos`：`cargo run -p agentos-taskd -- --planner rule --state-dir /tmp/agentos-dev`。自定义 socket 的父目录必须归自己所有且不可被他人写入。
 - 运行守护进程前确认环境里没有不想用的 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`；有密钥时会自动选用模型规划器并发起真实请求。
@@ -31,8 +31,9 @@ node --test crates/web-shell/assets/*.test.mjs
 | 管家循环：规划、策略、委派、批准 | `crates/taskd/src/butler.rs` |
 | 审计事件 | `crates/audit/` |
 | 终端、浏览器、原生桌面 | `crates/cli/`、`crates/web-shell/`、`crates/shell/` |
+| 按住说话、朗读、崩溃报告、旧数据迁移 | `crates/taskd/src/voice.rs`、`crash.rs`、`migrate.rs` |
 
-`crates/agentosd/` 是过渡期保留的旧守护进程，只为本机语音和现有镜像而存在。不要在它上面加功能；它的管家循环和 socket 协议是待删除的重复。
+只有一个守护进程 `agentos-taskd`。旧的 `agentosd` 已删除；镜像里的 `image/rootfs/usr/local/bin/agentosd` 只是给 v0.4 及更早版本的 `agentos-update` 自检用的垫片，不要往里加功能，下一个版本删除它。
 
 ## 不能破坏的约定
 
@@ -44,7 +45,7 @@ node --test crates/web-shell/assets/*.test.mjs
 - **先落盘再执行。** 能力调用前，审计的开始标记和任务的运行状态都必须已经持久化；持久化失败就停止，不继续执行。
 - **审计日志只追加。** 不改写、不删除；新事件加到 `AuditEvent` 里，旧记录必须还能读。
 - **协议严格。** 请求里的未知字段一律拒绝。新增字段要有默认值，新增状态和方法要写进协议文档的兼容性说明。
-- **一份实现。** 两个守护进程都需要的东西放进共享 crate，不要复制文件。
+- **一份实现。** 几个程序都需要的东西（协议、审计、规划器、能力）放进共享 crate，不要复制文件。
 
 ## 写法
 

@@ -12,32 +12,17 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 截至 2026-11-13：
 
-- **版本**：`main` 分支是 v0.4.0，内容见[更新日志](CHANGELOG.md)。v0.3.0 和 v0.4.0 都还没有打 tag、没有发布镜像；最新发布版是 **v0.2.2**（2026-11-02），[Releases](https://github.com/Integ/agentos/releases) 里的镜像是这一版。
-- **一个任务内核**：任务内核是 `agentos-taskd`（从 v0.4.0 起进入镜像和更新包，随登录启动）：持久任务、多轮规划、子 Agent、黑板、MCP、插件、智能家居、PIN 和哈希链审计都在这一个服务里，终端、Web Shell 和原生桌面都通过同一个协议连接它。图形桌面默认仍连接旧的 `agentosd`，因为按住说话的本机语音还没有迁过来；见[架构](docs/architecture.md#尚未合并的部分)。给写代码的 Agent 的说明在 [AGENTS.md](AGENTS.md)。
-
-两个守护进程现在共用规划器、审计日志和各项能力的代码，区别只剩下面这些：
-
-| | `agentos-taskd`（任务内核） | `agentosd`（过渡期保留） |
-| --- | --- | --- |
-| 定位 | 新功能加在这里 | 待删除，不再加新功能 |
-| 界面 | `agentos` 命令与终端工作台、`agentos mcp`、Web Shell、原生桌面（`agentos-shell --taskd`，镜像里设 `AGENTOS_DESKTOP=taskd`） | 原生桌面（默认方式）、控制台 |
-| 只有它有 | 协议 v1、分页历史、变更通知、只读能力的直接查询；并行执行、会话线程、Agent 提问、用量与预算、预授权、作为 MCP server | 按住说话的本机语音、崩溃后在桌面上的提示 |
-| 重启后 | 未完成的任务标为“已中断”，不自动重做 | 从检查点接着做 |
-| L3 操作 | 设置 PIN 后等待批准，批准必须带 PIN；没有设置 PIN 时拒绝 | 你确认后执行；设置 PIN 后还要输入 PIN |
-| 语音 | Web Shell 的 WebRTC 实时对话，音频发给模型服务 | 按住说话 + 朗读，云端或本机后端 |
-| 怎么得到 | 镜像里作为桌面用户的服务随登录启动，用 `agentos` 命令连接，可在线更新 | 镜像里随图形桌面启动，可在线更新 |
-| 状态目录 | `~/.local/state/agentos` | `~/.local/share/agentos` |
-
-两个状态目录之间没有数据迁移。
+- **版本**：`main` 分支是 v0.4.0 加上尚未发布的合并（见[更新日志](CHANGELOG.md)的“未发布”）。v0.3.0 和 v0.4.0 都还没有打 tag、没有发布镜像；最新发布版是 **v0.2.2**（2026-11-02），[Releases](https://github.com/Integ/agentos/releases) 里的镜像是这一版。
+- **一个任务内核**：`agentos-taskd` 是唯一的后台服务：持久任务、多轮规划、子 Agent、黑板、MCP、插件、智能家居、PIN、哈希链审计、按住说话和朗读都在这里。镜像里它作为桌面用户的服务随登录启动；图形桌面 `agentos-shell`、终端工作台 `agentos`、Web Shell 和 `agentos mcp` 都通过同一个协议连接它。旧的 `agentosd` 已删除，它在 `~/.local/share/agentos` 里的笔记、PIN、插件、黑板和配置会在任务服务第一次启动时迁到 `~/.local/state/agentos`；见[架构](docs/architecture.md)。给写代码的 Agent 的说明在 [AGENTS.md](AGENTS.md)。
 
 - **CI 覆盖**：Ubuntu 上的格式、Clippy、全部测试和在线更新模拟测试；macOS 和 Rust 1.88 上任务内核一侧的测试；Web Shell 的前端测试；cargo-deny。
 - **还没有验证**：
-  - 任务服务一侧（合并时列出）：`agentos-shell --taskd` 的窗口界面没有实际打开看过；OpenAI 兼容接口在任务服务上跑过一轮真实请求（线程、提问、取消、用量、外部调用方），Claude 接口、裁判、真实的 MCP 客户端和 server、Home Assistant 没有；v0.4.0 新增的提问面板和用量显示在 Web Shell 和原生桌面上没有实际操作过；合并后没有跑镜像构建和 QEMU 冒烟测试。
+  - 合并 `agentosd` 之后（v0.5 前列出）：任务服务上的按住说话和朗读只用脚本化的录音、识别和播放命令测过，没有接真实麦克风、扬声器和语音接口；桌面窗口没有实际打开看过；从 v0.4.0 在线升级只在模拟的安装根目录里测过；没有跑镜像构建和 QEMU 冒烟测试。
+  - 任务服务一侧（v0.4 合并时列出）：OpenAI 兼容接口在任务服务上跑过一轮真实请求（线程、提问、取消、用量、外部调用方），Claude 接口、裁判、真实的 MCP 客户端和 server、Home Assistant 没有；v0.4.0 新增的提问面板和用量显示在 Web Shell 和原生桌面上没有实际操作过；合并后没有跑镜像构建和 QEMU 冒烟测试。
   - 真机（v0.2.0 发布时列出，之后没有更新过）：Caps Lock 按键说话和指示灯、真实麦克风和扬声器；真实的 Home Assistant 和 MCP 服务器；从一个发布版本在线升级到下一个发布版本。v0.2.2 的修复来自 Intel N100 小主机和笔记本上的真机测试。
 
 已知缺口：
 
-- 合并还差最后一步：把本机语音和崩溃提示迁到任务服务，把桌面默认切到 `agentos-shell --taskd`，迁移数据，然后删除 `agentosd`。在那之前两个守护进程同时运行，笔记、插件和黑板各有一份。见[架构](docs/architecture.md#尚未合并的部分)。
 - 调用没有超时：不可中止的调用挂住时会一直占着一个执行名额。除插件在 bubblewrap 沙箱里以外，能力与服务同进程运行，没有进程隔离。见[架构](docs/architecture.md#其他边界)。
 - 没有本机唤醒词，没有定时任务（见 [docs/agents.md](docs/agents.md#尚未实现)）。
 - Web Shell 是浏览器里的本地界面，不是桌面合成器；实时语音会把音频发给模型服务，不是全本地语音。
@@ -45,7 +30,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 ## 现在能做什么
 
-- **管家 Agent + 子 Agent**：用自然语言下达意图，管家拆解任务、派给子 Agent；任务即进程，每一步写检查点，守护进程重启后接着做；子 Agent 通过共享黑板协作，可选模型裁判在有影响的步骤前复核。见 [docs/agents.md](docs/agents.md)。
+- **管家 Agent + 子 Agent**：用自然语言下达意图，管家拆解任务、派给子 Agent；任务持久保存，同时可以做几件事，重启后未完成的任务如实标为“已中断”，不会自动重做可能已经生效的步骤；子 Agent 通过共享黑板协作，可选模型裁判在有影响的步骤前复核。见 [docs/agents.md](docs/agents.md)。
 - **云端大模型规划**：Claude（默认 `claude-opus-5-5`）或任意 OpenAI 兼容接口（OpenAI、DeepSeek、通义千问、Ollama 等）；也有离线规则规划器。限流和 5xx 自动重试。
 - **玻璃风格桌面**：WebKit 写的 `agentos-shell`，带玻璃风格终端和确认弹窗。见 [docs/shell.md](docs/shell.md)。
 - **图形设置助理**：首次进入桌面时出现 Liquid Glass 风格的设置助理，一页一件事：Wi‑Fi、模型接口（带 DeepSeek/通义千问/Ollama 预设）、语音、Home Assistant（可当场测试连接）、PIN、安装到硬盘。系统菜单「网络和 AI 设置…」可随时重新打开。见 [docs/shell.md](docs/shell.md#设置助理)。
@@ -56,7 +41,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 - **安全模型**：能力令牌 + 风险分级确认（L0–L3）；污点追踪（网络插件、MCP 输出会让后续有影响的操作都要确认）；L3 操作可要求 PIN；审计日志带 SHA-256 哈希链，可校验；插件有 bubblewrap 沙箱和资源上限（内存 1 GiB、CPU 10 秒等）。
 - **持久任务与多个界面（v0.3）**：`agentos-taskd` 把任务放在后台服务里，命令行、终端工作台、浏览器和原生桌面通过同一个 Unix socket 协议连接；关掉界面任务照常进行，历史可分页，变更实时通知，批准绑定到具体任务的具体步骤。见 [docs/persistent-workspace.md](docs/persistent-workspace.md)。
 - **情景式 Web Shell（v0.3）**：语音优先的浏览器界面，模型根据真实任务和笔记组织画面（只能选组件、顺序和宽度）；WebRTC 实时语音可连续对话、开口打断，但语音不能代替批准。见 [docs/ambient-shell.md](docs/ambient-shell.md)。
-- **稳健性与运维**：守护进程崩溃时写入 journal 和 `crash.txt`、退避重启，并在桌面「最近活动」里提示；journal 跨重启保留；`sudo agentos-update` 在线更新，先自检再替换，可回滚。
+- **稳健性与运维**：任务服务崩溃时写入 journal 和 `crash.txt`、由用户服务退避重启，并在桌面「最近活动」里提示；journal 跨重启保留；`sudo agentos-update` 在线更新，先自检再替换，可回滚。
 
 更多文档：
 
@@ -101,7 +86,6 @@ crates/
   cli/       agentos 命令与终端任务工作台
   web-shell/ 浏览器界面 agentos-web-shell：情景布局与连续实时语音
   shell/     原生桌面 agentos-shell：玻璃风格桌面与设置助理
-  agentosd/  过渡期保留的旧守护进程（本机语音、现有镜像）
 image/       可启动磁盘镜像：构建脚本、系统集成文件（设置助理、会话脚本、agentos-update）、OTA 更新包、QEMU 冒烟测试
 docs/        各部分的文档；docs/media/intro-video/ 是介绍视频的源文件
 ```
@@ -110,27 +94,29 @@ docs/        各部分的文档；docs/media/intro-video/ 是介绍视频的源�
 
 需要 Rust 1.88+。
 
+在两个终端里分别启动任务服务和终端工作台（同一个临时状态目录，不动 `~/.local/state/agentos`）：
+
 ```sh
-cargo run -p agentosd
+cargo run -p agentos-taskd -- --planner rule --state-dir /tmp/agentos-dev
+cargo run -p agentos-cli -- --state-dir /tmp/agentos-dev workbench
 ```
 
-各程序都支持 `--help` 和 `--version`（例如 `cargo run -p agentosd -- --help`），写错的参数会报错退出，而不是被忽略。
+各程序都支持 `--help` 和 `--version`（例如 `cargo run -p agentos-taskd -- --help`），写错的参数会报错退出，而不是被忽略。
 
-然后输入意图，例如：
+然后在工作台里输入意图，例如：
 
 ```
 记一下 买牛奶
 看看笔记
 现在几点
-清空笔记      # L3 不可逆操作，会先请求确认
-y
+清空笔记      # 可恢复的操作，说“恢复笔记”可以撤销
 ```
 
 ### 图形界面
 
 ```sh
-cargo run -p agentosd -- --listen $XDG_RUNTIME_DIR/agentos.sock
-cargo run -p agentos-shell -- --windowed   # 需要 libwebkit2gtk-4.1-dev
+cargo run -p agentos-taskd -- --state-dir /tmp/agentos-dev
+cargo run -p agentos-shell -- --windowed --task-socket /tmp/agentos-dev/control.sock   # 需要 libwebkit2gtk-4.1-dev
 ```
 
 ![AgentOS 桌面](docs/images/shell-desktop.jpg)
@@ -151,16 +137,16 @@ cargo run -p agentos-cli -- --state-dir /tmp/agentos-workspace workbench
 
 ![情景式 Web Shell](docs/images/web-shell.jpg)
 
-任务服务提供全部能力：把 `mcp.json`、`agents/` 放进状态目录，设置 `HASS_URL` / `HASS_TOKEN`，运行 `agentos-taskd --set-pin` 设置 PIN。原生桌面用 `cargo run -p agentos-shell -- --windowed --task-socket /tmp/agentos-workspace/control.sock` 连接同一个服务。它与旧的 `agentosd` 使用不同的状态目录，数据不互相迁移。命令行用法、状态目录和批准规则见 [docs/persistent-workspace.md](docs/persistent-workspace.md)。
+任务服务提供全部能力：把 `mcp.json`、`agents/` 放进状态目录，设置 `HASS_URL` / `HASS_TOKEN`，运行 `agentos-taskd --set-pin` 设置 PIN。原生桌面用 `cargo run -p agentos-shell -- --windowed --task-socket /tmp/agentos-workspace/control.sock` 连接同一个服务。命令行用法、状态目录和批准规则见 [docs/persistent-workspace.md](docs/persistent-workspace.md)。
 
 ### 用 Claude 做规划
 
-设置 `ANTHROPIC_API_KEY` 后，`agentosd` 自动改用 Claude 规划器（默认模型 `claude-opus-5-5`）：每个意图调用一次 Messages API，所有能力作为工具提供，模型返回的工具调用按顺序成为计划步骤，仍然逐步经过策略引擎。
+设置 `ANTHROPIC_API_KEY` 后，`agentos-taskd` 自动改用 Claude 规划器（默认模型 `claude-opus-5-5`）：每个意图调用一次 Messages API，所有能力作为工具提供，模型返回的工具调用按顺序成为计划步骤，仍然逐步经过策略引擎。
 
 ```sh
 export ANTHROPIC_API_KEY=...
-cargo run -p agentosd                    # 自动使用 Claude
-cargo run -p agentosd -- --planner rule  # 强制使用离线规则规划器
+cargo run -p agentos-taskd -- --state-dir /tmp/agentos-dev                  # 自动使用 Claude
+cargo run -p agentos-taskd -- --state-dir /tmp/agentos-dev --planner rule  # 强制使用离线规则规划器
 ```
 
 可选环境变量：`AGENTOS_MODEL`（换模型）、`ANTHROPIC_BASE_URL`（换 API 地址）。
@@ -174,29 +160,29 @@ cargo run -p agentosd -- --planner rule  # 强制使用离线规则规划器
 export OPENAI_API_KEY=...
 export OPENAI_BASE_URL=https://api.deepseek.com/v1   # 不设则为 https://api.openai.com/v1
 export OPENAI_MODEL=deepseek-chat
-cargo run -p agentosd -- --planner openai
+cargo run -p agentos-taskd -- --state-dir /tmp/agentos-dev --planner openai
 
 # 本地 Ollama（不需要 key）
-OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_MODEL=qwen3 cargo run -p agentosd
+OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_MODEL=qwen3 cargo run -p agentos-taskd -- --state-dir /tmp/agentos-dev
 ```
 
 规划器选择：`--planner claude|openai|rule`（或环境变量 `AGENTOS_PLANNER`）。不指定时，设置了 `ANTHROPIC_API_KEY` 就用 Claude，否则配置了 OpenAI 兼容接口就用它，都没有则用离线规则规划器。
 
 ### 自我进化
 
-配置了大模型（Claude 或 OpenAI 兼容接口）后，可以让 AgentOS 给自己写新能力：
+配置了大模型（Claude 或 OpenAI 兼容接口）后，可以在工作台或桌面里让 AgentOS 给自己写新能力：
 
 ```
 学会：把摄氏度换算成华氏度   # 生成插件、沙箱自测，展示代码和权限
-y                             # 确认安装（L3）
+                              # 安装是 L3：在桌面上确认并输入 PIN，或 agentos approve … --pin-stdin
 37 摄氏度是多少华氏度          # 新能力立即可用（需要 LLM 规划器）
 看看插件
 回滚 unit.c_to_f
 ```
 
-插件在 bubblewrap 沙箱中运行（`apt install bubblewrap python3`），存放在 `~/.local/share/agentos/evolve`（`--home` 或 `AGENTOS_HOME` 可改）。详见 [docs/self-evolution.md](docs/self-evolution.md)。
+插件在 bubblewrap 沙箱中运行（`apt install bubblewrap python3`），存放在状态目录的 `evolve/`。详见 [docs/self-evolution.md](docs/self-evolution.md)。
 
-数据目录默认是 `~/.local/share/agentos`（`--home` 或 `AGENTOS_HOME` 可改），笔记保存在其中的 `notes.json`，重启后还在。审计日志默认写到数据目录里的 `audit.jsonl`，可用 `--audit <路径>` 或环境变量 `AGENTOS_AUDIT` 指定。每条记录都带上一条的 SHA-256（哈希链），`agentosd --verify-audit` 可以检查中间有没有记录被改过、删过或插入过；想防止整段重写或截掉末尾，可以把它输出的“链头”另外记下来。
+状态目录默认是 `~/.local/state/agentos`（`--state-dir` 或 `AGENTOS_STATE_DIR` 可改），笔记保存在其中的 `notes.json`，重启后还在。审计日志默认写到状态目录里的 `audit.jsonl`，可用 `--audit <路径>` 或环境变量 `AGENTOS_TASK_AUDIT` 指定。每条记录都带上一条的 SHA-256（哈希链），`agentos-taskd --verify-audit` 可以检查中间有没有记录被改过、删过或插入过；想防止整段重写或截掉末尾，可以把它输出的“链头”另外记下来。
 
 ### 智能家居
 
@@ -204,18 +190,18 @@ y                             # 确认安装（L3）
 
 ### MCP 工具
 
-在数据目录放一个 `mcp.json`（格式同 Claude Desktop 的 `mcpServers`），MCP server 的工具就会成为管家的能力。没有特别设置时，每次调用都要确认，结果也当作不可信。详见 [docs/mcp.md](docs/mcp.md)。
+在状态目录放一个 `mcp.json`（格式同 Claude Desktop 的 `mcpServers`），MCP server 的工具就会成为管家的能力。没有特别设置时，每次调用都要确认，结果也当作不可信。详见 [docs/mcp.md](docs/mcp.md)。
 
 ### 不可逆操作的 PIN
 
-L3 操作（删除数据、安装插件等）默认只要点“确认执行”。设置 PIN 后，确认框会要求输入 PIN，键盘回复 y 或语音“确认”都不能单独通过：
+L3 操作（删除数据、安装插件等）没有设置 PIN 时一律拒绝。设置 PIN 后，这类步骤会等你批准，批准时必须输入 PIN；说话永远不能批准：
 
 ```bash
-agentosd --set-pin      # 输入两次 4–12 位数字
-agentosd --clear-pin    # 取消
+agentos-taskd --set-pin      # 输入两次 4–12 位数字
+agentos-taskd --clear-pin    # 取消
 ```
 
-装机镜像的设置助理里也有设置 PIN 这一步。PIN 以加盐迭代哈希存在数据目录的 `pin.json`（0600），连续输错 5 次锁定 5 分钟，每次核对都记入审计日志（不含 PIN 本身）。控制台模式下先输入 `pin 你的PIN` 再回复 y。它能挡住提示注入、旁人和随手乱试，但挡不住已经能以桌面用户身份运行代码的人。
+装机镜像的设置助理里也有设置 PIN 这一步。PIN 以加盐迭代哈希存在状态目录的 `pin.json`（0600），连续输错 5 次锁定 5 分钟，每次核对都记入审计日志（不含 PIN 本身）。在终端里用 `agentos approve task-N 步骤 --confirmation 令牌 --pin-stdin` 批准。它能挡住提示注入、旁人和随手乱试，但挡不住已经能以桌面用户身份运行代码的人。
 
 ## 开发
 

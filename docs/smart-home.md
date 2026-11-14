@@ -7,7 +7,7 @@ AgentOS 通过 [Home Assistant](https://www.home-assistant.io/) 控制家里的�
 ## 配置
 
 1. 在 HA 里打开 **个人资料 → 安全 → 长期访问令牌**，创建一个令牌。建议给 AgentOS 单独建一个 HA 用户。
-2. 装机镜像：在设置助理（首次开机，或系统菜单里的「网络和 AI 设置…」）的“智能家居”一步填入地址和令牌，点“测试连接”确认能连上。其他环境设置这两个变量（镜像里写在 `/etc/agentos/agentos.env`，然后 `pkill -x agentosd` 让它重新加载）：
+2. 装机镜像：在设置助理（首次开机，或系统菜单里的「网络和 AI 设置…」）的“智能家居”一步填入地址和令牌，点“测试连接”确认能连上。其他环境设置这两个变量（镜像里写在 `/etc/agentos/agentos.env`，然后 `systemctl --user restart agentos-taskd` 让它重新加载）：
 
 ```bash
 HASS_URL=http://homeassistant.local:8123
