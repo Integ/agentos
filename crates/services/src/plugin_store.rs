@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use agentos_core::durable::{sync_dir, write_atomic};
 use agentos_core::{now_ms, Capability, CapabilityName, RiskLevel};
 use serde::Serialize;
 use serde_json::Value;
@@ -83,12 +84,6 @@ pub const RESERVED_NAMESPACES: &[&str] = &["evolve", "system", "policy", "audit"
 
 fn invalid(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, msg.into())
-}
-
-fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, contents)?;
-    std::fs::rename(tmp, path)
 }
 
 impl PluginManager {
@@ -362,12 +357,18 @@ impl PluginManager {
         let tmp = vdir.with_extension("partial");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp)?;
-        std::fs::write(
-            tmp.join("manifest.json"),
-            serde_json::to_vec_pretty(&draft.manifest).map_err(io::Error::other)?,
+        write_atomic(
+            &tmp.join("manifest.json"),
+            &serde_json::to_vec_pretty(&draft.manifest).map_err(io::Error::other)?,
         )?;
-        std::fs::write(tmp.join(entry), &draft.source)?;
+        write_atomic(&tmp.join(entry), draft.source.as_bytes())?;
         std::fs::rename(&tmp, &vdir)?;
+        // `current` must never point at a version the disk may not have kept:
+        // make the new version directory, and the plugin's own directory on a
+        // first install, durable before switching to it.
+        let versions = vdir.parent().unwrap_or(&vdir);
+        sync_dir(versions)?;
+        sync_dir(&self.root.join("plugins"))?;
         self.set_current(&name, Some(version))?;
         Ok(InstallReport {
             name: draft.manifest.name.clone(),
@@ -494,6 +495,36 @@ mod tests {
         let info = pm.list();
         assert_eq!(info[0].versions, vec![1, 2]);
         assert_eq!(info[0].current, None);
+        let _ = std::fs::remove_dir_all(pm.root());
+    }
+
+    #[test]
+    fn an_installed_version_is_complete_and_leaves_no_temporary_files() {
+        // Guards the crash-safety of install: `current` only ever names a
+        // fully written version, and nothing half-written stays around for
+        // the next start to read.
+        let pm = pm("store-durable");
+        let id = pm.stage(draft("hi.say", "你好"));
+        assert_eq!(pm.install(&id).unwrap().version, 1);
+
+        let dir = pm.root().join("plugins").join("hi.say");
+        let listing = |path: &Path| {
+            let mut names: Vec<String> = std::fs::read_dir(path)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(listing(&dir), vec!["current", "versions"]);
+        assert_eq!(listing(&dir.join("versions")), vec!["1"]);
+        assert_eq!(
+            listing(&dir.join("versions").join("1")),
+            vec!["main.sh", "manifest.json"]
+        );
+        let (version, read_back) = pm.active_draft("hi.say").unwrap();
+        assert_eq!(version, 1);
+        assert_eq!(read_back.source, draft("hi.say", "你好").source);
         let _ = std::fs::remove_dir_all(pm.root());
     }
 

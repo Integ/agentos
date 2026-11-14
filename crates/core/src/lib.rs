@@ -7,6 +7,8 @@
 //! - [`Expression`]: something an agent wants to tell the human; the expression hub
 //!   decides which [`Output`] device delivers it.
 
+pub mod durable;
+
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 

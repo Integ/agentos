@@ -159,8 +159,6 @@ impl PinVault {
 
     /// Set (or replace) the PIN.
     pub fn set(&self, pin: &str) -> std::io::Result<()> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         if !valid_pin(pin) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -176,16 +174,10 @@ impl PinVault {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = self.path.with_extension("json.tmp");
-        let _ = std::fs::remove_file(&tmp);
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        f.write_all(&serde_json::to_vec(&record).map_err(std::io::Error::other)?)?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, &self.path)?;
+        agentos_core::durable::write_atomic(
+            &self.path,
+            &serde_json::to_vec(&record).map_err(std::io::Error::other)?,
+        )?;
         let mut s = self.lock();
         s.record = Some(record);
         s.failures = 0;

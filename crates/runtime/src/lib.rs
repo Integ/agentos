@@ -11,7 +11,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use agentos_core::{now_ms, AgentId, CapabilityName, Intent, IntentId};
@@ -31,7 +30,6 @@ const COMPACT_AFTER: usize = 1024;
 // Small in tests, so that ordinary tests also cross folds.
 #[cfg(test)]
 const COMPACT_AFTER: usize = 4;
-static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
@@ -932,7 +930,7 @@ fn reset_journal(directory: &Path) -> io::Result<()> {
         options.mode(0o600);
     }
     options.open(directory.join(JOURNAL_FILE))?.sync_all()?;
-    File::open(directory)?.sync_all()
+    agentos_core::durable::sync_dir(directory)
 }
 
 /// Atomically replace the snapshot with `state`. Callers validate first.
@@ -943,35 +941,9 @@ fn persist(directory: &Path, state: &State) -> io::Result<()> {
         revision: state.revision,
         tasks: state.tasks.values().collect(),
     };
-    let bytes = serde_json::to_vec_pretty(&snapshot).map_err(invalid_data)?;
-    let temporary = directory.join(format!(
-        ".tasks-{}-{}-{}.tmp",
-        std::process::id(),
-        now_ms(),
-        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut created = false;
-    let result = (|| {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temporary)?;
-        created = true;
-        file.write_all(&bytes)?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        fs::rename(&temporary, directory.join(STATE_FILE))?;
-        File::open(directory)?.sync_all()?;
-        Ok(())
-    })();
-    if created && result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    let mut bytes = serde_json::to_vec_pretty(&snapshot).map_err(invalid_data)?;
+    bytes.push(b'\n');
+    agentos_core::durable::write_atomic(&directory.join(STATE_FILE), &bytes)
 }
 
 #[cfg(unix)]
@@ -1013,6 +985,9 @@ fn exclusive_lock(_path: &Path) -> io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     use agentos_core::{DeviceId, Urgency};
     use serde_json::json;
 

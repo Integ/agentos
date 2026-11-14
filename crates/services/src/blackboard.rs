@@ -210,9 +210,7 @@ pub fn save<T: Serialize>(path: &Path, v: &T) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(v)?)?;
-    std::fs::rename(tmp, path)
+    agentos_core::durable::write_atomic(path, &serde_json::to_vec_pretty(v)?)
 }
 
 struct BoardRead {

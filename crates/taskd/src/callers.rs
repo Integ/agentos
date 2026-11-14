@@ -6,11 +6,12 @@
 //! on disk before it is visible, so a caller the service acts for is always
 //! one a restart would still know, and a revoked one stays revoked.
 
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs;
+use std::io;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
+
+use agentos_core::durable::write_atomic;
 
 use agentos_ipc::Caller;
 use serde::{Deserialize, Serialize};
@@ -119,22 +120,12 @@ impl CallerStore {
             version: VERSION,
             callers: callers.to_vec(),
         };
-        let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-        let result = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&temporary)?;
-            file.write_all(&serde_json::to_vec_pretty(&saved).map_err(io::Error::other)?)?;
-            file.sync_all()?;
-            fs::rename(&temporary, path)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result
+        // Durable through the directory entry: a revocation that a power cut
+        // could undo would silently restore access.
+        write_atomic(
+            path,
+            &serde_json::to_vec_pretty(&saved).map_err(io::Error::other)?,
+        )
     }
 
     pub fn list(&self) -> Vec<Caller> {

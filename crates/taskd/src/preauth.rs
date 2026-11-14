@@ -5,12 +5,12 @@
 //! rule the service acts on is always one a restart would still know about,
 //! and a revoked one is gone for the next check.
 
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs;
+use std::io;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
+use agentos_core::durable::write_atomic;
 use agentos_core::CapabilityName;
 use agentos_policy::{ArgRule, Preauthorization, Subject};
 use serde::{Deserialize, Serialize};
@@ -114,22 +114,12 @@ impl PreauthStore {
             next_id,
             items: items.to_vec(),
         };
-        let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-        let result = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&temporary)?;
-            file.write_all(&serde_json::to_vec_pretty(&saved).map_err(io::Error::other)?)?;
-            file.sync_all()?;
-            fs::rename(&temporary, path)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result
+        // Durable through the directory entry: a revocation that a power cut
+        // could undo would silently restore access.
+        write_atomic(
+            path,
+            &serde_json::to_vec_pretty(&saved).map_err(io::Error::other)?,
+        )
     }
 
     /// The rules still in force at `now_ms`.

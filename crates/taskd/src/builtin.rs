@@ -3,12 +3,9 @@
 //! The daemon uses an atomic on-disk notebook; `register_all` keeps an in-memory
 //! variant for embedders and tests. Both expose exactly the same capabilities.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agentos_core::{
@@ -22,7 +19,6 @@ use agentos_services::registry::CapabilityRegistry;
 
 /// The longest note the notebook accepts.
 pub const MAX_NOTE_CHARS: usize = 16_384;
-static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 fn spec(name: &str, description: &str, risk: RiskLevel, input_schema: Value) -> CapabilitySpec {
     CapabilitySpec {
@@ -238,32 +234,8 @@ fn parent_dir(path: &Path) -> &Path {
 }
 
 fn atomic_save(path: &Path, data: &NotebookData) -> io::Result<()> {
-    let name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "notebook needs a file name"))?;
-    let mut temp_name = name.to_os_string();
-    temp_name.push(format!(
-        ".tmp-{}-{}",
-        std::process::id(),
-        TEMP_ID.fetch_add(1, Ordering::Relaxed)
-    ));
-    let temp = parent_dir(path).join(temp_name);
-    let result = (|| {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = options.open(&temp)?;
-        let bytes = serde_json::to_vec(data).map_err(io::Error::other)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        fs::rename(&temp, path)?;
-        File::open(parent_dir(path))?.sync_all()
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
+    let bytes = serde_json::to_vec(data).map_err(io::Error::other)?;
+    agentos_core::durable::write_atomic(path, &bytes)
 }
 
 pub struct NotesAppend {
@@ -439,6 +411,9 @@ pub fn register_persistent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
     fn temp_dir(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
