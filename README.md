@@ -2,9 +2,9 @@
 
 一个以 Agent 为一等公民的操作系统，目标是让人和 AI 更顺畅地协作：Agent 通过各种输入设备接收人的意图，通过输出设备与人沟通并展示自己的工作。
 
-[![AgentOS 介绍视频（2 分 12 秒，点击播放）](docs/media/agentos-intro-poster.jpg)](docs/media/agentos-intro.mp4)
+[![AgentOS 介绍视频（2 分 42 秒，点击播放）](docs/media/agentos-intro-poster.jpg)](docs/media/agentos-intro.mp4)
 
-<sub>▶ 点击封面播放 [介绍视频](docs/media/agentos-intro.mp4)（2 分 12 秒，1080p，带字幕）：架构、原生桌面、安全模型、v0.3 的持久任务服务与 Web Shell、安装方法。</sub>
+<sub>▶ 点击封面播放 [介绍视频](docs/media/agentos-intro.mp4)（2 分 42 秒，1080p，带字幕）：架构与唯一的任务内核、原生桌面、安全模型、能力扩展、v0.4 的一等公民 Agent、持久任务、情景式 Web Shell、安装方法。</sub>
 
 AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层：意图总线、Agent 运行时、统一的感知/表达设备抽象，以及基于能力令牌和风险分级的权限模型。
 
@@ -38,7 +38,8 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 - **智能家居**：接入 Home Assistant，开灯、调空调是 L1，场景脚本是 L2，开锁、撤防、开车库门是 L3。见 [docs/smart-home.md](docs/smart-home.md)。
 - **MCP 工具**：`mcp.json` 里配置的 MCP server，工具自动成为管家的能力。见 [docs/mcp.md](docs/mcp.md)。
 - **自我进化**：让 AgentOS 给自己写新能力，以沙箱插件形式安装，可回滚。见 [docs/self-evolution.md](docs/self-evolution.md)。
-- **安全模型**：能力令牌 + 风险分级确认（L0–L3）；污点追踪（网络插件、MCP 输出会让后续有影响的操作都要确认）；L3 操作可要求 PIN；审计日志带 SHA-256 哈希链，可校验；插件有 bubblewrap 沙箱和资源上限（内存 1 GiB、CPU 10 秒等）。
+- **安全模型**：能力令牌 + 风险分级确认（L0–L3）；污点追踪（网络插件、MCP 输出会让后续有影响的操作都要确认）；L3 操作必须设置 PIN 并在批准时输入；批准只在屏幕上进行，说话不能批准；审计日志带 SHA-256 哈希链，可校验；插件有 bubblewrap 沙箱和资源上限（内存 1 GiB、CPU 10 秒等）。
+- **一等公民的 Agent（v0.4）**：任务并行执行（默认同时 4 个）；会话线程让你接着上一句话说；缺信息时 Agent 用 `ask.user` 停下来问你；每个任务有规划轮数、token 和执行时长预算，用量写进任务和审计；`agentos preauthorize` 事先许可一类 L1/L2 调用；`agentos mcp --caller …` 让别的 Agent 通过 MCP 使用 AgentOS。见 [docs/v0.4-design.md](docs/v0.4-design.md)。
 - **持久任务与多个界面（v0.3）**：`agentos-taskd` 把任务放在后台服务里，命令行、终端工作台、浏览器和原生桌面通过同一个 Unix socket 协议连接；关掉界面任务照常进行，历史可分页，变更实时通知，批准绑定到具体任务的具体步骤。见 [docs/persistent-workspace.md](docs/persistent-workspace.md)。
 - **情景式 Web Shell（v0.3）**：语音优先的浏览器界面，模型根据真实任务和笔记组织画面（只能选组件、顺序和宽度）；WebRTC 实时语音可连续对话、开口打断，但语音不能代替批准。见 [docs/ambient-shell.md](docs/ambient-shell.md)。
 - **稳健性与运维**：任务服务崩溃时写入 journal 和 `crash.txt`、由用户服务退避重启，并在桌面「最近活动」里提示；journal 跨重启保留；`sudo agentos-update` 在线更新，先自检再替换，可回滚。
@@ -143,7 +144,7 @@ cargo run -p agentos-cli -- --state-dir /tmp/agentos-workspace workbench
 
 ### 用 Claude 做规划
 
-设置 `ANTHROPIC_API_KEY` 后，`agentos-taskd` 自动改用 Claude 规划器（默认模型 `claude-opus-5-5`）：每个意图调用一次 Messages API，所有能力作为工具提供，模型返回的工具调用按顺序成为计划步骤，仍然逐步经过策略引擎。
+设置 `ANTHROPIC_API_KEY` 后，`agentos-taskd` 自动改用 Claude 规划器（默认模型 `claude-opus-5-5`）：所有能力作为工具提供，模型返回的工具调用成为计划步骤，仍然逐步经过策略引擎；每轮的结果交还给模型，由它决定下一轮或回答（最多 8 轮）。工具和系统提示走提示缓存，紧挨着的只读调用一起执行，同样的调用原地打转时任务会停下并说明原因。
 
 ```sh
 export ANTHROPIC_API_KEY=...
@@ -192,7 +193,9 @@ OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_MODEL=qwen3 cargo run -p agento
 
 ### MCP 工具
 
-在状态目录放一个 `mcp.json`（格式同 Claude Desktop 的 `mcpServers`），MCP server 的工具就会成为管家的能力。没有特别设置时，每次调用都要确认，结果也当作不可信。详见 [docs/mcp.md](docs/mcp.md)。
+在状态目录放一个 `mcp.json`（格式同 Claude Desktop 的 `mcpServers`），MCP server 的工具就会成为管家的能力。没有特别设置时，每次调用都要确认，结果也当作不可信。
+
+反过来，AgentOS 也可以作为 MCP server 给别的 Agent 用：`agentos caller add <id> --name … --allow …` 注册调用方，`agentos mcp --caller <id>` 在标准输入输出上提供服务。调用方只能用清单里的能力，只看得到自己的任务，有副作用的步骤要你批准。详见 [docs/mcp.md](docs/mcp.md)。
 
 ### 不可逆操作的 PIN
 
@@ -209,13 +212,13 @@ agentos-taskd --clear-pin    # 取消
 
 ```sh
 cargo fmt --all
-cargo clippy --all-targets -- -D warnings
-cargo test --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 cargo deny check     # 依赖漏洞（RustSec）、许可证、来源；cargo install --locked cargo-deny
 node --test crates/web-shell/assets/*.test.mjs   # Web Shell 前端测试，不需要模型密钥
 ```
 
-`cargo test --all` 里的插件沙箱测试需要 Linux 和 bubblewrap，原生桌面需要 WebKitGTK。在 macOS 上可以只跑 CI 在 macOS 上跑的这一组：
+`cargo test --workspace` 里的插件沙箱测试需要 Linux 和 bubblewrap，原生桌面需要 WebKitGTK。在 macOS 上可以只跑 CI 在 macOS 上跑的这一组：
 
 ```sh
 cargo test -p agentos-taskd -p agentos-web-shell -p agentos-cli -p agentos-ipc -p agentos-runtime -p agentos-audit -p agentos-planner -p agentos-core -p agentos-policy
@@ -225,7 +228,7 @@ CI 每次提交都会跑上面全部检查，其中这一组在 macOS 和 Rust 1
 
 ### 介绍视频
 
-[docs/media/agentos-intro.mp4](docs/media/agentos-intro.mp4) 由 [docs/media/intro-video/](docs/media/intro-video/) 里的源文件生成：`narration.json` 是旁白，`video.html` 是画面，界面镜头是两套真实界面的截图。配音用微软 Edge 的神经网络语音（[edge-tts](https://github.com/rany2/edge-tts)，需要联网，旁白文字会发给微软的语音服务）。功能有变化时改旁白和画面，然后重新生成（需要 Node 22+、Python 3、ffmpeg 和一个 Playwright 的 headless Chromium）：
+[docs/media/agentos-intro.mp4](docs/media/agentos-intro.mp4) 由 [docs/media/intro-video/](docs/media/intro-video/) 里的源文件生成：`narration.json` 是旁白，`video.html` 是画面，界面镜头是两套真实界面的截图。配音用微软 Edge 的神经网络语音 `zh-CN-XiaoxiaoNeural`（[edge-tts](https://github.com/rany2/edge-tts)，需要联网，旁白文字会发给微软的语音服务），不用 macOS 自带的 `say`，所以在任何系统上生成的声音都一样。功能有变化时改旁白和画面，然后重新生成（需要 Node 22+、Python 3、ffmpeg 和一个 Playwright 的 headless Chromium）：
 
 ```sh
 cd docs/media/intro-video
