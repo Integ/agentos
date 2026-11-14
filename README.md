@@ -12,14 +12,14 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 截至 2026-11-13：
 
-- **版本**：`main` 分支是 v0.4.0 加上尚未发布的合并（见[更新日志](CHANGELOG.md)的“未发布”）。v0.3.0 和 v0.4.0 都还没有打 tag、没有发布镜像；最新发布版是 **v0.2.2**（2026-11-02），[Releases](https://github.com/Integ/agentos/releases) 里的镜像是这一版。
+- **版本**：最新发布版是 **v0.4.0**（2026-11-13），[Releases](https://github.com/Integ/agentos/releases/tag/v0.4.0) 里有 Debian 和 Ubuntu 两种镜像和在线更新包，内容见[更新日志](CHANGELOG.md)。v0.3.0 没有单独发布，它的内容包含在 v0.4.0 里。`main` 分支在 v0.4.0 之上还有尚未发布的合并（见更新日志的“未发布”）。
 - **一个任务内核**：`agentos-taskd` 是唯一的后台服务：持久任务、多轮规划、子 Agent、黑板、MCP、插件、智能家居、PIN、哈希链审计、按住说话和朗读都在这里。镜像里它作为桌面用户的服务随登录启动；图形桌面 `agentos-shell`、终端工作台 `agentos`、Web Shell 和 `agentos mcp` 都通过同一个协议连接它。旧的 `agentosd` 已删除，它在 `~/.local/share/agentos` 里的笔记、PIN、插件、黑板和配置会在任务服务第一次启动时迁到 `~/.local/state/agentos`；见[架构](docs/architecture.md)。给写代码的 Agent 的说明在 [AGENTS.md](AGENTS.md)。
 
 - **CI 覆盖**：Ubuntu 上的格式、Clippy、全部测试和在线更新模拟测试；macOS 和 Rust 1.88 上任务内核一侧的测试；Web Shell 的前端测试；cargo-deny。
 - **还没有验证**：
-  - 合并 `agentosd` 之后（v0.5 前列出）：任务服务上的按住说话和朗读只用脚本化的录音、识别和播放命令测过，没有接真实麦克风、扬声器和语音接口；桌面窗口没有实际打开看过；从 v0.4.0 在线升级只在模拟的安装根目录里测过；没有跑镜像构建和 QEMU 冒烟测试。
-  - 任务服务一侧（v0.4 合并时列出）：OpenAI 兼容接口在任务服务上跑过一轮真实请求（线程、提问、取消、用量、外部调用方），Claude 接口、裁判、真实的 MCP 客户端和 server、Home Assistant 没有；v0.4.0 新增的提问面板和用量显示在 Web Shell 和原生桌面上没有实际操作过；合并后没有跑镜像构建和 QEMU 冒烟测试。
-  - 真机（v0.2.0 发布时列出，之后没有更新过）：Caps Lock 按键说话和指示灯、真实麦克风和扬声器；真实的 Home Assistant 和 MCP 服务器；从一个发布版本在线升级到下一个发布版本。v0.2.2 的修复来自 Intel N100 小主机和笔记本上的真机测试。
+  - 合并 `agentosd` 之后（尚未发布）：任务服务上的按住说话和朗读只用脚本化的录音、识别和播放命令测过，没有接真实麦克风、扬声器和语音接口；桌面窗口没有实际打开看过；从 v0.4.0 在线升级只在模拟的安装根目录里测过；没有跑镜像构建和 QEMU 冒烟测试。
+  - 任务服务一侧（v0.4.0 时列出）：OpenAI 兼容接口在任务服务上跑过一轮真实请求（线程、提问、取消、用量、外部调用方），Claude 接口、裁判、真实的 MCP 客户端和 server、Home Assistant 没有；v0.4.0 新增的提问面板和用量显示在 Web Shell 和原生桌面上没有实际操作过。v0.4.0 的镜像在 QEMU 冒烟测试里通过了任务服务、`agentos` 命令和 MCP 的自检，以及登录后桌面用户的任务服务启动。
+  - 真机（v0.2.0 发布时列出，之后没有更新过）：Caps Lock 按键说话和指示灯、真实麦克风和扬声器；真实的 Home Assistant 和 MCP 服务器；从一个发布版本在线升级到下一个发布版本（v0.2.2 的 `agentos-update` 安装 v0.4.0 更新包只在模拟的安装目录里测试过）。v0.2.2 的修复来自 Intel N100 小主机和笔记本上的真机测试。
 
 已知缺口：
 
@@ -53,7 +53,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 ## 安装到 PC
 
-到 [Releases](https://github.com/Integ/agentos/releases) 下载镜像（目前是 v0.2.2，Debian 13 或 Ubuntu 24.04 两种），写进 U 盘，从 U 盘启动即可使用；设置助理里可以一键装到硬盘。需要 x86-64、UEFI 启动，安全启动可以保持开启。详见 [docs/install.md](docs/install.md)。
+到 [Releases](https://github.com/Integ/agentos/releases) 下载镜像（目前是 v0.4.0，Debian 13 或 Ubuntu 24.04 两种），写进 U 盘，从 U 盘启动即可使用；设置助理里可以一键装到硬盘。需要 x86-64、UEFI 启动，安全启动可以保持开启。详见 [docs/install.md](docs/install.md)。
 
 - 镜像自带 Intel、NVIDIA、MediaTek 显卡固件、声卡 SOF 固件和 CPU 微码，Intel N100 这类核显小主机可以直接进桌面。
 - 内置 fcitx5 拼音输入法；笔记本触摸板默认开启轻触点击。
@@ -63,6 +63,8 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 已经装好的机器运行 `sudo agentos-update`（或系统菜单「检查更新…」），可 `--rollback`。详见 [docs/update.md](docs/update.md)。
 
+- **从 v0.2.2 升级到 v0.4.0**：在线更新就能拿到全部内容，不需要重新写镜像（这一版没有新增系统软件包）。任务服务在下次登录或重启后开始运行。v0.2.2 里设置的 PIN 只属于 `agentosd`，要在「网络和 AI 设置…」里重新设置一次，两个守护进程才会一起用上；在那之前任务服务会拒绝不可逆的操作。
+- **从 v0.4.0 升级到下一版（尚未发布）**：在线更新即可，原有的 `agentos-update` 能装上新的更新包（里面带了它需要的 `agentosd` 垫片）。更新后重新登录，桌面才换成连接任务服务的新版本；任务服务第一次启动时把 `agentosd` 的笔记、PIN、插件、黑板和配置迁过来，所以只在 `agentosd` 里设置过的 PIN 也会被任务服务用上（任务服务已经有 PIN 时保留它自己的）。
 - **从 v0.1.0 升级**：必须重新写入镜像（v0.1.0 的 `sudo` 会要密码，无法运行更新）。
 - **从 v0.2.0 升级**：建议重新写入镜像。在线更新只更新 AgentOS 自己的文件，不会安装新的系统软件包，所以 v0.2.2 的显卡固件和输入法候选窗口修复拿不到。不想重装的话，在线更新后再运行（Ubuntu 镜像不需要第一条）：
 
