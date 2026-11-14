@@ -320,10 +320,12 @@ impl Session {
                         id,
                         step: step + 1,
                         text,
+                        spoken: false,
                     },
                     None => Command::Submit {
                         text,
                         thread: self.thread,
+                        spoken: false,
                     },
                 };
                 match self.client.request(command).await {
@@ -453,6 +455,7 @@ pub fn run(
                         change = changes.recv() => match change {
                             Some(EventKind::TaskChanged { id }) => session.refresh(id.0, &emit).await,
                             Some(EventKind::ResyncRequired { .. }) => session.resync(&emit).await,
+                            Some(_) => Ok(()),
                             None => break,
                         },
                         request = requests.recv() => match request {

@@ -214,7 +214,11 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
                     timeout: timeout.unwrap_or(DEFAULT_WAIT),
                 }
             } else {
-                Action::Request(Command::Submit { text, thread })
+                Action::Request(Command::Submit {
+                    text,
+                    thread,
+                    spoken: false,
+                })
             }
         }
         Some("tasks") => {
@@ -269,6 +273,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
                 id: task_id(&rest[1])?,
                 step,
                 text,
+                spoken: false,
             })
         }
         Some("approve")
@@ -722,7 +727,7 @@ mod tests {
 
     #[test]
     fn a_thread_is_named_explicitly_and_a_reply_names_its_task_and_step() {
-        let Action::Request(Command::Submit { text, thread }) =
+        let Action::Request(Command::Submit { text, thread, .. }) =
             argv(&["submit", "--thread", "task-4", "再加", "鸡蛋"])
                 .unwrap()
                 .action
@@ -755,7 +760,7 @@ mod tests {
                 ..
             })
         ));
-        let Action::Request(Command::Reply { id, step, text }) =
+        let Action::Request(Command::Reply { id, step, text, .. }) =
             argv(&["reply", "task-7", "2", "下周三", "上午"])
                 .unwrap()
                 .action

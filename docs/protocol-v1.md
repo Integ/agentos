@@ -28,7 +28,7 @@
 
 信封还可以带一个可选的 `caller`，表示以某个已注册的外部调用方的身份发出请求；见“外部调用方”。
 
-`version` 是协议版本，与程序的语义版本号分开。v0.3 和 v0.4 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法；请求信封的 `caller`、`preauthorize` 的 `caller`，以及 `register_caller`、`callers`、`revoke_caller` 方法。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
+`version` 是协议版本，与程序的语义版本号分开。v0.3 和 v0.4 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法；请求信封的 `caller`、`preauthorize` 的 `caller`，以及 `register_caller`、`callers`、`revoke_caller` 方法；`voice`、`listen`、`speech` 方法，`watch` 的 `voice`，`submit` 和 `reply` 的 `spoken`，以及语音事件 `voice_state`、`voice_level`、`transcript`、`voice_notice`（只发给声明了 `voice` 的订阅）。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
 
 `id` 是客户端选择的无符号整数，仅用于关联响应，**不是幂等键**。重复发送同一个 `submit` 请求编号仍可能创建第二个任务。收到完整响应前连接断开时，结果可能已经落盘；客户端必须查询任务，不能自动重发变更请求。
 
@@ -39,12 +39,12 @@
 | `command.method` | 其他字段 | 成功 `data.type` | 含义 |
 | --- | --- | --- | --- |
 | `ping` | 无 | `pong` | 程序版本和当前任务 revision |
-| `submit` | `text: string`，可选 `thread: integer` | `accepted` | 持久创建任务并排队，返回创建时的完整 `task`；`thread` 表示接着哪个线程说，省略则开一个新线程 |
+| `submit` | `text: string`，可选 `thread: integer`、`spoken: boolean` | `accepted` | 持久创建任务并排队，返回创建时的完整 `task`；`thread` 表示接着哪个线程说，省略则开一个新线程；`spoken` 见“语音” |
 | `list` | `limit: integer`，可选 `before: integer/null`、`state: string/null`、`thread: integer` | `tasks` | 按任务 ID 倒序分页；`thread` 只列出这个线程的任务 |
 | `get` | `id: integer` | `task` | 完整意图、计划、步骤、结果、状态和确认请求 |
 | `cancel` | `id: integer` | `task` | 停止后续步骤，打断正在等待的模型请求和可中止的调用，返回持久任务 |
 | `approve` | `id: integer`、`step: integer`、`confirmation: string`，可选 `pin: string` | `approval_queued` | 校验当前具体确认请求（不可逆步骤还要核对 PIN）后，将批准排入执行队列 |
-| `reply` | `id: integer`、`step: integer`、`text: string` | `reply_queued` | 回答任务当前正在等待的那个提问，将回答排入执行队列 |
+| `reply` | `id: integer`、`step: integer`、`text: string`，可选 `spoken: boolean` | `reply_queued` | 回答任务当前正在等待的那个提问，将回答排入执行队列 |
 | `preauthorize` | `capability: string`，可选 `args: array`、`other_args: boolean`、`expires_in_seconds: integer`、`pin: string` | `preauthorized` | 创建一条预授权：符合规则的调用不再逐次确认 |
 | `preauthorizations` | 无 | `preauthorizations` | 仍然有效的预授权 |
 | `revoke_preauthorization` | `id: string` | `preauthorization_revoked` | 撤销一条预授权，立即生效 |
@@ -53,7 +53,10 @@
 | `revoke_caller` | `id: string` | `caller_revoked` | 撤销调用方及它的预授权，立即生效 |
 | `capabilities` | 无 | `capabilities` | 已授权能力的名称、输入 schema、风险和描述 |
 | `read` | `capability: string`，可选 `args: object` | `value` | 直接查询一个已授权的只读（L0）能力，不创建任务 |
-| `watch` | 可选 `after: integer/null` | `watching`，随后事件 | 持续接收任务变更提示与重新同步通知 |
+| `watch` | 可选 `after: integer/null`、`voice: boolean` | `watching`，随后事件 | 持续接收任务变更提示与重新同步通知；`voice` 为 true 时也接收语音事件 |
+| `voice` | 无 | `voice` | 本机的语音识别和朗读配置及当前状态 |
+| `listen` | `action: "start"/"stop"/"cancel"` | `listening` | 按住说话：开始录音、停止并识别、停止并丢弃；返回这次录音的编号 |
+| `speech` | 可选 `mode: "auto"/"always"/"off"`、`stop: boolean` | `voice` | 设置何时朗读回复，或停止正在朗读的内容 |
 
 `accepted` 表示任务已保存并接收执行；不表示任务已经成功。`approval_queued` 同样只表示批准请求已入队，执行 worker 仍会再次检查 token、来源、期限与 grant。`reply_queued` 只表示回答已入队，不表示任务拿它做了什么。
 
@@ -275,6 +278,23 @@ PIN 由服务端核对，不保存、不写入任务或审计；核对通过只�
 
 可靠客户端可以先建立 watch，再读取页面与 revision，并持续处理后续通知。重新连接时刷新权威页面；不要为了补齐通知去重放 `submit`、`cancel`、`approve` 或 `reply`。终端工作台遵循这一原则，断线后清除已展示的批准请求，重新展示详情后才允许批准。
 
+## 语音
+
+麦克风和扬声器由服务掌管，客户端不直接录音：这样每一次使用都显示在所有声明了 `voice` 的订阅上，并写进审计日志（`device_used`：时长、音频发往哪里，不含音频和文字）。外部调用方不能使用 `voice`、`listen`、`speech`，也不能订阅语音事件。
+
+按住时发送 `listen` 的 `start`，得到 `{"type":"listening","recording":3}`；松开时发送 `stop`（识别）或 `cancel`（丢弃），回复同一个编号。太短（不到 0.3 秒）、没有声音或被丢弃的录音不会发给识别服务。识别结果不会自己变成任务：服务把它作为事件交回去，由发起这次录音的客户端像打字一样提交或回答，并带上 `spoken: true`。`spoken` 只决定 `auto` 模式下是否朗读这个任务的回复，与身份无关。批准永远是单独的 `approve` 请求，说话不能批准任何步骤。
+
+语音事件只发给 `voice: true` 的订阅，不认识它们的旧客户端不会收到。它们不是任务变更，`revision` 是这个订阅最近一次发出的值：
+
+```json
+{"version":1,"revision":16,"kind":{"event":"voice_state","mic":"listening","speaking":false,"speak":"auto"}}
+{"version":1,"revision":16,"kind":{"event":"voice_level","level":0.42}}
+{"version":1,"revision":16,"kind":{"event":"transcript","recording":3,"text":"记一下 买牛奶"}}
+{"version":1,"revision":16,"kind":{"event":"voice_notice","level":"info","text":"没听清，请再说一次"}}
+```
+
+`mic` 是 `idle`、`listening` 或 `transcribing`；识别结束时先发 `transcript`，再发回到 `idle` 的 `voice_state`。`voice_level` 每秒约十次，落后的订阅会丢掉一部分。没有配置语音时 `voice` 返回 `input`、`output` 都为 false，`listen` 和 `speech` 得到 `voice_unavailable`。
+
 ## 资源界限与背压
 
 | 项目 | v0.4 限制与行为 |
@@ -299,7 +319,7 @@ PIN 由服务端核对，不保存、不写入任务或审计；核对通过只�
 | `error.code` | 含义与客户端处理 |
 | --- | --- |
 | `invalid_request` | JSON、字段、方法或字段类型不合法；纠正协议请求 |
-| `forbidden` | 请求带着 `caller`，而这个方法只属于用户本人（批准、预授权、调用方管理、`watch`） |
+| `forbidden` | 请求带着 `caller`，而这个方法只属于用户本人（批准、预授权、调用方管理、`watch`、语音） |
 | `unsupported_version` | `version` 不受支持；不要以另一种格式盲目重试变更 |
 | `invalid_argument` | 空/超长意图、分页数量越界、步骤从 0 开始、`read` 的参数不是对象或不被能力接受等参数问题 |
 | `not_found` | 任务不存在，或对这个调用方不可见；`submit` 指定的线程不存在或不属于这个来源；`read` 指定的能力不存在、未授权；`caller` 或预授权编号不存在 |
@@ -312,6 +332,10 @@ PIN 由服务端核对，不保存、不写入任务或审计；核对通过只�
 | `identity_required` | 这一步不可逆，批准时必须带 `pin`，确认请求仍有效；或设置了 PIN 而创建预授权时没有带 |
 | `identity_rejected` | PIN 不对或已锁定；确认请求仍有效，按消息提示重试 |
 | `identity_unavailable` | 服务没有配置身份核验，无法批准这一步 |
+| `voice_unavailable` | 本机没有配置语音识别或朗读 |
+| `busy` | 麦克风正在录音，这次 `start` 没有开始新的录音 |
+| `not_listening` | 现在没有在录音，`stop`/`cancel` 没有可停止的 |
+| `voice_failed` | 无法启动录音程序；消息里写明原因 |
 | `storage_unavailable` | 状态读写失败；检查本地存储与任务实际状态 |
 | `audit_unavailable` | 取消已保存，但记录取消审计失败；先查询任务，不假定取消没发生 |
 | `response_too_large` | 完整响应超过 1 MiB；使用精简任务页或范围更小的读取 |

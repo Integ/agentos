@@ -77,7 +77,13 @@ async fn submit_and_wait(
     timeout: std::time::Duration,
     json: bool,
 ) -> Result<i32, ClientError> {
-    let accepted = client.request(Command::Submit { text, thread }).await?;
+    let accepted = client
+        .request(Command::Submit {
+            text,
+            thread,
+            spoken: false,
+        })
+        .await?;
     let Reply::Accepted { task } = &accepted else {
         unreachable!("the client verifies that a submit is answered with an acceptance")
     };

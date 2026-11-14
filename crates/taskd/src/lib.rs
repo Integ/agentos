@@ -8,5 +8,7 @@ pub mod builtin;
 pub mod butler;
 pub mod callers;
 pub mod control;
+pub mod mic_led;
 pub mod preauth;
 pub mod service;
+pub mod voice;

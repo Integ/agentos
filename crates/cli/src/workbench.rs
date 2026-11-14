@@ -275,6 +275,7 @@ async fn perform(
                 .request(Command::Submit {
                     text,
                     thread: view.thread,
+                    spoken: false,
                 })
                 .await
                 .map_err(|e| request_error(view, e))?;
@@ -313,7 +314,12 @@ async fn perform(
             // The service checks the reply against the question the task is
             // waiting on now; a stale one is refused there, not guessed here.
             let reply = client
-                .request(Command::Reply { id, step, text })
+                .request(Command::Reply {
+                    id,
+                    step,
+                    text,
+                    spoken: false,
+                })
                 .await
                 .map_err(|e| request_error(view, e))?;
             println!("\n{}", render::reply_text(&reply));

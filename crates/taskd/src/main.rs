@@ -28,6 +28,7 @@ use agentos_taskd::butler::{grant_manifest, Budget, Butler};
 use agentos_taskd::callers::CallerStore;
 use agentos_taskd::preauth::PreauthStore;
 use agentos_taskd::service::Service;
+use agentos_taskd::voice::{SpeechOutput, Voice, VoiceConfig};
 
 const HELP: &str = "\
 用法：agentos-taskd [选项]
@@ -341,7 +342,17 @@ async fn main() -> io::Result<()> {
 
     let budget = task_budget(|name| std::env::var(name).ok())
         .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
-    let expr = ExpressionHub::new(audit.clone());
+    // Push-to-talk and read-aloud: configured in the environment, off unless
+    // chosen, and never sending audio anywhere the human did not pick.
+    let (voice_config, voice_notes) = VoiceConfig::from_env();
+    for note in voice_notes {
+        eprintln!("{note}");
+    }
+    let voice = Voice::new(voice_config, audit.clone());
+    let mut expr = ExpressionHub::new(audit.clone());
+    if voice.output_enabled() {
+        expr.add_output(Arc::new(SpeechOutput::new(voice.clone())));
+    }
     let mut butler = Butler::with_store(
         butler_id,
         registry,
@@ -373,7 +384,9 @@ async fn main() -> io::Result<()> {
 
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let voice_label = voice_label(&voice.status());
     let server = Service::with_butler(butler, audit, Some(pins.clone()))
+        .with_voice(voice)
         .bind(&socket)
         .await?;
     println!(
@@ -383,7 +396,7 @@ async fn main() -> io::Result<()> {
         server.path().display()
     );
     println!(
-        "子 Agent：{}\n插件：{}\n智能家居：{home}\n裁判：{judge}\n每个任务的预算：{}\nPIN：{}",
+        "子 Agent：{}\n插件：{}\n智能家居：{home}\n语音：{voice_label}\n裁判：{judge}\n每个任务的预算：{}\nPIN：{}",
         agent_names.join("、"),
         sandbox.label(),
         budget_label(budget),
@@ -399,6 +412,19 @@ async fn main() -> io::Result<()> {
             tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {} }
         })
         .await
+}
+
+/// The console line for voice: what recognizes and reads, and where audio goes.
+fn voice_label(status: &agentos_ipc::VoiceStatus) -> String {
+    let input = match (&status.input_label, &status.destination) {
+        (Some(label), Some(to)) => format!("识别 {label}（音频发往 {to}）"),
+        _ => "识别未配置".into(),
+    };
+    let output = match &status.output_label {
+        Some(label) => format!("朗读 {label}（{}）", status.speak.as_str()),
+        None => "朗读未配置".into(),
+    };
+    format!("{input}；{output}")
 }
 
 /// What a task may consume, from the environment: `AGENTOS_TASK_TOKENS` and

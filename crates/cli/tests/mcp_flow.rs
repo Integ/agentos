@@ -119,6 +119,7 @@ async fn an_outside_agent_gets_one_callers_tools_and_no_way_to_approve() {
         .request(Command::Submit {
             text: "记一下 我的秘密".into(),
             thread: None,
+            spoken: false,
         })
         .await
         .unwrap()

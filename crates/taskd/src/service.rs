@@ -16,9 +16,9 @@ use agentos_core::{
     Urgency,
 };
 use agentos_ipc::{
-    current_uid, read_frame, write_frame, Caller, Command, Event, EventKind, ProtocolError, Reply,
-    Request, Response, TaskSummary, MAX_CAPABILITY_NAME_BYTES, MAX_PAGE_SIZE, MAX_TEXT_BYTES,
-    VERSION,
+    current_uid, read_frame, write_frame, Caller, Command, Event, EventKind, ListenAction,
+    MicState, ProtocolError, Reply, Request, Response, SpeakMode, TaskSummary, VoiceStatus,
+    MAX_CAPABILITY_NAME_BYTES, MAX_PAGE_SIZE, MAX_TEXT_BYTES, VERSION,
 };
 use agentos_policy::{PolicyEngine, Subject};
 use agentos_runtime::{Task, TaskId, TaskState, TaskStore};
@@ -32,6 +32,7 @@ use tokio::time::timeout;
 use crate::butler::{Butler, CapabilityView};
 use crate::control::{approval_matches_with_token, reply_matches};
 use crate::preauth::{NewPreauthorization, PreauthStore};
+use crate::voice::Voice;
 use agentos_planner::Planner;
 use agentos_services::expression::ExpressionHub;
 use agentos_services::identity::{PinCheck, PinVault};
@@ -71,6 +72,8 @@ struct Controller {
     /// Proves identity for approvals of irreversible steps.
     pins: Option<Arc<PinVault>>,
     preauths: Arc<PreauthStore>,
+    /// The microphone and speaker, when this machine has them configured.
+    voice: Option<Arc<Voice>>,
     work_tx: mpsc::UnboundedSender<Admitted>,
     /// Bounds work that has been admitted and has not started. The channel
     /// itself is unbounded because the scheduler takes work off it at once,
@@ -136,6 +139,7 @@ impl Service {
                 view: butler.view(),
                 pins,
                 preauths: butler.preauthorizations().clone(),
+                voice: None,
                 work_tx,
                 admission: Arc::new(Semaphore::new(QUEUE_CAPACITY)),
             }),
@@ -143,6 +147,16 @@ impl Service {
             butler,
             max_running: MAX_RUNNING_TASKS,
         }
+    }
+
+    /// Serve the microphone and speaker through the protocol. The same hub
+    /// must read replies aloud, so it is also an output of the butler's
+    /// expression hub (see `voice::SpeechOutput`).
+    pub fn with_voice(mut self, voice: Arc<Voice>) -> Self {
+        Arc::get_mut(&mut self.controller)
+            .expect("the controller is not shared before the service runs")
+            .voice = Some(voice);
+        self
     }
 
     /// How many tasks may run at the same time; at least one. Work beyond
@@ -485,6 +499,26 @@ fn actor_intent(uid: u32, actor: Option<&Caller>, text: String) -> Intent {
     }
 }
 
+fn unconfigured_voice() -> VoiceStatus {
+    VoiceStatus {
+        input: false,
+        input_label: None,
+        destination: None,
+        output: false,
+        output_label: None,
+        speak: SpeakMode::Off,
+        mic: MicState::Idle,
+        speaking: false,
+    }
+}
+
+fn voice_unavailable() -> ProtocolError {
+    protocol_error(
+        "voice_unavailable",
+        "this machine has no voice input or output configured",
+    )
+}
+
 fn forbidden() -> ProtocolError {
     protocol_error(
         "forbidden",
@@ -590,6 +624,10 @@ impl Controller {
                     | Command::RegisterCaller { .. }
                     | Command::Callers {}
                     | Command::RevokeCaller { .. }
+                    // The microphone and speaker are the human's at this
+                    // machine; no outside program listens or speaks.
+                    | Command::Voice {}
+                    | Command::Speech { .. }
             )
         {
             return Err(forbidden());
@@ -599,7 +637,11 @@ impl Controller {
                 server_version: env!("CARGO_PKG_VERSION").into(),
                 revision: self.tasks.revision(),
             }),
-            Command::Submit { text, thread } => {
+            Command::Submit {
+                text,
+                thread,
+                spoken,
+            } => {
                 if text.trim().is_empty() || text.len() > MAX_TEXT_BYTES {
                     return Err(protocol_error(
                         "invalid_argument",
@@ -622,6 +664,12 @@ impl Controller {
                         ),
                         _ => storage_error(error),
                     })?;
+                // Marked before the task can run, so its first reply is read.
+                if spoken {
+                    if let Some(voice) = &self.voice {
+                        voice.mark_voice_intent(task.intent.id);
+                    }
+                }
                 self.enqueue(Work::Run(task.id), place)?;
                 Ok(Reply::Accepted {
                     task: Self::shown(task, actor),
@@ -728,7 +776,12 @@ impl Controller {
                 )?;
                 Ok(Reply::ApprovalQueued { id, step })
             }
-            Command::Reply { id, step, text } => {
+            Command::Reply {
+                id,
+                step,
+                text,
+                spoken,
+            } => {
                 let index = step
                     .checked_sub(1)
                     .ok_or_else(|| protocol_error("invalid_argument", "step numbers start at 1"))?;
@@ -747,6 +800,11 @@ impl Controller {
                     ));
                 }
                 let place = self.admit("reply queue is full or unavailable; retry explicitly")?;
+                if spoken {
+                    if let Some(voice) = &self.voice {
+                        voice.mark_voice_intent(task.intent.id);
+                    }
+                }
                 self.enqueue(
                     Work::Reply {
                         id,
@@ -954,8 +1012,26 @@ impl Controller {
                     None => self.view().specs.clone(),
                 },
             }),
-            Command::Read { .. } | Command::Watch { .. } => {
-                unreachable!("read and watch are handled at the connection boundary")
+            Command::Voice {} => Ok(Reply::Voice {
+                voice: self
+                    .voice
+                    .as_ref()
+                    .map_or_else(unconfigured_voice, |voice| voice.status()),
+            }),
+            Command::Speech { mode, stop } => {
+                let voice = self.voice.as_ref().ok_or_else(voice_unavailable)?;
+                if let Some(mode) = mode {
+                    voice.set_speak_mode(mode);
+                }
+                if stop {
+                    voice.stop_speaking();
+                }
+                Ok(Reply::Voice {
+                    voice: voice.status(),
+                })
+            }
+            Command::Read { .. } | Command::Watch { .. } | Command::Listen { .. } => {
+                unreachable!("read, watch and listen are handled at the connection boundary")
             }
         }
     }
@@ -963,6 +1039,23 @@ impl Controller {
     /// Serve a client's query of local state. This is not an agent acting: no
     /// task, no planner, no approval and no audit record, like `get`/`list`.
     /// Only capabilities that cannot have a side effect are reachable here.
+    /// The talk button. Async because stopping waits for the recorder to
+    /// finish writing; the words themselves arrive later as an event.
+    async fn listen(&self, action: ListenAction, caller: bool) -> Result<Reply, ProtocolError> {
+        if caller {
+            return Err(forbidden());
+        }
+        let voice = self.voice.as_ref().ok_or_else(voice_unavailable)?;
+        let result = match action {
+            ListenAction::Start => voice.listen_start().await,
+            ListenAction::Stop => voice.listen_stop(true).await,
+            ListenAction::Cancel => voice.listen_stop(false).await,
+        };
+        result
+            .map(|recording| Reply::Listening { recording })
+            .map_err(|error| protocol_error(error.code, error.message))
+    }
+
     async fn read(
         &self,
         capability: CapabilityName,
@@ -1117,8 +1210,14 @@ async fn serve_connection(stream: UnixStream, controller: Arc<Controller>) -> io
             .await?;
             continue;
         }
-        if let Command::Watch { after } = request.command {
+        if let Command::Watch { after, voice } = request.command {
             let mut changes = controller.tasks.subscribe();
+            // Subscribed with the task changes, so nothing falls in between.
+            let mut voice_events = controller
+                .voice
+                .as_ref()
+                .filter(|_| voice)
+                .map(|voice| voice.subscribe());
             let revision = controller.tasks.revision();
             let mut last_sent = revision;
             send_response(
@@ -1135,6 +1234,10 @@ async fn serve_connection(stream: UnixStream, controller: Arc<Controller>) -> io
                     read = reader.read(&mut byte) => {
                         if read? > 0 { return Err(io::Error::new(io::ErrorKind::InvalidInput, "watch connections accept no further requests")); }
                         return Ok(());
+                    }
+                    spoken = next_voice_event(&mut voice_events) => {
+                        let Some(kind) = spoken else { continue };
+                        send_event(&mut writer, Event { version: VERSION, revision: last_sent, kind }).await?;
                     }
                     change = changes.recv() => {
                         let event = match change {
@@ -1153,6 +1256,7 @@ async fn serve_connection(stream: UnixStream, controller: Arc<Controller>) -> io
             Command::Read { capability, args } => {
                 controller.read(capability, args, actor.as_ref()).await
             }
+            Command::Listen { action } => controller.listen(action, actor.is_some()).await,
             command => controller.handle(command, uid, actor.as_ref()),
         };
         let response = match result {
@@ -1164,6 +1268,25 @@ async fn serve_connection(stream: UnixStream, controller: Arc<Controller>) -> io
             },
         };
         send_response(&mut writer, response).await?;
+    }
+}
+
+/// The next voice event for a watch that asked for them; never, for one that
+/// did not. A watcher that fell behind skips what it missed: levels are
+/// lossy, and the state event that follows tells it where things stand.
+async fn next_voice_event(
+    events: &mut Option<broadcast::Receiver<EventKind>>,
+) -> Option<EventKind> {
+    let Some(receiver) = events else {
+        return std::future::pending().await;
+    };
+    match receiver.recv().await {
+        Ok(kind) => Some(kind),
+        Err(broadcast::error::RecvError::Lagged(_)) => None,
+        Err(broadcast::error::RecvError::Closed) => {
+            *events = None;
+            None
+        }
     }
 }
 

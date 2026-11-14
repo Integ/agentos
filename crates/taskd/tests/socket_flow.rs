@@ -217,6 +217,7 @@ impl Connection {
             .ok(Command::Submit {
                 text: text.into(),
                 thread: None,
+                spoken: false,
             })
             .await
         {
@@ -306,7 +307,13 @@ async fn disconnected_clients_do_not_own_tasks_and_other_clients_can_cancel_long
 async fn pages_and_watchers_resynchronize_without_replaying_mutations() {
     let mut harness = Harness::start(Box::new(RulePlanner), vec![]).await;
     let mut watcher = harness.connect().await;
-    let revision = match watcher.ok(Command::Watch { after: None }).await {
+    let revision = match watcher
+        .ok(Command::Watch {
+            after: None,
+            voice: false,
+        })
+        .await
+    {
         Reply::Watching { revision } => revision,
         _ => panic!(),
     };
@@ -350,6 +357,7 @@ async fn pages_and_watchers_resynchronize_without_replaying_mutations() {
     reconnect
         .ok(Command::Watch {
             after: Some(revision),
+            voice: false,
         })
         .await;
     assert!(matches!(
@@ -401,10 +409,12 @@ async fn malformed_versions_and_oversized_frames_cannot_break_the_service() {
         Command::Submit {
             text: " ".into(),
             thread: None,
+            spoken: false,
         },
         Command::Submit {
             text: "x".repeat(MAX_TEXT_BYTES + 1),
             thread: None,
+            spoken: false,
         },
     ] {
         assert_eq!(
@@ -652,6 +662,7 @@ async fn a_full_queue_creates_no_phantom_tasks_and_cancellation_remains_availabl
                 .request(Command::Submit {
                     text: "overflow".into(),
                     thread: None,
+                    spoken: false,
                 })
                 .await
         ),
@@ -674,6 +685,7 @@ async fn a_full_queue_creates_no_phantom_tasks_and_cancellation_remains_availabl
                 .request(Command::Submit {
                     text: "现在几点".into(),
                     thread: None,
+                    spoken: false,
                 })
                 .await;
             if let ResponseBody::Ok {
@@ -751,7 +763,12 @@ async fn stopping_a_pending_confirmation_marks_it_interrupted_without_invoking()
 async fn a_lagged_watcher_resyncs_then_emits_only_newer_revisions() {
     let mut harness = Harness::start(Box::new(RulePlanner), vec![]).await;
     let mut watcher = harness.connect().await;
-    watcher.ok(Command::Watch { after: None }).await;
+    watcher
+        .ok(Command::Watch {
+            after: None,
+            voice: false,
+        })
+        .await;
     watcher.event().await;
     // No await in this burst: overflow the bounded broadcast ring before this
     // current-thread runtime can poll the server-side watch receiver again.
@@ -1218,6 +1235,7 @@ async fn a_question_is_answered_over_the_socket_once_and_only_for_its_step() {
                     id,
                     step,
                     text: text.into(),
+                    spoken: false,
                 })
                 .await,
         );
@@ -1232,7 +1250,8 @@ async fn a_question_is_answered_over_the_socket_once_and_only_for_its_step() {
                 .request(Command::Reply {
                     id,
                     step: 1,
-                    text: " ".into()
+                    text: " ".into(),
+                    spoken: false
                 })
                 .await
         ),
@@ -1249,7 +1268,8 @@ async fn a_question_is_answered_over_the_socket_once_and_only_for_its_step() {
             .ok(Command::Reply {
                 id,
                 step: 1,
-                text: "周三".into()
+                text: "周三".into(),
+                spoken: false
             })
             .await,
         Reply::ReplyQueued { step: 1, .. }
@@ -1263,7 +1283,8 @@ async fn a_question_is_answered_over_the_socket_once_and_only_for_its_step() {
                 .request(Command::Reply {
                     id,
                     step: 1,
-                    text: "周四".into()
+                    text: "周四".into(),
+                    spoken: false
                 })
                 .await
         ),
@@ -1279,6 +1300,7 @@ async fn threads_are_continued_by_name_listed_apart_and_never_invented() {
     let submit = |text: &str, thread| Command::Submit {
         text: text.into(),
         thread,
+        spoken: false,
     };
     let Reply::Accepted { task: first } = client.ok(submit("记一下 茶", None)).await else {
         panic!("not accepted")
@@ -1341,6 +1363,7 @@ async fn a_thread_runs_in_order_without_holding_up_other_threads() {
         .ok(Command::Submit {
             text: "现在几点".into(),
             thread: Some(slow),
+            spoken: false,
         })
         .await
     else {
@@ -1559,7 +1582,10 @@ async fn an_outside_caller_reaches_only_what_it_was_given_and_only_its_own_tasks
         Command::RevokeCaller {
             id: "helper".into(),
         },
-        Command::Watch { after: None },
+        Command::Watch {
+            after: None,
+            voice: false,
+        },
     ] {
         assert_eq!(error_code(helper.request(command).await), "forbidden");
     }
@@ -1579,6 +1605,7 @@ async fn an_outside_caller_reaches_only_what_it_was_given_and_only_its_own_tasks
                 .request(Command::Submit {
                     text: "看看笔记".into(),
                     thread: Some(private),
+                    spoken: false,
                 })
                 .await
         ),
