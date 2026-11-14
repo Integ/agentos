@@ -189,8 +189,8 @@ pub enum AuditEvent {
         action: String,
         detail: Value,
     },
-    /// The previous agentosd run crashed; `summary` is the first line of its
-    /// crash report (message and source location).
+    /// The previous run of the daemon crashed; `summary` is the first line
+    /// of its crash report (program, message and source location).
     DaemonCrashed {
         summary: String,
     },
@@ -587,8 +587,117 @@ impl AuditLog {
     }
 }
 
+/// The last `n` capability calls, confirmations, device uses and crashes,
+/// oldest first, for a person glancing at what the system has been doing.
+/// Each item has `seq`, `at_ms`, `kind` (`invoked`, `confirmation`,
+/// `device`, `crash`) and `ok`, plus `capability`, `device` and `detail`, or
+/// `summary`, by kind. A damaged line (a crash mid-write) is skipped rather
+/// than blanking the list.
+///
+/// Only the end of the log is read: it is append-only and grows without
+/// bound, and this is asked for whenever a desktop connects. Older activity
+/// than the tail holds is left out, not misreported.
+pub fn recent_activity(path: impl AsRef<Path>, n: usize) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL_BYTES: u64 = 512 * 1024;
+    let Ok(mut file) = File::open(path) else {
+        return Vec::new();
+    };
+    let start = file
+        .metadata()
+        .map(|m| m.len().saturating_sub(TAIL_BYTES))
+        .unwrap_or(0);
+    let mut tail = Vec::new();
+    if file.seek(SeekFrom::Start(start)).is_err() || file.read_to_end(&mut tail).is_err() {
+        return Vec::new();
+    }
+    // Starting mid-file, the first line is probably cut; skip to the next.
+    let tail = if start > 0 {
+        match tail.iter().position(|&b| b == b'\n') {
+            Some(newline) => &tail[newline + 1..],
+            None => &[][..],
+        }
+    } else {
+        &tail[..]
+    };
+    let entries = tail
+        .split(|&b| b == b'\n')
+        .filter_map(|line| serde_json::from_slice::<AuditEntry>(line).ok());
+    let mut items: Vec<serde_json::Value> = entries
+        .filter_map(|e| match e.event {
+            AuditEvent::CapabilityInvoked { capability, ok, .. } => Some(json!({
+                "seq": e.seq,
+                "at_ms": e.at_ms,
+                "kind": "invoked",
+                "capability": capability.to_string(),
+                "ok": ok,
+            })),
+            AuditEvent::HumanConfirmation {
+                capability,
+                approved,
+                ..
+            } => Some(json!({
+                "seq": e.seq,
+                "at_ms": e.at_ms,
+                "kind": "confirmation",
+                "capability": capability.to_string(),
+                "ok": approved,
+            })),
+            AuditEvent::DeviceUsed { device, detail, .. } => Some(json!({
+                "seq": e.seq,
+                "at_ms": e.at_ms,
+                "kind": "device",
+                "device": device.to_string(),
+                "detail": detail,
+                "ok": true,
+            })),
+            AuditEvent::DaemonCrashed { summary } => Some(json!({
+                "seq": e.seq,
+                "at_ms": e.at_ms,
+                "kind": "crash",
+                "summary": summary,
+                "ok": false,
+            })),
+            _ => None,
+        })
+        .collect();
+    let skip = items.len().saturating_sub(n);
+    items.drain(..skip);
+    items
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn recent_activity_shows_crashes_and_skips_a_torn_line() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentos-activity-{}-{}",
+            std::process::id(),
+            agentos_core::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("audit.jsonl");
+        let log = AuditLog::open(&path).unwrap();
+        log.append(AuditEvent::DaemonCrashed {
+            summary: "agentos-taskd 0.4.0 崩溃：boom".into(),
+        })
+        .unwrap();
+        drop(log);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, b"{\"seq\":"))
+            .unwrap();
+        let items = recent_activity(&path, 20);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["kind"], "crash");
+        assert_eq!(items[0]["ok"], false);
+        assert!(items[0]["summary"].as_str().unwrap().contains("boom"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     use super::*;
     use serde_json::json;
 

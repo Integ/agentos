@@ -70,6 +70,7 @@ struct Harness {
     dir: TempDir,
     path: PathBuf,
     audit: PathBuf,
+    log: Arc<AuditLog>,
     tasks: Arc<TaskStore>,
     _shutdown: oneshot::Sender<()>,
     server: JoinHandle<io::Result<()>>,
@@ -118,6 +119,7 @@ impl Harness {
             expr,
             tasks.clone(),
         );
+        let log = audit.clone();
         let server = Service::with_butler(butler, audit, None)
             .with_voice(voice)
             .bind(&path)
@@ -131,6 +133,7 @@ impl Harness {
             dir,
             path,
             audit: audit_path,
+            log,
             tasks,
             _shutdown: shutdown,
             server,
@@ -487,4 +490,43 @@ async fn without_voice_configured_the_service_says_so_instead_of_recording() {
         "voice_unavailable"
     );
     handle.abort();
+}
+
+#[tokio::test]
+async fn recent_activity_shows_the_microphone_and_a_crash_but_not_to_an_outside_caller() {
+    let harness = Harness::start("看看笔记").await;
+    let mut user = harness.connect(None).await;
+    talk(&mut user).await;
+    // What the next run records after a crash (see crash.rs).
+    harness
+        .log
+        .append(AuditEvent::DaemonCrashed {
+            summary: "agentos-taskd 0.4.0 崩溃：boom".into(),
+        })
+        .unwrap();
+    let Reply::Activity { items } = user.ok(Command::Activity { limit: 20 }).await else {
+        panic!("expected activity");
+    };
+    let kinds: Vec<_> = items.iter().map(|i| i["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, vec!["device", "crash"]);
+    assert_eq!(items[1]["ok"], false);
+    assert_eq!(
+        user.error(Command::Activity { limit: 0 }).await,
+        "invalid_argument"
+    );
+
+    user.ok(Command::RegisterCaller {
+        id: "helper".into(),
+        name: "测试助手".into(),
+        capabilities: vec![],
+        max_risk: RiskLevel::ReadOnly,
+        pin: None,
+    })
+    .await;
+    // Guards "what the human did is theirs": no outside program reads it.
+    let mut caller = harness.connect(Some("helper")).await;
+    assert_eq!(
+        caller.error(Command::Activity { limit: 20 }).await,
+        "forbidden"
+    );
 }

@@ -196,6 +196,11 @@ pub enum Command {
     Listen {
         action: ListenAction,
     },
+    /// What the system did lately, from the audit log: capability calls,
+    /// confirmations, uses of the microphone and crashes, oldest first.
+    Activity {
+        limit: usize,
+    },
     /// When replies are read aloud, and stopping what is being read.
     Speech {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -391,6 +396,10 @@ pub enum Reply {
     /// The recording a `Listen` started, stopped or cancelled.
     Listening {
         recording: u64,
+    },
+    /// Items as described by `agentos_audit::recent_activity`.
+    Activity {
+        items: Vec<Value>,
     },
 }
 
@@ -669,6 +678,7 @@ mod tests {
             json!({"method":"submit","text":"现在几点","spoken":true}),
             json!({"method":"reply","id":1,"step":1,"text":"好","spoken":true}),
             json!({"method":"voice"}),
+            json!({"method":"activity","limit":20}),
             json!({"method":"listen","action":"start"}),
             json!({"method":"speech","mode":"always"}),
             json!({"method":"speech","stop":true}),

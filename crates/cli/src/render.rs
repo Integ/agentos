@@ -468,6 +468,7 @@ pub fn reply_text(reply: &Reply) -> String {
             voice.speak.as_str()
         ),
         Reply::Listening { recording } => format!("录音 #{recording}"),
+        Reply::Activity { items } => format!("最近活动 {} 条", items.len()),
     }
 }
 

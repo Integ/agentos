@@ -26,6 +26,7 @@ use agentos_services::registry::CapabilityRegistry;
 use agentos_taskd::builtin;
 use agentos_taskd::butler::{grant_manifest, Budget, Butler};
 use agentos_taskd::callers::CallerStore;
+use agentos_taskd::crash;
 use agentos_taskd::preauth::PreauthStore;
 use agentos_taskd::service::Service;
 use agentos_taskd::voice::{SpeechOutput, Voice, VoiceConfig};
@@ -274,6 +275,8 @@ async fn main() -> io::Result<()> {
         Mode::ClearPin => return clear_pin(&pin_path),
         Mode::VerifyAudit => return verify_audit(&audit_path),
     }
+    // From here on a panic is reported and ends the service; see crash.rs.
+    crash::install(&state_dir);
     let (planner, text_model, label) = make_planner(options.planner)?;
     let socket = options
         .socket
@@ -289,6 +292,13 @@ async fn main() -> io::Result<()> {
         );
     }
     let audit = Arc::new(audit);
+    if let Some(summary) = crash::take_last(&state_dir) {
+        eprintln!(
+            "上次 agentos-taskd 异常退出：{summary}\n  完整报告：{}（也在 journalctl -t agentos-taskd 里）",
+            state_dir.join("crash.prev.txt").display()
+        );
+        audit.append(agentos_audit::AuditEvent::DaemonCrashed { summary })?;
+    }
     let pins = Arc::new(PinVault::open(&pin_path)?.with_audit(audit.clone()));
 
     let mut registry = CapabilityRegistry::new();

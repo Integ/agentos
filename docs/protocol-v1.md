@@ -28,7 +28,7 @@
 
 信封还可以带一个可选的 `caller`，表示以某个已注册的外部调用方的身份发出请求；见“外部调用方”。
 
-`version` 是协议版本，与程序的语义版本号分开。v0.3 和 v0.4 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法；请求信封的 `caller`、`preauthorize` 的 `caller`，以及 `register_caller`、`callers`、`revoke_caller` 方法；`voice`、`listen`、`speech` 方法，`watch` 的 `voice`，`submit` 和 `reply` 的 `spoken`，以及语音事件 `voice_state`、`voice_level`、`transcript`、`voice_notice`（只发给声明了 `voice` 的订阅）。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
+`version` 是协议版本，与程序的语义版本号分开。v0.3 和 v0.4 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法；请求信封的 `caller`、`preauthorize` 的 `caller`，以及 `register_caller`、`callers`、`revoke_caller` 方法；`activity`、`voice`、`listen`、`speech` 方法，`watch` 的 `voice`，`submit` 和 `reply` 的 `spoken`，以及语音事件 `voice_state`、`voice_level`、`transcript`、`voice_notice`（只发给声明了 `voice` 的订阅）。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
 
 `id` 是客户端选择的无符号整数，仅用于关联响应，**不是幂等键**。重复发送同一个 `submit` 请求编号仍可能创建第二个任务。收到完整响应前连接断开时，结果可能已经落盘；客户端必须查询任务，不能自动重发变更请求。
 
@@ -54,6 +54,7 @@
 | `capabilities` | 无 | `capabilities` | 已授权能力的名称、输入 schema、风险和描述 |
 | `read` | `capability: string`，可选 `args: object` | `value` | 直接查询一个已授权的只读（L0）能力，不创建任务 |
 | `watch` | 可选 `after: integer/null`、`voice: boolean` | `watching`，随后事件 | 持续接收任务变更提示与重新同步通知；`voice` 为 true 时也接收语音事件 |
+| `activity` | `limit: integer`（1–100） | `activity` | 最近的能力调用、确认、麦克风使用和崩溃，从审计日志末尾读出，旧的在前 |
 | `voice` | 无 | `voice` | 本机的语音识别和朗读配置及当前状态 |
 | `listen` | `action: "start"/"stop"/"cancel"` | `listening` | 按住说话：开始录音、停止并识别、停止并丢弃；返回这次录音的编号 |
 | `speech` | 可选 `mode: "auto"/"always"/"off"`、`stop: boolean` | `voice` | 设置何时朗读回复，或停止正在朗读的内容 |
@@ -295,6 +296,10 @@ PIN 由服务端核对，不保存、不写入任务或审计；核对通过只�
 
 `mic` 是 `idle`、`listening` 或 `transcribing`；识别结束时先发 `transcript`，再发回到 `idle` 的 `voice_state`。`voice_level` 每秒约十次，落后的订阅会丢掉一部分。没有配置语音时 `voice` 返回 `input`、`output` 都为 false，`listen` 和 `speech` 得到 `voice_unavailable`。
 
+## 最近活动
+
+`activity` 给桌面的“最近活动”面板用：每一项有 `seq`、`at_ms`、`kind` 和 `ok`，按 `kind` 另带字段——`invoked`（能力调用）和 `confirmation`（人工确认）带 `capability`，`device`（麦克风）带 `device` 和 `detail`，`crash` 带 `summary`。服务崩溃时把报告写进状态目录的 `crash.txt` 并退出，用户服务把它重新拉起；新的一次运行把报告的第一行记为审计事件 `daemon_crashed`，这里就能看到。只读日志末尾的一段，更早的活动不会出现。
+
 ## 资源界限与背压
 
 | 项目 | v0.4 限制与行为 |
@@ -319,7 +324,7 @@ PIN 由服务端核对，不保存、不写入任务或审计；核对通过只�
 | `error.code` | 含义与客户端处理 |
 | --- | --- |
 | `invalid_request` | JSON、字段、方法或字段类型不合法；纠正协议请求 |
-| `forbidden` | 请求带着 `caller`，而这个方法只属于用户本人（批准、预授权、调用方管理、`watch`、语音） |
+| `forbidden` | 请求带着 `caller`，而这个方法只属于用户本人（批准、预授权、调用方管理、`watch`、语音、`activity`） |
 | `unsupported_version` | `version` 不受支持；不要以另一种格式盲目重试变更 |
 | `invalid_argument` | 空/超长意图、分页数量越界、步骤从 0 开始、`read` 的参数不是对象或不被能力接受等参数问题 |
 | `not_found` | 任务不存在，或对这个调用方不可见；`submit` 指定的线程不存在或不属于这个来源；`read` 指定的能力不存在、未授权；`caller` 或预授权编号不存在 |

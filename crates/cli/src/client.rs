@@ -156,6 +156,7 @@ fn reply_matches(command: &Command, reply: &Reply) -> bool {
                 Reply::Voice { .. }
             )
             | (Command::Listen { .. }, Reply::Listening { .. })
+            | (Command::Activity { .. }, Reply::Activity { .. })
     )
 }
 

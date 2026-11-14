@@ -39,6 +39,7 @@ use agentos_services::identity::{PinCheck, PinVault};
 use agentos_services::registry::CapabilityRegistry;
 
 const MAX_CONNECTIONS: usize = 64;
+const MAX_ACTIVITY: usize = 100;
 const QUEUE_CAPACITY: usize = 64;
 /// Tasks (and approvals being carried out) that run at the same time unless
 /// the embedder says otherwise. Each may hold a model request open.
@@ -628,6 +629,8 @@ impl Controller {
                     // machine; no outside program listens or speaks.
                     | Command::Voice {}
                     | Command::Speech { .. }
+                    // What the human did, approved and said is theirs.
+                    | Command::Activity { .. }
             )
         {
             return Err(forbidden());
@@ -1012,6 +1015,17 @@ impl Controller {
                     None => self.view().specs.clone(),
                 },
             }),
+            Command::Activity { limit } => {
+                if limit == 0 || limit > MAX_ACTIVITY {
+                    return Err(protocol_error(
+                        "invalid_argument",
+                        format!("activity limit must be between 1 and {MAX_ACTIVITY}"),
+                    ));
+                }
+                Ok(Reply::Activity {
+                    items: agentos_audit::recent_activity(self.audit.path(), limit),
+                })
+            }
             Command::Voice {} => Ok(Reply::Voice {
                 voice: self
                     .voice
