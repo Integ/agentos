@@ -155,7 +155,7 @@ impl Harness {
         capabilities: Vec<Arc<dyn Capability>>,
     ) -> Self {
         let audit_path = std::env::temp_dir().join(format!(
-            "agentosd-{name}-{}-{}.jsonl",
+            "taskd-butler-{name}-{}-{}.jsonl",
             std::process::id(),
             now_ms()
         ));

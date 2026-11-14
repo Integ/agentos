@@ -154,8 +154,9 @@ pub enum AuditEvent {
         state: String,
         message: Option<String>,
     },
-    /// A task of the legacy `agentosd` daemon changed state: running, waiting,
-    /// done, unhandled, failed, cancelled.
+    /// A task of the old `agentosd` daemon changed state: running, waiting,
+    /// done, unhandled, failed, cancelled. Nothing writes it any more; it
+    /// stays so logs from before the merge can still be read.
     TaskState {
         task: u64,
         intent: IntentId,

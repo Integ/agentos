@@ -80,8 +80,7 @@ impl Capability for ClockNow {
 
 /// What `clock.now` says for a moment in some time zone. Someone asking the
 /// time means the time where they are, so the reading is local and carries its
-/// offset. The shape matches `agentosd`'s `clock.now`; `unix_ms` stays for
-/// clients that render the time themselves.
+/// offset. `unix_ms` stays for clients that render the time themselves.
 fn clock_reading<Tz: chrono::TimeZone>(t: chrono::DateTime<Tz>) -> Value
 where
     Tz::Offset: std::fmt::Display,

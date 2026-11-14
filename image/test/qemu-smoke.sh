@@ -8,8 +8,8 @@
 #   2. boot from the installed disk alone; the self-check must pass again,
 #      and a screenshot of the graphical session is saved
 #
-# In both boots the graphical desktop (sway + agentos-shell connected to
-# agentosd) and the desktop user's task service (agentos-taskd) must come up.
+# In both boots the graphical desktop (sway + agentos-shell) and the desktop
+# user's task service (agentos-taskd) it connects to must come up.
 #
 # Usage: image/test/qemu-smoke.sh out/agentos-debian-x86_64.img [workdir]
 set -euo pipefail
@@ -122,7 +122,7 @@ wait_for "$WORK/serial-usb.log" 'AGENTOS-DESKTOP: OK' 240 || fail usb "图形桌
 log "图形桌面就绪：$(grep -ao 'AGENTOS-DESKTOP: OK[^\r]*' "$WORK/serial-usb.log" | tail -1)"
 wait_for "$WORK/serial-usb.log" 'AGENTOS-TASKD-SESSION: OK' 180 || fail usb "登录后没有启动桌面用户的任务服务（agentos-taskd.service）"
 log "桌面用户的任务服务：$(grep -ao 'AGENTOS-TASKD-SESSION: OK[^\r]*' "$WORK/serial-usb.log" | tail -1)"
-wait_for "$WORK/serial-usb.log" 'AGENTOS-JOURNAL: OK' 60 || fail usb "agentosd 的输出没有进 journal（agentos-daemon / systemd-cat）"
+wait_for "$WORK/serial-usb.log" 'AGENTOS-JOURNAL: OK' 60 || fail usb "agentos-taskd 的输出没有进 journal（用户单元 agentos-taskd.service）"
 wait_for "$WORK/serial-usb.log" 'AGENTOS-AUTOINSTALL: OK' "$TIMEOUT" || fail usb "自动安装失败"
 log "安装完成，等待关机"
 for _ in $(seq 120); do kill -0 "$QEMU_PID" 2>/dev/null || break; sleep 1; done

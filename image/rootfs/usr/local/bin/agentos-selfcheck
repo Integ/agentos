@@ -1,5 +1,5 @@
 #!/bin/bash
-# Boot self-check: prove agentosd and the task service run on this machine
+# Boot self-check: prove the task service runs on this machine
 # (offline rule planner, no network or API key needed). The result goes to the journal and to the
 # serial console, where the QEMU smoke test looks for it.
 console() {
@@ -15,15 +15,6 @@ console_text() {
   printf '%s\n' "$text"
   [ -e /dev/ttyS0 ] && printf '%s\n' "$text" | timeout 2 tee /dev/ttyS0 >/dev/null 2>&1 || true
 }
-
-out=$(printf '记一下 开机自检\n看看笔记\n' |
-  timeout 60 /usr/local/bin/agentosd --planner rule --home /run/agentos-selfcheck --audit /run/agentos-selfcheck.jsonl 2>&1)
-if grep -q '开机自检' <<<"$out"; then
-  console "AGENTOS-SELFCHECK: OK ($(cat /usr/share/agentos/distro 2>/dev/null) $(cat /usr/share/agentos/version 2>/dev/null), root $(df -h --output=size / | tail -1 | tr -d " "))"
-else
-  console "AGENTOS-SELFCHECK: FAIL"
-  printf '%s\n' "$out"
-fi
 
 # Task service: a throwaway agentos-taskd (offline rule planner) carries out
 # an intent from the agentos command, and its MCP server answers a registered
@@ -49,8 +40,10 @@ taskd_check() {
   kill "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null
   if [ "$ok" = 1 ]; then
+    console "AGENTOS-SELFCHECK: OK ($(cat /usr/share/agentos/distro 2>/dev/null) $(cat /usr/share/agentos/version 2>/dev/null), root $(df -h --output=size / | tail -1 | tr -d " "))"
     console "AGENTOS-TASKD: OK ($(/usr/local/bin/agentos --version 2>/dev/null))"
   else
+    console "AGENTOS-SELFCHECK: FAIL"
     console "AGENTOS-TASKD: FAIL"
     cat "$dir/submit" "$dir/log"
     printf '%s\n' "$mcp"
@@ -108,7 +101,8 @@ else
   console "AGENTOS-NETWORK: FAIL"
 fi
 
-# Graphical desktop: agentos-shell loaded its page and is talking to agentosd
+# Graphical desktop: agentos-shell loaded its page and is talking to the task
+# service
 # (it leaves a marker in the session user's runtime dir). Needs a display, so
 # a machine without one simply reports a timeout here.
 marker=/run/user/$(id -u agent)/agentos-shell.ready
@@ -117,7 +111,7 @@ if [ -e "$marker" ]; then
   console "AGENTOS-DESKTOP: OK ($(cat "$marker"))"
 else
   console "AGENTOS-DESKTOP: FAIL"
-  journalctl -q -b --no-pager -n 20 -t agentos-shell -t agentosd -t agentos-desktop 2>/dev/null
+  journalctl -q -b --no-pager -n 20 -t agentos-shell -t agentos-taskd -t agentos-desktop 2>/dev/null
   tail -n 20 "/run/user/$(id -u agent)/agentos-shell.log" /tmp/agentos-sway.log 2>/dev/null
 fi
 
@@ -143,9 +137,10 @@ else
   } 2>&1 | console_text
 fi
 
-# Crash logging: the desktop's agentosd writes to the journal (agentos-daemon
-# runs it under systemd-cat), so its output and any crash report survive.
-if journalctl -q -b --no-pager -t agentosd 2>/dev/null | grep -q '管家 Agent 已就绪'; then
+# Crash logging: the desktop user's task service writes to the journal (its
+# user unit names it agentos-taskd), so its output and any crash report
+# survive a reboot.
+if journalctl -q -b --no-pager -t agentos-taskd 2>/dev/null | grep -q '后台服务已就绪'; then
   console "AGENTOS-JOURNAL: OK"
 else
   console "AGENTOS-JOURNAL: FAIL"

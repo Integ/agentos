@@ -17,10 +17,9 @@
 #                 The finished image always points apt at the distro's
 #                 default mirror, so a CI-local mirror never leaks into it.
 #   OUT           output directory                      (default: out/)
-#   AGENTOSD_BIN, AGENTOS_SHELL_BIN, AGENTOS_TASKD_BIN, AGENTOS_CLI_BIN,
-#   AGENTOS_WEB_SHELL_BIN
-#                 prebuilt agentosd, agentos-shell, agentos-taskd, agentos and
-#                 agentos-web-shell binaries (all five skip cargo build)
+#   AGENTOS_SHELL_BIN, AGENTOS_TASKD_BIN, AGENTOS_CLI_BIN, AGENTOS_WEB_SHELL_BIN
+#                 prebuilt agentos-shell, agentos-taskd, agentos and
+#                 agentos-web-shell binaries (all four skip cargo build)
 #   EXTRA_MB      free space left in the root fs, in MiB (default: 1024)
 #   COMPRESS      1 to also write <image>.xz            (default: 0)
 #   AGENTOS_RELEASE  release tag recorded in the image  (default: git describe)
@@ -87,7 +86,7 @@ PACKAGES=(
   sway foot fonts-noto-cjk fcitx5 fcitx5-chinese-addons fcitx5-frontend-gtk3
   libwebkit2gtk-4.1-0 fonts-inter
   libgl1-mesa-dri libpam-systemd dbus-user-session
-  # Voice: PipeWire session audio; agentosd records with arecord and plays
+  # Voice: PipeWire session audio; agentos-taskd records with arecord and plays
   # with aplay, routed through pipewire-alsa.
   pipewire pipewire-alsa pipewire-pulse wireplumber alsa-utils
 )
@@ -104,21 +103,20 @@ cleanup() {
 trap cleanup EXIT
 
 # --- 1. AgentOS programs ------------------------------------------------------
-# agentosd + agentos-shell are the desktop; agentos-taskd is the task service
-# (a user service started with the session), agentos its command line and
-# MCP server, agentos-web-shell the browser interface (started by hand).
-if [[ -z "${AGENTOSD_BIN:-}" || -z "${AGENTOS_SHELL_BIN:-}" || -z "${AGENTOS_TASKD_BIN:-}" ||
+# agentos-taskd is the task service (a user service started with the
+# session), agentos-shell the desktop on it, agentos its command line and MCP
+# server, agentos-web-shell the browser interface (started by hand).
+if [[ -z "${AGENTOS_SHELL_BIN:-}" || -z "${AGENTOS_TASKD_BIN:-}" ||
       -z "${AGENTOS_CLI_BIN:-}" || -z "${AGENTOS_WEB_SHELL_BIN:-}" ]]; then
   log "编译 AgentOS 程序（release）"
-  (cd "$REPO" && cargo build --release -p agentosd -p agentos-shell -p agentos-taskd \
+  (cd "$REPO" && cargo build --release -p agentos-shell -p agentos-taskd \
     -p agentos-cli -p agentos-web-shell)
 fi
-BIN="${AGENTOSD_BIN:-$REPO/target/release/agentosd}"
 SHELL_BIN="${AGENTOS_SHELL_BIN:-$REPO/target/release/agentos-shell}"
 TASKD_BIN="${AGENTOS_TASKD_BIN:-$REPO/target/release/agentos-taskd}"
 CLI_BIN="${AGENTOS_CLI_BIN:-$REPO/target/release/agentos}"
 WEB_SHELL_BIN="${AGENTOS_WEB_SHELL_BIN:-$REPO/target/release/agentos-web-shell}"
-for b in "$BIN" "$SHELL_BIN" "$TASKD_BIN" "$CLI_BIN" "$WEB_SHELL_BIN"; do
+for b in "$SHELL_BIN" "$TASKD_BIN" "$CLI_BIN" "$WEB_SHELL_BIN"; do
   [[ -x "$b" ]] || die "找不到可执行文件：$b"
 done
 
@@ -227,7 +225,6 @@ log "安装 AgentOS 用户态"
 # prompt for an account that has none).
 cp -a --no-preserve=ownership "$HERE/rootfs/." "$ROOT/"
 chown root:root "$ROOT"
-install -m 0755 "$BIN" "$ROOT/usr/local/bin/agentosd"
 install -m 0755 "$SHELL_BIN" "$ROOT/usr/local/bin/agentos-shell"
 install -m 0755 "$TASKD_BIN" "$ROOT/usr/local/bin/agentos-taskd"
 install -m 0755 "$CLI_BIN" "$ROOT/usr/local/bin/agentos"

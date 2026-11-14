@@ -1,6 +1,6 @@
 [package]
 name = "agentos-shell"
-description = "AgentOS graphical shell: a full-screen glass desktop that talks to agentosd"
+description = "AgentOS graphical shell: a full-screen glass desktop on the task service"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

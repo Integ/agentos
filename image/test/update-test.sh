@@ -4,9 +4,11 @@
 #
 #   image/test/update-test.sh [bundle.tar.gz]
 #
-# Without an argument a bundle is made from target/debug/agentosd,
-# agentos-taskd and agentos (cargo build -p agentosd -p agentos-taskd
-# -p agentos-cli first).
+# Without an argument a bundle is made from target/debug/agentos-taskd and
+# agentos (cargo build -p agentos-taskd -p agentos-cli first).
+#
+# agentos-update-v0.4.0 beside this script is the updater as v0.4.0 shipped
+# it, unchanged: machines on that version run it to install the next one.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 UPDATE="$REPO/image/rootfs/usr/local/bin/agentos-update"
@@ -24,8 +26,7 @@ fail() { echo "FAIL - $*" >&2; exit 1; }
 if [ $# -ge 1 ]; then
   bundle="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 else
-  OUT="$T/out" AGENTOS_RELEASE=v9.9.9 AGENTOSD_BIN="$REPO/target/debug/agentosd" \
-    AGENTOS_SHELL_BIN=/usr/bin/true AGENTOS_TASKD_BIN="$REPO/target/debug/agentos-taskd" \
+  OUT="$T/out" AGENTOS_RELEASE=v9.9.9 AGENTOS_SHELL_BIN=/usr/bin/true AGENTOS_TASKD_BIN="$REPO/target/debug/agentos-taskd" \
     AGENTOS_CLI_BIN="$REPO/target/debug/agentos" AGENTOS_WEB_SHELL_BIN=/usr/bin/true \
     "$REPO/image/make-bundle.sh" >/dev/null
   bundle="$T/out/agentos-update-x86_64.tar.gz"
@@ -66,7 +67,8 @@ ok "--check reports the new release"
 
 "$UPDATE" >"$T/log" 2>&1 || { cat "$T/log"; fail "update failed"; }
 [ "$(cat "$root/usr/share/agentos/release")" = "$new_release" ] || fail "release file not updated"
-cmp -s "$root/usr/local/bin/agentosd" <(tar -xzOf "$bundle" usr/local/bin/agentosd) || fail "agentosd not replaced"
+cmp -s "$root/usr/local/bin/agentosd" <(tar -xzOf "$bundle" usr/local/bin/agentosd) ||
+  fail "agentosd not replaced by its stand-in"
 [ -x "$root/usr/local/bin/agentos-update" ] || fail "scripts not installed"
 [ -f "$root/etc/systemd/system/agentos-selfcheck.service" ] || fail "units not installed"
 cmp -s "$root/usr/local/bin/agentos-taskd" <(tar -xzOf "$bundle" usr/local/bin/agentos-taskd) ||
@@ -100,7 +102,7 @@ grep -q "校验失败" "$T/log" || { cat "$T/log"; fail "wrong error for bad che
 [ "$(cat "$root/usr/share/agentos/release")" = v0.0.1 ] || fail "bad checksum changed files"
 ok "checksum mismatch is refused"
 
-# Bundles with files outside the allowed paths, or a broken agentosd.
+# Bundles with files outside the allowed paths, or a broken task service.
 evil() { # evil <name> <setup-cmd>
   local d="$T/evil-$1"
   mkdir -p "$d"
@@ -120,11 +122,11 @@ if "$UPDATE" >"$T/log" 2>&1; then fail "symlink accepted"; fi
 grep -q "不允许的文件类型" "$T/log" || { cat "$T/log"; fail "wrong error for symlink"; }
 ok "symlinks are refused"
 
-evil broken 'printf "#!/bin/sh\nexit 1\n" > usr/local/bin/agentosd'
-if "$UPDATE" >"$T/log" 2>&1; then fail "broken agentosd accepted"; fi
-grep -q "自检失败" "$T/log" || { cat "$T/log"; fail "wrong error for broken agentosd"; }
-grep -q 'echo old' "$root/usr/local/bin/agentosd" || fail "broken update changed files"
-ok "a new agentosd that fails its self-check is not installed"
+evil no-taskd 'rm usr/local/bin/agentos-taskd'
+if "$UPDATE" >"$T/log" 2>&1; then fail "bundle without the task service accepted"; fi
+grep -q "没有 agentos-taskd" "$T/log" || { cat "$T/log"; fail "wrong error for a missing task service"; }
+grep -q 'echo old' "$root/usr/local/bin/agentosd" || fail "refused update changed files"
+ok "a bundle without the task service is refused"
 
 evil broken-taskd 'printf "#!/bin/sh\nexit 1\n" > usr/local/bin/agentos-taskd'
 if "$UPDATE" >"$T/log" 2>&1; then fail "broken agentos-taskd accepted"; fi
@@ -144,5 +146,19 @@ cp "$bundle" "$T/offline.tar.gz"
 "$UPDATE" --file "$T/offline.tar.gz" >"$T/log" 2>&1 || { cat "$T/log"; fail "offline update failed"; }
 [ "$(cat "$root/usr/share/agentos/release")" = "$new_release" ] || fail "offline update not applied"
 ok "offline --file install"
+
+# A machine still on v0.4.0 updates with the updater it has: that one wants
+# usr/local/bin/agentosd in the bundle and runs it as a self-test. The
+# stand-in must pass it, by running the bundle's own task service.
+old_root="$T/old-root"
+mkdir -p "$old_root/usr/local/bin" "$old_root/usr/share/agentos" "$old_root/etc/agentos"
+echo v0.4.0 >"$old_root/usr/share/agentos/release"
+printf '#!/bin/sh\necho old\n' >"$old_root/usr/local/bin/agentosd"
+chmod 0755 "$old_root/usr/local/bin/agentosd"
+AGENTOS_UPDATE_ROOT="$old_root" "$REPO/image/test/agentos-update-v0.4.0" --file "$T/offline.tar.gz" \
+  >"$T/log" 2>&1 || { cat "$T/log"; fail "the v0.4.0 updater refused the new bundle"; }
+[ "$(cat "$old_root/usr/share/agentos/release")" = "$new_release" ] || fail "v0.4.0 updater did not install"
+grep -q 'agentosd 已移除' "$old_root/usr/local/bin/agentosd" || fail "stand-in not installed by the v0.4.0 updater"
+ok "the v0.4.0 updater installs the new bundle"
 
 echo "all $pass agentos-update tests passed"

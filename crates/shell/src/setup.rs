@@ -18,7 +18,7 @@
 //! | `wifi-connect` | join one (`ssid`, `password`) |
 //! | `test-ha` | try a Home Assistant URL and token (`hass_url`, `hass_token`) |
 //! | `apply` | write the settings, set or clear the PIN, mark setup done |
-//! | `restart` | restart agentosd so it reads the new settings |
+//! | `restart` | restart the task service so it reads the new settings |
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -283,15 +283,15 @@ fn uid() -> Option<u32> {
     std::fs::metadata("/proc/self").ok().map(|m| m.uid())
 }
 
-/// agentosd runs as this user under agentos-daemon, which starts it again
-/// with the new `/etc/agentos/agentos.env`.
+/// The task service runs as this user under its user unit, which starts it
+/// again at once; the new run reads the new `/etc/agentos/agentos.env`.
 fn restart_daemon() -> Result<(), String> {
     let uid = uid().ok_or("不知道当前用户")?;
     Command::new("pkill")
-        .args(["-x", "-u", &uid.to_string(), "agentosd"])
+        .args(["-x", "-u", &uid.to_string(), "agentos-taskd"])
         .status()
         .map(|_| ())
-        .map_err(|e| format!("无法重启 agentosd：{e}"))
+        .map_err(|e| format!("无法重启任务服务：{e}"))
 }
 
 #[cfg(test)]

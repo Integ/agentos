@@ -90,7 +90,10 @@ async fn connect(path: &Path) -> Result<UnixStream, ClientError> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let metadata = std::fs::symlink_metadata(path).map_err(|e| {
         transport(
-            format!("无法连接 {}：{e}；请先启动 agentosd", path.display()),
+            format!(
+                "无法连接 {}：{e}；请先启动任务服务 agentos-taskd",
+                path.display()
+            ),
             false,
         )
     })?;

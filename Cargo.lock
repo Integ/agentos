@@ -151,25 +151,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentosd"
-version = "0.4.0"
-dependencies = [
- "agentos-audit",
- "agentos-core",
- "agentos-planner",
- "agentos-policy",
- "agentos-services",
- "async-trait",
- "chrono",
- "libc",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
-]
-
-[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
