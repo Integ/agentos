@@ -10,6 +10,7 @@ pub mod callers;
 pub mod control;
 pub mod crash;
 pub mod mic_led;
+pub mod migrate;
 pub mod preauth;
 pub mod service;
 pub mod voice;

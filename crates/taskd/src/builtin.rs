@@ -20,7 +20,8 @@ use serde_json::{json, Value};
 
 use agentos_services::registry::CapabilityRegistry;
 
-const MAX_NOTE_CHARS: usize = 16_384;
+/// The longest note the notebook accepts.
+pub const MAX_NOTE_CHARS: usize = 16_384;
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 fn spec(name: &str, description: &str, risk: RiskLevel, input_schema: Value) -> CapabilitySpec {

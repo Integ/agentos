@@ -27,6 +27,7 @@ use agentos_taskd::builtin;
 use agentos_taskd::butler::{grant_manifest, Budget, Butler};
 use agentos_taskd::callers::CallerStore;
 use agentos_taskd::crash;
+use agentos_taskd::migrate;
 use agentos_taskd::preauth::PreauthStore;
 use agentos_taskd::service::Service;
 use agentos_taskd::voice::{SpeechOutput, Voice, VoiceConfig};
@@ -254,6 +255,9 @@ async fn main() -> io::Result<()> {
             return Ok(());
         }
     };
+    // Only the desktop user's own service takes over agentosd's data; a
+    // state directory named on the command line is someone's test or tool.
+    let explicit_state_dir = options.state_dir.is_some();
     let state_dir = options
         .state_dir
         .map_or_else(agentos_ipc::default_state_dir, Ok)?;
@@ -274,6 +278,25 @@ async fn main() -> io::Result<()> {
         }
         Mode::ClearPin => return clear_pin(&pin_path),
         Mode::VerifyAudit => return verify_audit(&audit_path),
+    }
+    if !explicit_state_dir {
+        if let Some(legacy) = migrate::legacy_dir(|name| std::env::var(name).ok()) {
+            // Before anything opens these files. A failure is reported and
+            // tried again next start; it does not keep the service down.
+            match migrate::from_agentosd(&legacy, &state_dir) {
+                Ok(Some(report)) => {
+                    eprintln!("已从 agentosd 迁移数据（{} 未改动）：", legacy.display());
+                    for line in report.lines() {
+                        eprintln!("  {line}");
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => eprintln!(
+                    "从 agentosd 迁移数据失败（{}），下次启动时重试：{error}",
+                    legacy.display()
+                ),
+            }
+        }
     }
     // From here on a panic is reported and ends the service; see crash.rs.
     crash::install(&state_dir);
