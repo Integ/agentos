@@ -80,7 +80,10 @@ pub fn build_turn_request(cfg: &ClaudeConfig, conv: &Conversation<'_>) -> Value 
     if let Some(speaker) = &conv.intent.speaker {
         user = format!("[{speaker}] {user}");
     }
-    let mut messages = vec![json!({ "role": "user", "content": user })];
+    let mut messages = vec![json!({
+        "role": "user",
+        "content": [{ "type": "text", "text": user }],
+    })];
     for round in conv.history {
         let mut content = Vec::new();
         if let Some(t) = &round.text {
@@ -102,17 +105,36 @@ pub fn build_turn_request(cfg: &ClaudeConfig, conv: &Conversation<'_>) -> Value 
                 json!({
                     "type": "tool_result",
                     "tool_use_id": r.id,
-                    "content": r.content,
+                    "content": crate::tool_output_for_model(&r.content),
                     "is_error": !r.ok,
                 })
             })
             .collect();
         messages.push(json!({ "role": "user", "content": results }));
     }
+    // Each round resends everything before it. One breakpoint at the end of
+    // the newest message lets the next round read the whole conversation so
+    // far from the cache; earlier breakpoints stay valid read points.
+    if let Some(last) = messages
+        .last_mut()
+        .and_then(|m| m.get_mut("content"))
+        .and_then(Value::as_array_mut)
+        .and_then(|blocks| blocks.last_mut())
+    {
+        last["cache_control"] = json!({ "type": "ephemeral" });
+    }
     json!({
         "model": cfg.model,
         "max_tokens": cfg.max_tokens,
-        "system": conv.system,
+        // Tools render before the system prompt, so this breakpoint caches
+        // both. It only pays off while the system prompt stays byte-identical
+        // between rounds, which is why the butler does not put a ticking
+        // clock in it.
+        "system": [{
+            "type": "text",
+            "text": conv.system,
+            "cache_control": { "type": "ephemeral" },
+        }],
         "output_config": { "effort": cfg.effort },
         "fallbacks": "default",
         "tools": tools,
@@ -217,6 +239,7 @@ pub fn response_usage(model: &str, body: &Value) -> Usage {
         ),
         input_tokens: input,
         output_tokens: count("output_tokens"),
+        cached_input_tokens: count("cache_read_input_tokens"),
     }
 }
 
@@ -391,8 +414,97 @@ mod tests {
         assert_eq!(body["model"], DEFAULT_MODEL);
         assert_eq!(body["tools"][0]["name"], "notes__append");
         assert_eq!(body["fallbacks"], "default");
-        assert_eq!(body["messages"][0]["content"], "记一下买牛奶");
+        assert_eq!(body["messages"][0]["content"][0]["text"], "记一下买牛奶");
         assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn requests_mark_the_stable_prefix_and_the_newest_turn_for_caching() {
+        // Guards the cost of the planning loop: tools + system and the
+        // conversation so far are read from the prompt cache on the next round.
+        use crate::{Round, ToolResult};
+        let i = intent("记一下买牛奶");
+        let round = Round {
+            text: None,
+            calls: vec![Step {
+                id: "t1".into(),
+                capability: CapabilityName::new("notes.append"),
+                args: json!({"text": "买牛奶"}),
+            }],
+            results: vec![ToolResult {
+                id: "t1".into(),
+                ok: true,
+                content: "{}".into(),
+            }],
+        };
+        let request = |history: &[Round]| {
+            build_turn_request(
+                &cfg("x"),
+                &Conversation {
+                    system: "sys",
+                    intent: &i,
+                    history,
+                    available: &specs(),
+                },
+            )
+        };
+        let first = request(&[]);
+        assert_eq!(first["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(
+            first["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        let second = request(std::slice::from_ref(&round));
+        let m = second["messages"].as_array().unwrap();
+        assert_eq!(m[2]["content"][0]["cache_control"]["type"], "ephemeral");
+        // Only the newest turn carries the moving breakpoint (at most four
+        // are allowed per request).
+        assert!(m[0]["content"][0].get("cache_control").is_none());
+        // Apart from the moving marker, the earlier request is an exact
+        // prefix of the later one: nothing is rebuilt between rounds.
+        assert_eq!(first["system"], second["system"]);
+        assert_eq!(first["tools"], second["tools"]);
+        let mut opening = first["messages"][0].clone();
+        opening["content"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_control");
+        assert_eq!(opening, m[0]);
+    }
+
+    #[test]
+    fn an_oversized_tool_result_reaches_the_model_shortened_and_marked() {
+        use crate::{Round, ToolResult, MAX_TOOL_OUTPUT_CHARS};
+        let i = intent("看看这个网页");
+        let page = "页".repeat(MAX_TOOL_OUTPUT_CHARS * 3);
+        let history = vec![Round {
+            text: None,
+            calls: vec![Step {
+                id: "t1".into(),
+                capability: CapabilityName::new("notes.append"),
+                args: json!({}),
+            }],
+            results: vec![ToolResult {
+                id: "t1".into(),
+                ok: true,
+                content: page,
+            }],
+        }];
+        let body = build_turn_request(
+            &cfg("x"),
+            &Conversation {
+                system: "sys",
+                intent: &i,
+                history: &history,
+                available: &specs(),
+            },
+        );
+        let shown = body["messages"][2]["content"][0]["content"]
+            .as_str()
+            .unwrap();
+        assert!(shown.chars().count() < MAX_TOOL_OUTPUT_CHARS + 100);
+        // The model is told it did not see everything, never silently cut.
+        assert!(shown.contains("中间省略了 40000 个字符"));
     }
 
     #[test]
@@ -421,7 +533,7 @@ mod tests {
                 available: &specs(),
             },
         );
-        assert_eq!(body["system"], "sys");
+        assert_eq!(body["system"][0]["text"], "sys");
         let m = &body["messages"];
         assert_eq!(m.as_array().unwrap().len(), 3);
         assert_eq!(m[1]["role"], "assistant");
@@ -573,9 +685,11 @@ mod tests {
             (reported.input_tokens, reported.output_tokens),
             (Some(115), Some(7))
         );
+        assert_eq!(reported.cached_input_tokens, Some(100));
         // Guards "unknown is not zero".
         let silent = response_usage("asked-for", &json!({"content": []}));
         assert_eq!(silent.model.as_deref(), Some("asked-for"));
         assert_eq!((silent.input_tokens, silent.output_tokens), (None, None));
+        assert_eq!(silent.cached_input_tokens, None);
     }
 }

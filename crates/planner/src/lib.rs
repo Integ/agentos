@@ -87,6 +87,39 @@ impl Step {
     }
 }
 
+/// The most of one tool result a model is shown, in characters.
+///
+/// A web page, an MCP tool or a log can return far more text than a planning
+/// round needs, and every later round of the task pays for it again. Coding
+/// agents cap tool output the same way. The full result is kept on the task
+/// step and in the audit log; only the model's copy is shortened.
+pub const MAX_TOOL_OUTPUT_CHARS: usize = 20_000;
+
+/// `content` as a model is shown it: whole when short enough, otherwise its
+/// beginning and end with a note saying how much was left out, so the model
+/// knows it did not see everything. Deterministic, so replaying a round in a
+/// later request sends the same bytes and keeps the prompt cache valid.
+pub fn tool_output_for_model(content: &str) -> std::borrow::Cow<'_, str> {
+    tool_output_within(content, MAX_TOOL_OUTPUT_CHARS)
+}
+
+fn tool_output_within(content: &str, limit: usize) -> std::borrow::Cow<'_, str> {
+    let total = content.chars().count();
+    if total <= limit {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    // Most results put what matters first (a status, a title); the end often
+    // holds a summary or the final error line.
+    let head = limit * 3 / 4;
+    let tail = limit - head;
+    let start: String = content.chars().take(head).collect();
+    let end: String = content.chars().skip(total - tail).collect();
+    std::borrow::Cow::Owned(format!(
+        "{start}\n\n[……结果太长，中间省略了 {} 个字符；完整结果保存在任务步骤里……]\n\n{end}",
+        total - head - tail
+    ))
+}
+
 /// The outcome of one tool call, as handed back to the planner.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
@@ -125,6 +158,11 @@ pub struct Usage {
     /// a prompt cache.
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    /// The part of `input_tokens` read back from a prompt cache, when the
+    /// service reports it. Shows whether caching works; already included in
+    /// `input_tokens`.
+    #[serde(default)]
+    pub cached_input_tokens: Option<u64>,
 }
 
 impl Usage {
@@ -192,5 +230,40 @@ pub trait Planner: Send + Sync {
         } else {
             Plan::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_tool_output_is_shown_unchanged() {
+        let text = "一切正常";
+        assert!(matches!(
+            tool_output_for_model(text),
+            std::borrow::Cow::Borrowed(t) if t == text
+        ));
+    }
+
+    #[test]
+    fn long_tool_output_keeps_its_beginning_and_end_and_says_what_is_missing() {
+        let text: String = (0..100)
+            .map(|n| char::from(b'a' + (n % 26) as u8))
+            .collect();
+        let shown = tool_output_within(&text, 20);
+        assert!(shown.starts_with(&text[..15]));
+        assert!(shown.ends_with(&text[95..]));
+        assert!(shown.contains("省略了 80 个字符"));
+        // Same input, same bytes: replayed rounds keep the prompt cache.
+        assert_eq!(shown, tool_output_within(&text, 20));
+    }
+
+    #[test]
+    fn clipping_counts_characters_not_bytes() {
+        let text = "汉".repeat(30);
+        let shown = tool_output_within(&text, 20);
+        assert!(shown.starts_with(&"汉".repeat(15)));
+        assert!(shown.contains("省略了 10 个字符"));
     }
 }

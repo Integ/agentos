@@ -115,6 +115,11 @@ impl Default for Budget {
 struct Stretch {
     since: Instant,
     before_ms: u64,
+    /// The wall-clock time planners are told for this stretch. Fixed rather
+    /// than read every round so the system prompt stays byte-identical from
+    /// round to round and the model's prompt cache can be reused; a task
+    /// that waited for the human starts a new stretch and is told afresh.
+    started: chrono::DateTime<chrono::Local>,
 }
 
 impl Stretch {
@@ -1005,6 +1010,7 @@ impl Butler {
     ) -> io::Result<()> {
         let stretch = Stretch {
             since: Instant::now(),
+            started: chrono::Local::now(),
             before_ms: self.tasks.get(id).map_or(0, |task| task.usage.active_ms),
         };
         let outcome = self.drive_stretch(id, stack, resume, held, &stretch).await;
@@ -1237,11 +1243,13 @@ impl Butler {
                     None => self.capabilities(),
                 };
             }
-            // Generated for every round: a task may run, or wait, for long.
+            // As of the start of this stretch: a task may wait for the human
+            // for long, and then it is told the time again, but between
+            // rounds the prompt does not change and stays cacheable.
             let system = format!(
                 "{}\n\n{}",
                 frame.system,
-                crate::builtin::environment(chrono::Local::now(), &frame.intent)
+                crate::builtin::environment(stretch.started, &frame.intent)
             );
             let conversation = Conversation {
                 system: &system,
@@ -1307,6 +1315,15 @@ impl Butler {
                     ));
                 }
                 return Ok(Flow::Finished(plan.reply));
+            }
+            // Asked a third time for calls that twice in a row came back the
+            // same: the agent is going in circles. Stopping saves the rounds
+            // and tokens it would burn, and keeps it from repeating a side
+            // effect; the outcome says so instead of passing for success.
+            if repeats_without_progress(&frame.history, &plan.steps) {
+                return Ok(Flow::Failed(
+                    "同样的调用连续两轮得到同样的结果，没有再执行第三次：规划陷入了重复。".into(),
+                ));
             }
             frame.tainted |= plan.tainted;
             let keys: Vec<String> = plan.steps.iter().map(|_| self.next_call()).collect();
@@ -1860,6 +1877,7 @@ impl Butler {
             model: usage.model.clone(),
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
             duration_ms: u64::try_from(asked.elapsed().as_millis()).unwrap_or(u64::MAX),
         })?;
         self.tasks.update(task.id, |t| {
@@ -1995,6 +2013,35 @@ impl Butler {
             Err(e) => eprintln!("{id}：{message}；无法保存失败状态：{e}"),
         }
     }
+}
+
+/// Whether `next` asks for exactly the calls of each of the last two rounds,
+/// and those two rounds ended exactly alike. Call ids are the model's own and
+/// differ every round, so only what was called, with what, and what came of
+/// it are compared. Two rounds are needed: trying something again once (a
+/// transient failure, a value that may have changed) is reasonable.
+fn repeats_without_progress(history: &[Round], next: &[Step]) -> bool {
+    let [.., earlier, last] = history else {
+        return false;
+    };
+    let calls = |steps: &[Step]| -> Vec<(CapabilityName, Value)> {
+        steps
+            .iter()
+            .map(|step| (step.capability.clone(), step.args.clone()))
+            .collect()
+    };
+    let outcomes = |round: &Round| -> Vec<(bool, String)> {
+        round
+            .results
+            .iter()
+            .map(|result| (result.ok, result.content.clone()))
+            .collect()
+    };
+    let asked = calls(next);
+    !asked.is_empty()
+        && asked == calls(&last.calls)
+        && asked == calls(&earlier.calls)
+        && outcomes(last) == outcomes(earlier)
 }
 
 fn follow_up(value: &Value) -> Option<Step> {

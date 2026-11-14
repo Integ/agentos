@@ -102,10 +102,11 @@ pub fn build_turn_request(cfg: &OpenAiConfig, conv: &Conversation<'_>) -> Value 
             "tool_calls": calls,
         }));
         for r in &round.results {
+            let shown = crate::tool_output_for_model(&r.content);
             let content = if r.ok {
-                r.content.clone()
+                shown.into_owned()
             } else {
-                format!("错误：{}", r.content)
+                format!("错误：{shown}")
             };
             messages.push(json!({ "role": "tool", "tool_call_id": r.id, "content": content }));
         }
@@ -228,6 +229,8 @@ pub fn response_usage(model: &str, body: &Value) -> Usage {
         ),
         input_tokens: count("prompt_tokens"),
         output_tokens: count("completion_tokens"),
+        // Services that cache prompts automatically report the hit here.
+        cached_input_tokens: count("prompt_tokens_details/cached_tokens"),
     }
 }
 
@@ -596,13 +599,17 @@ mod tests {
     fn usage_is_read_when_reported_and_unknown_when_a_service_leaves_it_out() {
         let reported = response_usage(
             "asked-for",
-            &json!({"model": "answered", "usage": {"prompt_tokens": 12, "completion_tokens": 3}}),
+            &json!({"model": "answered", "usage": {
+                "prompt_tokens": 12, "completion_tokens": 3,
+                "prompt_tokens_details": {"cached_tokens": 8}
+            }}),
         );
         assert_eq!(reported.model.as_deref(), Some("answered"));
         assert_eq!(
             (reported.input_tokens, reported.output_tokens),
             (Some(12), Some(3))
         );
+        assert_eq!(reported.cached_input_tokens, Some(8));
         // Guards "unknown is not zero": many compatible services report nothing.
         let silent = response_usage("asked-for", &json!({"choices": []}));
         assert_eq!(silent.model.as_deref(), Some("asked-for"));

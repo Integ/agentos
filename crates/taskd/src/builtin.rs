@@ -112,7 +112,7 @@ where
 {
     let reading = clock_reading(now);
     format!(
-        "当前环境（由系统提供，每轮更新）：{}；设备 {}（{} {}）；这个意图来自 {}。",
+        "当前环境（由系统提供，任务开始或继续执行时更新）：{}；设备 {}（{} {}）；这个意图来自 {}。",
         reading["message"].as_str().unwrap_or_default(),
         hostname().unwrap_or_else(|| "未知".into()),
         std::env::consts::OS,

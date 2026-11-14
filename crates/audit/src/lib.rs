@@ -107,6 +107,10 @@ pub enum AuditEvent {
         model: Option<String>,
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
+        /// The part of `input_tokens` read from a prompt cache. Absent in
+        /// records written before it was tracked, and when not reported.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cached_input_tokens: Option<u64>,
         duration_ms: u64,
     },
     /// An agent asked the user a question and its task now waits for the

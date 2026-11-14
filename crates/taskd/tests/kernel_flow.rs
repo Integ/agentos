@@ -1099,6 +1099,7 @@ fn metered(plan: Plan, input: Option<u64>, output: Option<u64>) -> Plan {
             model: Some("test-model".into()),
             input_tokens: input,
             output_tokens: output,
+            cached_input_tokens: None,
         }),
         ..plan
     }
@@ -1348,6 +1349,60 @@ async fn every_round_is_told_the_time_and_the_device_by_the_system_not_the_user(
     }
     // Guards "the service states facts, the user states intent".
     assert_eq!(h.task(1).intent.text, "看看笔记");
+}
+
+#[tokio::test]
+async fn the_system_prompt_holds_still_between_rounds_and_is_refreshed_after_a_wait() {
+    // Guards prompt caching: a prefix that changes every round (a ticking
+    // clock) would make every planning request pay for the whole prompt.
+    let mut h = Harness::new("stable-prompt", |s| match s.rounds {
+        0 => {
+            // A slow model: the next round starts in a later second.
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            call("clock.now", json!({}))
+        }
+        1 => call("ask.user", json!({"question": "哪一天？"})),
+        _ => answer("好"),
+    });
+    h.say("安排一下").await;
+    // Long enough that a clock read after the wait shows a different second.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    h.reply(1, 1, "周三").await;
+    assert_eq!(h.task(1).state, TaskState::Succeeded);
+    let seen = h.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[0].system, seen[1].system, "same stretch, same prompt");
+    assert_ne!(
+        seen[1].system, seen[2].system,
+        "a task that waited for the human is told the time again"
+    );
+}
+
+#[tokio::test]
+async fn an_agent_repeating_the_same_call_without_progress_is_stopped_as_failed() {
+    // Guards "outcomes are recorded as they are": going in circles is not
+    // success, and it ends long before the round budget is spent.
+    let mut h = Harness::new("stuck", |_| call("notes.list", json!({})));
+    let r = h.say("看看笔记").await;
+    let task = h.task(1);
+    assert_eq!(task.state, TaskState::Failed);
+    assert!(r.text.contains("规划陷入了重复"), "{}", r.text);
+    // Asked three times, run only twice.
+    assert_eq!(task.steps.len(), 2);
+    assert_eq!(h.seen.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn trying_a_call_again_once_is_not_taken_for_a_loop() {
+    let mut h = Harness::new("retry-once", |s| match s.rounds {
+        0 | 1 => call("notes.list", json!({})),
+        2 => call("notes.append", json!({"text": "茶"})),
+        _ => answer("好了"),
+    });
+    h.say("看看笔记，再记一下 茶").await;
+    let task = h.task(1);
+    assert_eq!(task.state, TaskState::Succeeded);
+    assert_eq!(h.notes(), vec!["茶".to_string()]);
 }
 
 /// "Mail may go to me without asking", as the user would pre-authorize it.
