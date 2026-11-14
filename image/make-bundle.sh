@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Pack the AgentOS layer into the update bundle that `agentos-update`
-# installs: agentosd, agentos-shell, agentos-taskd, agentos,
-# agentos-web-shell, image/rootfs/usr (scripts and the agentos-taskd user
-# unit) and the AgentOS-owned systemd units and udev rules. Writes
+# installs: agentos-taskd, agentos, agentos-shell, agentos-web-shell,
+# image/rootfs/usr (scripts, the agentos-taskd user unit, and the agentosd
+# stand-in that older agentos-update versions require) and the AgentOS-owned
+# systemd units and udev rules. Writes
 #   $OUT/agentos-update-x86_64.tar.gz and .sha256
 #
 # Environment:
-#   AGENTOSD_BIN       agentosd binary        (default target/release/agentosd)
 #   AGENTOS_SHELL_BIN  agentos-shell binary   (default target/release/agentos-shell)
 #   AGENTOS_TASKD_BIN  agentos-taskd binary   (default target/release/agentos-taskd)
 #   AGENTOS_CLI_BIN    agentos binary         (default target/release/agentos)
@@ -17,12 +17,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 OUT="${OUT:-$REPO/out}"
-BIN="${AGENTOSD_BIN:-$REPO/target/release/agentosd}"
 SHELL_BIN="${AGENTOS_SHELL_BIN:-$REPO/target/release/agentos-shell}"
 TASKD_BIN="${AGENTOS_TASKD_BIN:-$REPO/target/release/agentos-taskd}"
 CLI_BIN="${AGENTOS_CLI_BIN:-$REPO/target/release/agentos}"
 WEB_SHELL_BIN="${AGENTOS_WEB_SHELL_BIN:-$REPO/target/release/agentos-web-shell}"
-for b in "$BIN" "$SHELL_BIN" "$TASKD_BIN" "$CLI_BIN" "$WEB_SHELL_BIN"; do
+for b in "$SHELL_BIN" "$TASKD_BIN" "$CLI_BIN" "$WEB_SHELL_BIN"; do
   [[ -x "$b" ]] || { echo "找不到可执行文件：$b" >&2; exit 1; }
 done
 RELEASE="${AGENTOS_RELEASE:-$(git -C "$REPO" describe --tags --always 2>/dev/null || echo unknown)}"
@@ -33,7 +32,6 @@ cp -a "$HERE/rootfs/usr" "$stage/"
 mkdir -p "$stage/etc/systemd/system" "$stage/etc/udev/rules.d"
 cp -a "$HERE"/rootfs/etc/systemd/system/agentos-*.service "$stage/etc/systemd/system/"
 cp -a "$HERE"/rootfs/etc/udev/rules.d/*agentos* "$stage/etc/udev/rules.d/"
-install -m 0755 "$BIN" "$stage/usr/local/bin/agentosd"
 install -m 0755 "$SHELL_BIN" "$stage/usr/local/bin/agentos-shell"
 install -m 0755 "$TASKD_BIN" "$stage/usr/local/bin/agentos-taskd"
 install -m 0755 "$CLI_BIN" "$stage/usr/local/bin/agentos"

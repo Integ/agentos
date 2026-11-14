@@ -450,7 +450,11 @@ fn command(request: &Request) -> Result<Command, HttpError> {
             }
             // Every intent from the browser starts its own thread: its
             // buttons submit fixed intents that are not one conversation.
-            Ok(Command::Submit { text, thread: None })
+            Ok(Command::Submit {
+                text,
+                thread: None,
+                spoken: false,
+            })
         }
         (method, path) if path.starts_with("/api/tasks/") && parameters.is_empty() => {
             let parts: Vec<_> = path["/api/tasks/".len()..].split('/').collect();
@@ -478,6 +482,7 @@ fn command(request: &Request) -> Result<Command, HttpError> {
                         id,
                         step: answer.step,
                         text,
+                        spoken: false,
                     })
                 }
                 ("POST", [_, "approve"]) => {
@@ -813,7 +818,7 @@ mod tests {
         let reply = |body| command(&request("POST", "/api/tasks/task-7/reply", body));
         assert!(matches!(
             reply(json!({"step": 2, "text": " 周三 "})).unwrap(),
-            Command::Reply { id: TaskId(7), step: 2, text } if text == "周三"
+            Command::Reply { id: TaskId(7), step: 2, text, spoken: false } if text == "周三"
         ));
         for body in [
             json!({"step": 0, "text": "周三"}),
@@ -976,7 +981,7 @@ mod tests {
             let frame = agentos_ipc::read_frame(&mut reader).await.unwrap().unwrap();
             let request: agentos_ipc::Request = serde_json::from_slice(&frame).unwrap();
             assert!(
-                matches!(request.command, Command::Submit { text, thread: None } if text == "记一下 茶")
+                matches!(request.command, Command::Submit { text, thread: None, spoken: false } if text == "记一下 茶")
             );
             drop(reader);
             assert!(

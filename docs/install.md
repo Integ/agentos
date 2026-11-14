@@ -57,9 +57,9 @@ sudo agentos-install /dev/nvme0n1    # 直接指定
 - 左上角的 AgentOS 图标是系统菜单：打开终端、网络和 AI 设置、安装到硬盘、重启、关机。
 - **Win+回车** 打开终端；终端和设置窗口浮在桌面上。
 - 高风险操作（比如清空笔记、安装插件）会弹出确认窗口，默认焦点在「取消」，Esc 也是取消。
-- 设置保存在 `/etc/agentos/agentos.env`（可以手动编辑），审计日志在 `/var/lib/agentos/audit.jsonl`。
-- 日志都在 journal 里，重启后也保留：`journalctl -t agentosd`（管家进程，包括崩溃报告和调用栈）、`journalctl -t agentos-shell`（图形界面）、`journalctl -b -1`（上一次开机）。agentosd 崩溃后会自动重启（连续崩溃时间隔逐渐拉长到 30 秒），重启后在审计日志和桌面的「最近活动」里记一条，完整报告另存为数据目录下的 `crash.prev.txt`。
-- 图形桌面起不来时会自动退回文本菜单（`agentos-console`）；也可以在开机菜单选「排障模式」，直接在文本控制台运行管家 Agent。
+- 设置保存在 `/etc/agentos/agentos.env`（可以手动编辑），任务、笔记、PIN 和审计日志在 agent 用户的 `~/.local/state/agentos`。
+- 日志都在 journal 里，重启后也保留：`journalctl -t agentos-taskd`（任务服务，包括崩溃报告和调用栈）、`journalctl -t agentos-shell`（图形界面）、`journalctl -b -1`（上一次开机）。任务服务崩溃后由它的用户单元自动重启（连续崩溃时间隔逐渐拉长到 30 秒），重启后在审计日志和桌面的「最近活动」里记一条，完整报告另存为状态目录下的 `crash.prev.txt`。
+- 图形桌面起不来时会自动退回文本菜单（`agentos-console`）；也可以在开机菜单选「排障模式」，直接在文本控制台打开管家工作台。
 - 更新：系统菜单里的「检查更新…」，或在终端运行 `sudo agentos-update`（AgentOS 本身）/ `sudo agentos-update --system`（再加上基础系统的 apt 升级）。详见 [update.md](update.md)。
 
 ## 自己构建镜像
@@ -91,12 +91,12 @@ sudo image/test/qemu-smoke.sh out/agentos-debian-x86_64.img
 | --- | --- |
 | 底层 | Debian 13 或 Ubuntu 24.04 最小系统，发行版内核和固件，NetworkManager |
 | 引导 | 发行版签名的 shim + grub（支持安全启动），根分区按 UUID 挂载 |
-| 会话 | tty1 自动登录用户 `agent` → sway → `agentos-desktop`：后台 `agentosd --listen`，前台全屏图形桌面 `agentos-shell`（见 [shell.md](shell.md)）；首次启动时桌面上会打开图形设置助理（文本模式下是 `agentos-setup` 向导）；图形界面起不来时退回文本菜单 `agentos-console` |
+| 会话 | tty1 自动登录用户 `agent` → sway → `agentos-desktop`：登录时启动任务服务 `agentos-taskd`（用户单元），前台全屏图形桌面 `agentos-shell` 连接它（见 [shell.md](shell.md)）；首次启动时桌面上会打开图形设置助理（文本模式下是 `agentos-setup` 向导）；图形界面起不来时退回文本菜单 `agentos-console` |
 | 中文 | Noto CJK 字体，fcitx5 拼音输入法，`zh_CN.UTF-8`，时区 Asia/Shanghai |
 | 插件运行时 | bubblewrap 沙箱，Python 3 |
-| AgentOS | `/usr/local/bin/agentosd`、`agentos-shell`，以及 `agentos-session`、`agentos-desktop`、`agentos-daemon`、`agentos-system`、`agentos-setup`、`agentos-install`、`agentos-update`、`agentos-console` |
-| 开机服务 | `agentos-growroot`（首次启动扩展分区）、`agentos-selfcheck`（用离线规划器跑一遍 agentosd，检查插件沙箱、网络、桌面和日志） |
-| 日志 | journald 持久保存（上限 200MB），agentosd 和 agentos-shell 的输出都进 journal |
+| AgentOS | `/usr/local/bin/agentos-taskd`、`agentos`、`agentos-shell`、`agentos-web-shell`，以及 `agentos-session`、`agentos-desktop`、`agentos-system`、`agentos-setup`、`agentos-install`、`agentos-update`、`agentos-console`；`agentosd` 只是给旧版更新程序用的垫片 |
+| 开机服务 | `agentos-growroot`（首次启动扩展分区）、`agentos-selfcheck`（用离线规划器跑一遍任务服务和 MCP，检查插件沙箱、网络、桌面和日志） |
+| 日志 | journald 持久保存（上限 200MB），agentos-taskd 和 agentos-shell 的输出都进 journal |
 
 ## 目前的限制
 

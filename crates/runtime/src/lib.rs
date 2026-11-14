@@ -1,7 +1,8 @@
 //! Durable, single-writer task state for the AgentOS runtime.
 //!
-//! State is validated and replaced atomically before a mutation becomes visible
-//! in memory. A restarted runtime interrupts unfinished tasks: it never guesses
+//! A mutation is validated and durable before it becomes visible in memory:
+//! it is appended to a journal, which is folded into an atomically replaced
+//! snapshot from time to time. A restarted runtime interrupts unfinished tasks: it never guesses
 //! whether an in-flight side effect happened, and never replays it automatically.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,15 +12,25 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use agentos_core::{now_ms, AgentId, CapabilityName, Intent, IntentId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 4;
+// 5: changes since the snapshot live in the journal. The snapshot format is
+// unchanged, but an older program would read it without the journal and lose
+// those changes silently; the new number makes it refuse instead.
+const SCHEMA_VERSION: u32 = 5;
 const STATE_FILE: &str = "tasks.json";
+const JOURNAL_FILE: &str = "tasks.journal";
+/// The fewest journal entries that trigger a fold into the snapshot.
+#[cfg(not(test))]
+const COMPACT_AFTER: usize = 1024;
+// Small in tests, so that ordinary tests also cross folds.
+#[cfg(test)]
+const COMPACT_AFTER: usize = 4;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(
@@ -193,7 +204,7 @@ pub struct Task {
     pub updated_at_ms: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Snapshot {
     schema_version: u32,
@@ -201,6 +212,27 @@ struct Snapshot {
     #[serde(default)]
     revision: u64,
     tasks: Vec<Task>,
+}
+
+/// What is written as a snapshot: the current state, borrowed rather than
+/// copied, since it can hold the whole task history.
+#[derive(Serialize)]
+struct SnapshotView<'a> {
+    schema_version: u32,
+    next_id: u64,
+    revision: u64,
+    tasks: Vec<&'a Task>,
+}
+
+/// One line of the journal: a task as it is after one change, and the
+/// counters as they are after it. Replaying the lines above the snapshot's
+/// revision, in order, gives the state the store last acknowledged.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JournalEntry<T> {
+    revision: u64,
+    next_id: u64,
+    task: T,
 }
 
 #[derive(Debug, Clone)]
@@ -220,16 +252,16 @@ impl Default for State {
     }
 }
 
-impl State {
-    fn snapshot(&self) -> Snapshot {
-        Snapshot {
-            schema_version: SCHEMA_VERSION,
-            next_id: self.next_id,
-            revision: self.revision,
-            tasks: self.tasks.values().cloned().collect(),
-        }
-    }
+/// What [`State::apply`] replaced, so a change that could not be made
+/// durable can be taken back.
+struct Undo {
+    id: TaskId,
+    task: Option<Task>,
+    next_id: u64,
+    revision: u64,
+}
 
+impl State {
     fn from_snapshot(mut snapshot: Snapshot) -> io::Result<Self> {
         for task in &mut snapshot.tasks {
             if task.thread.0 == 0 {
@@ -251,15 +283,60 @@ impl State {
                 .collect(),
         })
     }
+
+    fn apply(&mut self, task: Task, next_id: u64, revision: u64) -> Undo {
+        let undo = Undo {
+            id: task.id,
+            task: self.tasks.insert(task.id, task),
+            next_id: self.next_id,
+            revision: self.revision,
+        };
+        self.next_id = next_id;
+        self.revision = revision;
+        undo
+    }
+
+    fn undo(&mut self, undo: Undo) {
+        match undo.task {
+            Some(task) => {
+                self.tasks.insert(undo.id, task);
+            }
+            None => {
+                self.tasks.remove(&undo.id);
+            }
+        }
+        self.next_id = undo.next_id;
+        self.revision = undo.revision;
+    }
+}
+
+/// How the journal stands since the last snapshot.
+#[derive(Debug, Default)]
+struct Journal {
+    entries: usize,
+    /// An append failed, so the file may end in a partial line. Nothing may
+    /// be appended after it; the next change is written as a snapshot.
+    broken: bool,
+}
+
+#[derive(Debug)]
+struct Inner {
+    state: State,
+    journal: Journal,
 }
 
 /// A task store owns an exclusive process lock until it is dropped.
 ///
 /// Methods take `&self`, so a daemon may share one store via `Arc<TaskStore>`.
 /// Opening the same directory a second time fails instead of risking lost writes.
+///
+/// On disk the state is a snapshot (`tasks.json`) and a journal of changes
+/// made since (`tasks.journal`). A change appends the one task it touched,
+/// so its cost does not grow with the history; the journal is folded into
+/// the snapshot once it holds about as many entries as there are tasks.
 pub struct TaskStore {
     directory: Option<PathBuf>,
-    inner: Mutex<State>,
+    inner: Mutex<Inner>,
     _lock: Option<File>,
     changes: broadcast::Sender<TaskChange>,
 }
@@ -285,6 +362,9 @@ impl TaskStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => State::default(),
             Err(error) => return Err(error),
         };
+        // Nothing is written until both files have read back cleanly, so a
+        // damaged store is left exactly as it was found.
+        replay_journal(&directory, &mut state)?;
         let recovered_at = now_ms();
         let mut recovered = false;
         for task in state.tasks.values_mut() {
@@ -302,12 +382,19 @@ impl TaskStore {
         if recovered {
             state.revision = next_revision(state.revision)?;
         }
+        validate_state(&state)?;
         // Also persists an empty initial snapshot, detecting unwritable state
-        // directories before the daemon accepts any intents.
+        // directories before the daemon accepts any intents. The snapshot
+        // comes first: until the journal is emptied, its lines are at or
+        // below the snapshot's revision and a replay skips them.
         persist(&directory, &state)?;
+        reset_journal(&directory)?;
         Ok(Self {
             directory: Some(directory),
-            inner: Mutex::new(state),
+            inner: Mutex::new(Inner {
+                state,
+                journal: Journal::default(),
+            }),
             _lock: Some(lock),
             changes: broadcast::channel(256).0,
         })
@@ -317,10 +404,17 @@ impl TaskStore {
     pub fn memory() -> Self {
         Self {
             directory: None,
-            inner: Mutex::new(State::default()),
+            inner: Mutex::new(Inner {
+                state: State::default(),
+                journal: Journal::default(),
+            }),
             _lock: None,
             changes: broadcast::channel(256).0,
         }
+    }
+
+    fn locked(&self) -> MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// A task that starts a new thread.
@@ -332,9 +426,10 @@ impl TaskStore {
     /// thread that does not exist is `NotFound`; continuing one that another
     /// source started is `PermissionDenied`, so conversations never mix.
     pub fn create_in(&self, mut intent: Intent, thread: Option<TaskId>) -> io::Result<Task> {
-        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.locked();
         if let Some(thread) = thread {
             let root = guard
+                .state
                 .tasks
                 .get(&thread)
                 .filter(|root| root.thread == thread)
@@ -348,9 +443,9 @@ impl TaskStore {
                 ));
             }
         }
-        let mut next = guard.clone();
-        let id = TaskId(next.next_id);
-        next.next_id = next
+        let id = TaskId(guard.state.next_id);
+        let next_id = guard
+            .state
             .next_id
             .checked_add(1)
             .ok_or_else(|| io::Error::other("task id space exhausted"))?;
@@ -370,34 +465,18 @@ impl TaskStore {
             created_at_ms: at_ms,
             updated_at_ms: at_ms,
         };
-        next.tasks.insert(id, task.clone());
-        next.revision = next_revision(next.revision)?;
-        self.commit(&next)?;
-        *guard = next;
-        let _ = self.changes.send(TaskChange {
-            revision: guard.revision,
-            id,
-        });
+        let revision = next_revision(guard.state.revision)?;
+        self.commit(&mut guard, task.clone(), next_id, revision)?;
+        let _ = self.changes.send(TaskChange { revision, id });
         Ok(task)
     }
 
     pub fn get(&self, id: TaskId) -> Option<Task> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .tasks
-            .get(&id)
-            .cloned()
+        self.locked().state.tasks.get(&id).cloned()
     }
 
     pub fn list(&self) -> Vec<Task> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .tasks
-            .values()
-            .cloned()
-            .collect()
+        self.locked().state.tasks.values().cloned().collect()
     }
 
     /// Page history by descending task ID. `before` is exclusive and the next
@@ -422,12 +501,13 @@ impl TaskStore {
         thread: Option<TaskId>,
         source: Option<&str>,
     ) -> (Vec<Task>, Option<TaskId>, u64) {
-        let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self.locked();
         if limit == 0 {
-            return (Vec::new(), None, guard.revision);
+            return (Vec::new(), None, guard.state.revision);
         }
         let bound = before.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
         let mut matching = guard
+            .state
             .tasks
             .range((std::ops::Bound::Unbounded, bound))
             .rev()
@@ -441,17 +521,18 @@ impl TaskStore {
         } else {
             None
         };
-        (tasks, next, guard.revision)
+        (tasks, next, guard.state.revision)
     }
 
     /// Earlier tasks of the same thread as `id`, oldest first, at most the
     /// `limit` most recent ones.
     pub fn earlier_in_thread(&self, id: TaskId, limit: usize) -> Vec<Task> {
-        let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(thread) = guard.tasks.get(&id).map(|task| task.thread) else {
+        let guard = self.locked();
+        let Some(thread) = guard.state.tasks.get(&id).map(|task| task.thread) else {
             return Vec::new();
         };
         let mut earlier: Vec<Task> = guard
+            .state
             .tasks
             .range(..id)
             .rev()
@@ -466,19 +547,11 @@ impl TaskStore {
 
     /// The thread a task belongs to.
     pub fn thread_of(&self, id: TaskId) -> Option<TaskId> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .tasks
-            .get(&id)
-            .map(|task| task.thread)
+        self.locked().state.tasks.get(&id).map(|task| task.thread)
     }
 
     pub fn revision(&self) -> u64 {
-        self.inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .revision
+        self.locked().state.revision
     }
 
     /// Subscribe before reading a page/revision, then discard hints at or below
@@ -488,79 +561,133 @@ impl TaskStore {
     }
 
     pub fn update(&self, id: TaskId, change: impl FnOnce(&mut Task)) -> io::Result<Task> {
-        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let mut next = guard.clone();
-        let task = next.tasks.get_mut(&id).ok_or_else(|| missing_task(id))?;
-        let created_at_ms = task.created_at_ms;
+        let mut guard = self.locked();
+        let mut task = guard
+            .state
+            .tasks
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| missing_task(id))?;
+        let (created_at_ms, thread) = (task.created_at_ms, task.thread);
         let previous_updated_at_ms = task.updated_at_ms;
-        change(task);
-        if task.id != id || task.intent.id.0 != id.0 || task.created_at_ms != created_at_ms {
+        change(&mut task);
+        // A task's thread is fixed too: other tasks name it as their root.
+        if task.id != id
+            || task.intent.id.0 != id.0
+            || task.created_at_ms != created_at_ms
+            || task.thread != thread
+        {
             return Err(invalid_data(
-                "task identity and creation time are immutable",
+                "task identity, thread and creation time are immutable",
             ));
         }
         task.updated_at_ms = now_ms()
             .max(task.updated_at_ms)
             .max(previous_updated_at_ms)
             .max(created_at_ms);
-        let updated = task.clone();
-        next.revision = next_revision(next.revision)?;
-        self.commit(&next)?;
-        *guard = next;
-        let _ = self.changes.send(TaskChange {
-            revision: guard.revision,
-            id,
-        });
-        Ok(updated)
+        let next_id = guard.state.next_id;
+        let revision = next_revision(guard.state.revision)?;
+        self.commit(&mut guard, task.clone(), next_id, revision)?;
+        let _ = self.changes.send(TaskChange { revision, id });
+        Ok(task)
     }
 
     pub fn cancel(&self, id: TaskId) -> io::Result<Task> {
         // A terminal task is returned unchanged, including its timestamps.
-        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let task = guard.tasks.get(&id).ok_or_else(|| missing_task(id))?;
+        let mut guard = self.locked();
+        let mut task = guard
+            .state
+            .tasks
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| missing_task(id))?;
         if task.state.is_terminal() {
-            return Ok(task.clone());
+            return Ok(task);
         }
-        let mut next = guard.clone();
-        let task = next.tasks.get_mut(&id).expect("task checked above");
         task.state = TaskState::Cancelled;
         task.confirmation = None;
         task.question = None;
         task.updated_at_ms = now_ms().max(task.updated_at_ms);
         task.message =
             Some("任务已取消；后续步骤不会执行，已开始的能力调用可能仍产生结果。".into());
-        let cancelled = task.clone();
-        next.revision = next_revision(next.revision)?;
-        self.commit(&next)?;
-        *guard = next;
-        let _ = self.changes.send(TaskChange {
-            revision: guard.revision,
-            id,
-        });
-        Ok(cancelled)
+        let next_id = guard.state.next_id;
+        let revision = next_revision(guard.state.revision)?;
+        self.commit(&mut guard, task.clone(), next_id, revision)?;
+        let _ = self.changes.send(TaskChange { revision, id });
+        Ok(task)
     }
 
     /// The task's current state, without copying the task.
     pub fn state(&self, id: TaskId) -> Option<TaskState> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .tasks
-            .get(&id)
-            .map(|task| task.state)
+        self.locked().state.tasks.get(&id).map(|task| task.state)
     }
 
     pub fn is_cancelled(&self, id: TaskId) -> bool {
-        self.get(id)
-            .is_some_and(|task| task.state == TaskState::Cancelled)
+        self.state(id) == Some(TaskState::Cancelled)
     }
 
-    fn commit(&self, state: &State) -> io::Result<()> {
-        validate_snapshot(&state.snapshot())?;
-        if let Some(directory) = &self.directory {
-            persist(directory, state)?;
+    /// Make one task's new state durable, and only then visible. A change
+    /// that cannot be written leaves memory as it was.
+    fn commit(&self, inner: &mut Inner, task: Task, next_id: u64, revision: u64) -> io::Result<()> {
+        validate_change(&inner.state, &task, next_id, revision)?;
+        let Some(directory) = &self.directory else {
+            inner.state.apply(task, next_id, revision);
+            return Ok(());
+        };
+        // Folding the journal in once it holds as many entries as there are
+        // tasks keeps the full rewrite's cost, spread over those changes,
+        // constant per change.
+        let due = inner.journal.entries >= inner.state.tasks.len().max(COMPACT_AFTER);
+        if inner.journal.broken || due {
+            let undo = inner.state.apply(task, next_id, revision);
+            if let Err(error) = persist(directory, &inner.state) {
+                inner.state.undo(undo);
+                return Err(error);
+            }
+            // The change is durable with the snapshot. Old journal lines are
+            // at or below its revision, so emptying the journal is only
+            // housekeeping; if it fails, the next change tries again.
+            inner.journal = match reset_journal(directory) {
+                Ok(()) => Journal::default(),
+                Err(_) => Journal {
+                    entries: inner.journal.entries,
+                    broken: true,
+                },
+            };
+            return Ok(());
         }
+        let entry = JournalEntry {
+            revision,
+            next_id,
+            task: &task,
+        };
+        let mut line = serde_json::to_vec(&entry).map_err(invalid_data)?;
+        line.push(b'\n');
+        if let Err(error) = append_journal(directory, &line) {
+            inner.journal.broken = true;
+            return Err(error);
+        }
+        inner.journal.entries += 1;
+        inner.state.apply(task, next_id, revision);
         Ok(())
+    }
+}
+
+impl Drop for TaskStore {
+    /// A clean shutdown leaves everything in the snapshot. This is a
+    /// convenience, not a guarantee: if it fails, the journal still holds
+    /// every acknowledged change and the next open replays it.
+    fn drop(&mut self) {
+        let Some(directory) = &self.directory else {
+            return;
+        };
+        let inner = self.inner.get_mut().unwrap_or_else(|p| p.into_inner());
+        if inner.journal.entries == 0 && !inner.journal.broken {
+            return;
+        }
+        if persist(directory, &inner.state).is_ok() {
+            let _ = reset_journal(directory);
+        }
     }
 }
 
@@ -604,94 +731,218 @@ fn validate_snapshot(snapshot: &Snapshot) -> io::Result<()> {
     if !(1..=SCHEMA_VERSION).contains(&snapshot.schema_version) {
         return Err(invalid_data("unsupported task snapshot schema_version"));
     }
-    if snapshot.next_id == 0 {
+    validate_tasks(
+        snapshot.schema_version,
+        snapshot.next_id,
+        snapshot.revision,
+        snapshot.tasks.iter(),
+    )
+}
+
+fn validate_state(state: &State) -> io::Result<()> {
+    validate_tasks(
+        SCHEMA_VERSION,
+        state.next_id,
+        state.revision,
+        state.tasks.values(),
+    )
+}
+
+fn validate_counters(schema_version: u32, next_id: u64, revision: u64) -> io::Result<()> {
+    if next_id == 0 {
         return Err(invalid_data("next_id must be positive"));
     }
-    if snapshot.schema_version >= 2 && snapshot.revision < snapshot.next_id - 1 {
+    if schema_version >= 2 && revision < next_id - 1 {
         return Err(invalid_data("task revision precedes allocated task ids"));
-    }
-    let roots: BTreeSet<TaskId> = snapshot
-        .tasks
-        .iter()
-        .filter(|task| task.thread == task.id)
-        .map(|task| task.id)
-        .collect();
-    let mut ids = BTreeSet::new();
-    for task in &snapshot.tasks {
-        // A thread is named by its first task, which must exist.
-        if task.thread > task.id || !roots.contains(&task.thread) {
-            return Err(invalid_data("task belongs to a thread that does not exist"));
-        }
-        if task.id.0 == 0 || task.id.0 >= snapshot.next_id || !ids.insert(task.id) {
-            return Err(invalid_data("invalid, duplicate, or unallocated task id"));
-        }
-        if task.intent.id.0 != task.id.0 || task.updated_at_ms < task.created_at_ms {
-            return Err(invalid_data("invalid task identity or timestamps"));
-        }
-        if task
-            .steps
-            .iter()
-            .any(|step| step.capability.as_str().trim().is_empty())
-        {
-            return Err(invalid_data("task step capability must not be empty"));
-        }
-        // Steps are not strictly sequential: a failed step may be followed by
-        // another round, and a delegating step stays running while its agent's
-        // steps are recorded after it. What must hold is that step ids are
-        // distinct, and that a task that succeeded left nothing unsettled.
-        let mut step_ids = BTreeSet::new();
-        if task
-            .steps
-            .iter()
-            .any(|step| !step.id.is_empty() && !step_ids.insert(step.id.as_str()))
-        {
-            return Err(invalid_data("duplicate task step id"));
-        }
-        if task.state == TaskState::Succeeded
-            && task.steps.iter().any(|step| !step.state.is_settled())
-        {
-            return Err(invalid_data("succeeded task has incomplete steps"));
-        }
-        if task.state == TaskState::Unhandled && !task.steps.is_empty() {
-            return Err(invalid_data("unhandled task has planned steps"));
-        }
-        match (&task.confirmation, task.state) {
-            (Some(confirmation), TaskState::AwaitingConfirmation) => {
-                if confirmation.expires_at_ms <= task.created_at_ms
-                    || confirmation.step >= task.steps.len()
-                    || task.steps[confirmation.step].state != StepState::Pending
-                {
-                    return Err(invalid_data("invalid pending confirmation"));
-                }
-            }
-            (None, TaskState::AwaitingConfirmation) => {
-                return Err(invalid_data("awaiting task has no confirmation"));
-            }
-            (Some(_), _) => return Err(invalid_data("confirmation attached to non-waiting task")),
-            (None, _) => {}
-        }
-        match (&task.question, task.state) {
-            (Some(question), TaskState::AwaitingInput) => {
-                if question.text.trim().is_empty()
-                    || question.step >= task.steps.len()
-                    || task.steps[question.step].state != StepState::Pending
-                {
-                    return Err(invalid_data("invalid pending question"));
-                }
-            }
-            (None, TaskState::AwaitingInput) => {
-                return Err(invalid_data("task awaiting input has no question"));
-            }
-            (Some(_), _) => return Err(invalid_data("question attached to non-waiting task")),
-            (None, _) => {}
-        }
     }
     Ok(())
 }
 
+fn validate_tasks<'a>(
+    schema_version: u32,
+    next_id: u64,
+    revision: u64,
+    tasks: impl Iterator<Item = &'a Task> + Clone,
+) -> io::Result<()> {
+    validate_counters(schema_version, next_id, revision)?;
+    let roots: BTreeSet<TaskId> = tasks
+        .clone()
+        .filter(|task| task.thread == task.id)
+        .map(|task| task.id)
+        .collect();
+    let mut ids = BTreeSet::new();
+    for task in tasks {
+        if !ids.insert(task.id) {
+            return Err(invalid_data("invalid, duplicate, or unallocated task id"));
+        }
+        validate_task(task, next_id, |thread| roots.contains(&thread))?;
+    }
+    Ok(())
+}
+
+/// One change, checked against the state it applies to. Only the changed
+/// task can have broken anything: the others were valid and `update` keeps
+/// identity and thread fixed, so no other task loses its root.
+fn validate_change(state: &State, task: &Task, next_id: u64, revision: u64) -> io::Result<()> {
+    validate_counters(SCHEMA_VERSION, next_id, revision)?;
+    if next_id < state.next_id || revision <= state.revision {
+        return Err(invalid_data("task counters must only move forward"));
+    }
+    validate_task(task, next_id, |thread| {
+        if thread == task.id {
+            task.thread == task.id
+        } else {
+            state
+                .tasks
+                .get(&thread)
+                .is_some_and(|root| root.thread == root.id)
+        }
+    })
+}
+
+fn validate_task(task: &Task, next_id: u64, is_root: impl Fn(TaskId) -> bool) -> io::Result<()> {
+    // A thread is named by its first task, which must exist.
+    if task.thread > task.id || !is_root(task.thread) {
+        return Err(invalid_data("task belongs to a thread that does not exist"));
+    }
+    if task.id.0 == 0 || task.id.0 >= next_id {
+        return Err(invalid_data("invalid, duplicate, or unallocated task id"));
+    }
+    if task.intent.id.0 != task.id.0 || task.updated_at_ms < task.created_at_ms {
+        return Err(invalid_data("invalid task identity or timestamps"));
+    }
+    if task
+        .steps
+        .iter()
+        .any(|step| step.capability.as_str().trim().is_empty())
+    {
+        return Err(invalid_data("task step capability must not be empty"));
+    }
+    // Steps are not strictly sequential: a failed step may be followed by
+    // another round, and a delegating step stays running while its agent's
+    // steps are recorded after it. What must hold is that step ids are
+    // distinct, and that a task that succeeded left nothing unsettled.
+    let mut step_ids = BTreeSet::new();
+    if task
+        .steps
+        .iter()
+        .any(|step| !step.id.is_empty() && !step_ids.insert(step.id.as_str()))
+    {
+        return Err(invalid_data("duplicate task step id"));
+    }
+    if task.state == TaskState::Succeeded && task.steps.iter().any(|step| !step.state.is_settled())
+    {
+        return Err(invalid_data("succeeded task has incomplete steps"));
+    }
+    if task.state == TaskState::Unhandled && !task.steps.is_empty() {
+        return Err(invalid_data("unhandled task has planned steps"));
+    }
+    match (&task.confirmation, task.state) {
+        (Some(confirmation), TaskState::AwaitingConfirmation) => {
+            if confirmation.expires_at_ms <= task.created_at_ms
+                || confirmation.step >= task.steps.len()
+                || task.steps[confirmation.step].state != StepState::Pending
+            {
+                return Err(invalid_data("invalid pending confirmation"));
+            }
+        }
+        (None, TaskState::AwaitingConfirmation) => {
+            return Err(invalid_data("awaiting task has no confirmation"));
+        }
+        (Some(_), _) => return Err(invalid_data("confirmation attached to non-waiting task")),
+        (None, _) => {}
+    }
+    match (&task.question, task.state) {
+        (Some(question), TaskState::AwaitingInput) => {
+            if question.text.trim().is_empty()
+                || question.step >= task.steps.len()
+                || task.steps[question.step].state != StepState::Pending
+            {
+                return Err(invalid_data("invalid pending question"));
+            }
+        }
+        (None, TaskState::AwaitingInput) => {
+            return Err(invalid_data("task awaiting input has no question"));
+        }
+        (Some(_), _) => return Err(invalid_data("question attached to non-waiting task")),
+        (None, _) => {}
+    }
+    Ok(())
+}
+
+/// Apply the journal's changes above the snapshot's revision to `state`.
+fn replay_journal(directory: &Path, state: &mut State) -> io::Result<()> {
+    let bytes = match fs::read(directory.join(JOURNAL_FILE)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    // A crash during an append leaves a last line without its newline. That
+    // change was never acknowledged, so it is dropped. Anything else that does
+    // not read back is damage: the store refuses to open rather than guess.
+    let complete = match bytes.iter().rposition(|&byte| byte == b'\n') {
+        Some(end) => &bytes[..end],
+        None => return Ok(()),
+    };
+    // Lines are written in revision order. Some may already be in the
+    // snapshot (a fold whose emptying of the journal failed); every line
+    // after them must be the very next change.
+    let mut last = None;
+    for line in complete.split(|&byte| byte == b'\n') {
+        let entry: JournalEntry<Task> = serde_json::from_slice(line).map_err(invalid_data)?;
+        if last.is_some_and(|last| entry.revision <= last) {
+            return Err(invalid_data("task journal goes back in revision"));
+        }
+        last = Some(entry.revision);
+        if entry.revision <= state.revision {
+            continue;
+        }
+        if Some(entry.revision) != state.revision.checked_add(1) {
+            return Err(invalid_data("task journal skips a revision"));
+        }
+        validate_change(state, &entry.task, entry.next_id, entry.revision)?;
+        state.apply(entry.task, entry.next_id, entry.revision);
+    }
+    Ok(())
+}
+
+fn append_journal(directory: &Path, line: &[u8]) -> io::Result<()> {
+    // Opened by path for each change rather than held open: a journal that
+    // has gone missing or been replaced fails here, instead of the change
+    // going into a file nobody will read.
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(directory.join(JOURNAL_FILE))?;
+    let before = file.metadata()?.len();
+    let result = file.write_all(line).and_then(|()| file.sync_data());
+    if result.is_err() {
+        // Best effort: the store also stops appending until the next fold.
+        let _ = file.set_len(before);
+    }
+    result
+}
+
+/// Empty the journal, creating it if needed, durably.
+fn reset_journal(directory: &Path) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(directory.join(JOURNAL_FILE))?.sync_all()?;
+    File::open(directory)?.sync_all()
+}
+
+/// Atomically replace the snapshot with `state`. Callers validate first.
 fn persist(directory: &Path, state: &State) -> io::Result<()> {
-    let snapshot = state.snapshot();
-    validate_snapshot(&snapshot)?;
+    let snapshot = SnapshotView {
+        schema_version: SCHEMA_VERSION,
+        next_id: state.next_id,
+        revision: state.revision,
+        tasks: state.tasks.values().collect(),
+    };
     let bytes = serde_json::to_vec_pretty(&snapshot).map_err(invalid_data)?;
     let temporary = directory.join(format!(
         ".tasks-{}-{}-{}.tmp",
@@ -807,6 +1058,158 @@ mod tests {
         }
     }
 
+    /// A copy of the files as they are on disk now, as a crash would leave them.
+    fn crash_copy(from: &Path) -> TempDir {
+        let copy = TempDir::new();
+        for file in [STATE_FILE, JOURNAL_FILE] {
+            fs::copy(from.join(file), copy.0.join(file)).unwrap();
+        }
+        copy
+    }
+
+    #[test]
+    fn a_change_appends_one_task_instead_of_rewriting_the_history() {
+        // Guards the cost of a step: it must not grow with the history.
+        let dir = TempDir::new();
+        let store = TaskStore::open(&dir.0).unwrap();
+        let first = store.create(intent()).unwrap();
+        let second = store.create(intent()).unwrap();
+        store
+            .update(first.id, |task| task.state = TaskState::Succeeded)
+            .unwrap();
+        // Still below the fold: the snapshot is the one written at open.
+        let snapshot: Value =
+            serde_json::from_slice(&fs::read(dir.0.join(STATE_FILE)).unwrap()).unwrap();
+        assert!(snapshot["tasks"].as_array().unwrap().is_empty());
+        let journal = fs::read(dir.0.join(JOURNAL_FILE)).unwrap();
+        let lines: Vec<Value> = journal
+            .split(|&byte| byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1]["task"]["id"], json!(second.id.0));
+        assert_eq!(lines[2]["task"]["state"], json!("succeeded"));
+        assert_eq!(lines[2]["revision"], json!(store.revision()));
+    }
+
+    #[test]
+    fn acknowledged_changes_survive_a_crash_and_a_torn_last_line_is_dropped() {
+        // Guards durability: what a change returned Ok for is on disk.
+        let dir = TempDir::new();
+        let store = TaskStore::open(&dir.0).unwrap();
+        let task = store.create(intent()).unwrap();
+        store
+            .update(task.id, |task| task.state = TaskState::Succeeded)
+            .unwrap();
+        let crashed = crash_copy(&dir.0);
+        // A crash mid-append leaves part of a line that was never acknowledged.
+        let mut journal = OpenOptions::new()
+            .append(true)
+            .open(crashed.0.join(JOURNAL_FILE))
+            .unwrap();
+        journal.write_all(br#"{"revision":99,"next_id":"#).unwrap();
+        drop(journal);
+        let reopened = TaskStore::open(&crashed.0).unwrap();
+        assert_eq!(reopened.get(task.id).unwrap().state, TaskState::Succeeded);
+        assert_eq!(reopened.revision(), store.revision());
+        assert_eq!(reopened.create(intent()).unwrap().id, TaskId(2));
+        // Opening folded everything into the snapshot and emptied the journal.
+        drop(reopened);
+        let saved: Value =
+            serde_json::from_slice(&fs::read(crashed.0.join(STATE_FILE)).unwrap()).unwrap();
+        assert_eq!(saved["tasks"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn many_changes_fold_into_the_snapshot_and_still_read_back_after_a_crash() {
+        // Guards the fold: the journal stays bounded and nothing is lost
+        // across it, including journal lines the snapshot already holds.
+        let dir = TempDir::new();
+        let store = TaskStore::open(&dir.0).unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..(COMPACT_AFTER * 3 + 1) {
+            ids.push(store.create(intent()).unwrap().id);
+        }
+        for id in &ids {
+            store
+                .update(*id, |task| task.state = TaskState::Succeeded)
+                .unwrap();
+        }
+        let lines = fs::read(dir.0.join(JOURNAL_FILE))
+            .unwrap()
+            .iter()
+            .filter(|&&byte| byte == b'\n')
+            .count();
+        assert!(lines <= ids.len(), "{lines} journal lines");
+        let crashed = crash_copy(&dir.0);
+        // A fold whose emptying of the journal never happened leaves lines
+        // the snapshot already holds; they are skipped, not applied twice.
+        let stale = fs::read(dir.0.join(JOURNAL_FILE)).unwrap();
+        let reopened = TaskStore::open(&crashed.0).unwrap();
+        assert_eq!(reopened.revision(), store.revision());
+        assert!(reopened
+            .list()
+            .iter()
+            .all(|task| task.state == TaskState::Succeeded));
+        drop(reopened);
+        fs::write(crashed.0.join(JOURNAL_FILE), &stale).unwrap();
+        let reopened = TaskStore::open(&crashed.0).unwrap();
+        assert_eq!(reopened.revision(), store.revision());
+        assert_eq!(reopened.list().len(), ids.len());
+    }
+
+    #[test]
+    fn a_damaged_journal_line_refuses_to_open_and_leaves_both_files_alone() {
+        // Guards against guessing: only a torn last line may be dropped.
+        let dir = TempDir::new();
+        let store = TaskStore::open(&dir.0).unwrap();
+        let task = store.create(intent()).unwrap();
+        store
+            .update(task.id, |task| task.state = TaskState::Succeeded)
+            .unwrap();
+        let crashed = crash_copy(&dir.0);
+        drop(store);
+        let journal = fs::read(crashed.0.join(JOURNAL_FILE)).unwrap();
+        let first_end = journal.iter().position(|&byte| byte == b'\n').unwrap();
+        let mut cases = Vec::new();
+        let mut garbled = journal.clone();
+        garbled[1] = b'#';
+        cases.push(garbled);
+        // A complete line that goes backwards is damage too.
+        let mut reordered = journal[first_end + 1..].to_vec();
+        reordered.extend_from_slice(&journal[..=first_end]);
+        reordered.extend_from_slice(&journal[first_end + 1..]);
+        cases.push(reordered);
+        // So is one that leaves out a change it was acknowledged after.
+        cases.push(journal[first_end + 1..].to_vec());
+        let snapshot = fs::read(crashed.0.join(STATE_FILE)).unwrap();
+        for bytes in cases {
+            fs::write(crashed.0.join(JOURNAL_FILE), &bytes).unwrap();
+            assert!(
+                matches!(TaskStore::open(&crashed.0), Err(error) if error.kind() == io::ErrorKind::InvalidData)
+            );
+            assert_eq!(fs::read(crashed.0.join(JOURNAL_FILE)).unwrap(), bytes);
+            assert_eq!(fs::read(crashed.0.join(STATE_FILE)).unwrap(), snapshot);
+        }
+    }
+
+    #[test]
+    fn a_task_cannot_be_moved_to_another_thread() {
+        // Other tasks name a thread by its root; moving the root would
+        // orphan them, so `update` refuses.
+        let store = TaskStore::memory();
+        let first = store.create(intent()).unwrap();
+        let second = store.create(intent()).unwrap();
+        store.create_in(intent(), Some(first.id)).unwrap();
+        assert!(store
+            .update(first.id, |task| task.thread = second.id)
+            .is_err());
+        assert!(store
+            .update(second.id, |task| task.thread = first.id)
+            .is_err());
+    }
+
     #[test]
     fn persists_terminal_tasks_and_allocates_ids_across_restarts() {
         let dir = TempDir::new();
@@ -900,8 +1303,12 @@ mod tests {
         let task = store.create(intent()).unwrap();
         let previous_revision = store.revision();
         let mut changes = store.subscribe();
-        fs::remove_file(dir.0.join(STATE_FILE)).unwrap();
-        fs::create_dir(dir.0.join(STATE_FILE)).unwrap();
+        // Neither the journal nor, once an append has failed, the snapshot
+        // that replaces it can be written.
+        for file in [STATE_FILE, JOURNAL_FILE] {
+            fs::remove_file(dir.0.join(file)).unwrap();
+            fs::create_dir(dir.0.join(file)).unwrap();
+        }
         assert!(store
             .update(task.id, |task| task.state = TaskState::Failed)
             .is_err());
@@ -913,8 +1320,16 @@ mod tests {
         ));
         assert!(store.create(intent()).is_err());
         assert_eq!(store.list().len(), 1);
-        fs::remove_dir(dir.0.join(STATE_FILE)).unwrap();
+        for file in [STATE_FILE, JOURNAL_FILE] {
+            fs::remove_dir(dir.0.join(file)).unwrap();
+        }
         assert_eq!(store.create(intent()).unwrap().id, TaskId(2));
+        // After a failed append the next change goes to a fresh snapshot,
+        // never after what may be a partial line.
+        let saved: Value =
+            serde_json::from_slice(&fs::read(dir.0.join(STATE_FILE)).unwrap()).unwrap();
+        assert_eq!(saved["tasks"].as_array().unwrap().len(), 2);
+        assert!(fs::read(dir.0.join(JOURNAL_FILE)).unwrap().is_empty());
     }
 
     #[test]

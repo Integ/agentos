@@ -461,6 +461,14 @@ pub fn reply_text(reply: &Reply) -> String {
         Reply::Watching { revision } => {
             format!("已订阅任务变更 · 快照 #{revision}；断线后需重新同步任务视图。")
         }
+        Reply::Voice { voice } => format!(
+            "语音识别：{}；朗读：{}（{}）",
+            voice.input_label.as_deref().map_or("未配置".into(), |l| one_line(l, 80)),
+            voice.output_label.as_deref().map_or("未配置".into(), |l| one_line(l, 80)),
+            voice.speak.as_str()
+        ),
+        Reply::Listening { recording } => format!("录音 #{recording}"),
+        Reply::Activity { items } => format!("最近活动 {} 条", items.len()),
     }
 }
 
@@ -492,6 +500,21 @@ pub fn event_text(event: &Event) -> String {
             event.revision,
             one_line(reason, 200)
         ),
+        EventKind::VoiceState { mic, speaking, .. } => {
+            format!(
+                "语音：麦克风 {mic:?}，{}",
+                if *speaking {
+                    "正在朗读"
+                } else {
+                    "未朗读"
+                }
+            )
+        }
+        EventKind::VoiceLevel { .. } => "语音：音量".into(),
+        EventKind::Transcript { recording, text } => {
+            format!("语音 #{recording}：{}", one_line(text, 200))
+        }
+        EventKind::VoiceNotice { text, .. } => format!("语音：{}", one_line(text, 200)),
     }
 }
 

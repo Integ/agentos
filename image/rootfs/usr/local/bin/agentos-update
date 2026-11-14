@@ -1,5 +1,5 @@
 #!/bin/bash
-# Update the AgentOS layer (agentosd, agentos-shell, agentos-taskd, agentos,
+# Update the AgentOS layer (agentos-taskd, agentos, agentos-shell,
 # agentos-web-shell, the agentos-* scripts and their systemd/udev files) from
 # a GitHub release, with a health check before anything is replaced and
 # one-step rollback.
@@ -77,10 +77,11 @@ print(r["tag_name"], assets[name], assets[name + ".sha256"], sep="\t")
 ' "$ASSET"
 }
 
-# Services that pick up new files: systemd units, udev rules, the daemons
-# (agentos-daemon restarts agentosd within a second; the task service's user
-# unit restarts agentos-taskd, which first marks unfinished tasks interrupted).
-# The shell needs a new session.
+# Services that pick up new files: systemd units, udev rules, the task
+# service (its user unit restarts agentos-taskd, which first marks unfinished
+# tasks interrupted). The shell needs a new session. An agentosd left running
+# by a desktop session from before the merge is stopped too; until the next
+# login that session finds only the stand-in, which waits quietly.
 reload() {
   [ -z "$ROOT" ] || return 0
   systemctl daemon-reload 2>/dev/null || true
@@ -97,29 +98,15 @@ check_tree() {
   bad=$(cd "$dir" && find . -type f | sed 's|^\./||' | grep -Ev \
     '^(usr/.+|etc/systemd/system/agentos-[^/]+|etc/udev/rules\.d/[^/]*agentos[^/]*)$' | head -1 || true)
   [ -z "$bad" ] || die "更新包里有不允许的路径：$bad"
-  [ -x "$dir/usr/local/bin/agentosd" ] || die "更新包里没有 agentosd"
+  [ -x "$dir/usr/local/bin/agentos-taskd" ] || die "更新包里没有 agentos-taskd"
   [ -s "$dir/usr/share/agentos/release" ] || die "更新包里没有版本号"
 }
 
-# The new agentosd must start and answer with the offline rule planner
-# before it replaces the running one.
-health_check() {
-  local dir="$1" tmp out
-  tmp=$(mktemp -d)
-  out=$(printf '记一下 更新自检\n看看笔记\n' |
-    timeout 60 "$dir/usr/local/bin/agentosd" --planner rule --home "$tmp/home" \
-      --audit "$tmp/audit.jsonl" 2>&1) || true
-  rm -rf "$tmp"
-  grep -q '更新自检' <<<"$out" || { printf '%s\n' "$out" | tail -20 >&2; die "新版本自检失败，未做任何改动"; }
-  health_check_taskd "$dir"
-}
-
 # The new task service must accept an intent from the new `agentos` command
-# and carry it out with the offline rule planner. Bundles from before the
-# task service was shipped have neither, and are checked as before.
-health_check_taskd() {
+# and carry it out with the offline rule planner before it replaces the
+# running one.
+health_check() {
   local dir="$1" tmp pid out status=0
-  [ -e "$dir/usr/local/bin/agentos-taskd" ] || return 0
   [ -x "$dir/usr/local/bin/agentos" ] || die "更新包里有 agentos-taskd 却没有 agentos 命令"
   tmp=$(mktemp -d)
   # No model, no judge: whatever keys this shell has must not be used.

@@ -85,6 +85,11 @@ pub enum Command {
         /// starts a new thread.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thread: Option<TaskId>,
+        /// The human said this rather than typed it, so in `auto` mode the
+        /// replies are read aloud. Only how replies are presented depends on
+        /// it: a client could always have typed the same words.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        spoken: bool,
     },
     List {
         #[serde(default)]
@@ -119,6 +124,9 @@ pub enum Command {
         /// Human-facing, one-based number of the step that asked.
         step: usize,
         text: String,
+        /// As for `Submit`: the answer was spoken.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        spoken: bool,
     },
     /// Give standing permission for calls of one capability whose arguments
     /// satisfy every rule, so they stop asking. Only the user's own client
@@ -175,7 +183,106 @@ pub enum Command {
     Watch {
         #[serde(default)]
         after: Option<u64>,
+        /// Also deliver the voice events. Off unless asked for, so a client
+        /// that knows only task events never receives one it cannot parse.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        voice: bool,
     },
+    /// What voice input and output this machine has, and their state now.
+    Voice {},
+    /// The talk button. The service records, so every use of the microphone
+    /// is shown and audited; what was said comes back as a `transcript`
+    /// event for the recording `start` returned.
+    Listen {
+        action: ListenAction,
+    },
+    /// What the system did lately, from the audit log: capability calls,
+    /// confirmations, uses of the microphone and crashes, oldest first.
+    Activity {
+        limit: usize,
+    },
+    /// When replies are read aloud, and stopping what is being read.
+    Speech {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<SpeakMode>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        stop: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenAction {
+    /// Pressed: start recording.
+    Start,
+    /// Released: transcribe what was recorded.
+    Stop,
+    /// Released elsewhere: throw the recording away.
+    Cancel,
+}
+
+/// When replies are read aloud.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpeakMode {
+    /// Only replies to what the human said aloud.
+    Auto,
+    Always,
+    Off,
+}
+
+impl SpeakMode {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "auto" => Some(Self::Auto),
+            "always" => Some(Self::Always),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Always => "always",
+            Self::Off => "off",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MicState {
+    Idle,
+    Listening,
+    Transcribing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeLevel {
+    Info,
+    Error,
+}
+
+/// Voice input and output on this machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VoiceStatus {
+    /// Speech recognition is configured.
+    pub input: bool,
+    #[serde(default)]
+    pub input_label: Option<String>,
+    /// Where recordings are sent to be recognized.
+    #[serde(default)]
+    pub destination: Option<String>,
+    /// Speech synthesis is configured.
+    pub output: bool,
+    #[serde(default)]
+    pub output_label: Option<String>,
+    pub speak: SpeakMode,
+    pub mic: MicState,
+    pub speaking: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +390,17 @@ pub enum Reply {
     Watching {
         revision: u64,
     },
+    Voice {
+        voice: VoiceStatus,
+    },
+    /// The recording a `Listen` started, stopped or cancelled.
+    Listening {
+        recording: u64,
+    },
+    /// Items as described by `agentos_audit::recent_activity`.
+    Activity {
+        items: Vec<Value>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,8 +449,34 @@ pub struct Event {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EventKind {
-    TaskChanged { id: TaskId },
-    ResyncRequired { reason: String },
+    TaskChanged {
+        id: TaskId,
+    },
+    ResyncRequired {
+        reason: String,
+    },
+    /// Voice events go only to a watch that asked for them. They are not
+    /// task changes: their `revision` is the last one the watch was sent.
+    /// The microphone, the reader or the read-aloud mode changed.
+    VoiceState {
+        mic: MicState,
+        speaking: bool,
+        speak: SpeakMode,
+    },
+    /// Loudness while recording, 0 to 1, about ten times a second. Lossy.
+    VoiceLevel {
+        level: f32,
+    },
+    /// What was said in `recording`. The client that started it decides
+    /// what the words are: an intent, or the answer to a question.
+    Transcript {
+        recording: u64,
+        text: String,
+    },
+    VoiceNotice {
+        level: NoticeLevel,
+        text: String,
+    },
 }
 
 /// Read one newline-terminated frame without allowing an unbounded allocation.
@@ -530,6 +674,14 @@ mod tests {
             json!({"method":"read","capability":"notes.list"}),
             json!({"method":"read","capability":"notes.list","args":{}}),
             json!({"method":"watch"}),
+            json!({"method":"watch","voice":true}),
+            json!({"method":"submit","text":"现在几点","spoken":true}),
+            json!({"method":"reply","id":1,"step":1,"text":"好","spoken":true}),
+            json!({"method":"voice"}),
+            json!({"method":"activity","limit":20}),
+            json!({"method":"listen","action":"start"}),
+            json!({"method":"speech","mode":"always"}),
+            json!({"method":"speech","stop":true}),
         ] {
             let request = json!({"version":VERSION,"id":7,"command":command});
             assert!(serde_json::from_value::<Request>(request.clone()).is_ok());
@@ -547,6 +699,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn voice_additions_leave_the_wire_shape_of_older_requests_unchanged() {
+        // Guards compatibility: a request without the new fields means what
+        // it always meant, and one built without them serializes as before,
+        // so an older service still accepts it.
+        let typed: Command = serde_json::from_value(json!({"method":"submit","text":"x"})).unwrap();
+        assert!(matches!(typed, Command::Submit { spoken: false, .. }));
+        let watch: Command = serde_json::from_value(json!({"method":"watch"})).unwrap();
+        assert!(matches!(watch, Command::Watch { voice: false, .. }));
+        assert_eq!(
+            serde_json::to_value(Command::Watch {
+                after: None,
+                voice: false
+            })
+            .unwrap(),
+            json!({"method":"watch","after":null})
+        );
+        assert!(
+            serde_json::from_value::<Command>(json!({"method":"listen","action":"loud"})).is_err()
+        );
+        assert!(
+            serde_json::from_value::<Command>(json!({"method":"speech","mode":"shout"})).is_err()
+        );
     }
 
     #[test]

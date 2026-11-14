@@ -852,16 +852,6 @@ impl Butler {
 
     /// Trusted in-process compatibility entry point. IPC callers must supply
     /// the token from the concrete confirmation via `approve_with_token`.
-    pub async fn approve(&self, id: TaskId, step: usize, responder: &Intent) {
-        let token = self
-            .tasks
-            .get(id)
-            .and_then(|t| t.confirmation)
-            .map(|c| c.token)
-            .unwrap_or_default();
-        self.approve_with_token(id, step, responder, &token).await;
-    }
-
     /// A token binds approval to one concrete prompt across client reconnects.
     /// UID/source matching is still required; identity for an irreversible
     /// step is proven separately, by the PIN.
@@ -1186,7 +1176,11 @@ impl Butler {
             });
         }
         frame.next = plan.steps.len();
+        // A failed outside call taints the frame; the task on record must say
+        // so as well, since later tasks in the thread read it from there.
+        let tainted = frame.tainted;
         self.tasks.update(id, |t| {
+            t.tainted |= tainted;
             for step in &mut t.steps {
                 if step.id == failed {
                     step.state = StepState::Failed;
@@ -1262,6 +1256,9 @@ impl Butler {
                 biased;
                 plan = self.planner.plan_turn(&conversation) => Some(plan),
                 () = self.stopped(id) => None,
+                // Nor does a task out of time: the budget is a deadline, not
+                // only a check between rounds.
+                limit = self.out_of_time(stretch) => return Ok(Flow::OverBudget(limit)),
             };
             let Some(mut plan) = planned else {
                 return Ok(Flow::Stop);
@@ -1457,6 +1454,7 @@ impl Butler {
                     biased;
                     reviewed = judge.review_metered(&review) => reviewed,
                     () = self.stopped(id) => return Ok(Flow::Stop),
+                    limit = self.out_of_time(stretch) => return Ok(Flow::OverBudget(limit)),
                 };
                 self.meter(&task, &frame.agent, "judge", usage, asked)?;
                 self.audit.append(AuditEvent::JudgeVerdict {
@@ -1700,15 +1698,22 @@ impl Butler {
         if started.state.is_terminal() {
             return Ok(Flow::Stop);
         }
+        // Why an abortable call was abandoned: cancelled, or out of time.
+        let mut over_budget = None;
         let result = if capability.abortable() {
             tokio::select! {
                 biased;
                 result = capability.invoke(step.args.clone()) => Some(result),
                 () = self.stopped(id) => None,
+                limit = self.out_of_time(stretch) => {
+                    over_budget = Some(limit);
+                    None
+                }
             }
         } else {
             // Not safe to abandon: wait for it, and record what it did even
-            // though the task may have been cancelled meanwhile.
+            // though the task may have been cancelled or run out of time
+            // meanwhile. The budget stops the task at the next round.
             Some(capability.invoke(step.args.clone()).await)
         };
         let Some(result) = result else {
@@ -1720,18 +1725,23 @@ impl Butler {
                 capability: step.capability.clone(),
                 args: step.args.clone(),
             })?;
-            let message = if spec.risk == RiskLevel::ReadOnly {
-                "执行中被取消打断，没有返回结果。"
+            let why = if over_budget.is_some() {
+                "超出执行时长预算被打断"
             } else {
-                "执行中被取消打断，没有返回结果；是否已经生效未知。"
+                "执行中被取消打断"
+            };
+            let message = if spec.risk == RiskLevel::ReadOnly {
+                format!("{why}，没有返回结果。")
+            } else {
+                format!("{why}，没有返回结果；是否已经生效未知。")
             };
             self.tasks.update(id, |t| {
                 if let Some(step) = t.steps.iter_mut().find(|step| step.id == key) {
                     step.state = StepState::Failed;
-                    step.result = Some(Value::String(message.into()));
+                    step.result = Some(Value::String(message.clone()));
                 }
             })?;
-            return Ok(Flow::Stop);
+            return Ok(over_budget.map_or(Flow::Stop, Flow::OverBudget));
         };
         let (ok, value) = match &result {
             Ok(v) => (true, v.clone()),
@@ -1747,8 +1757,10 @@ impl Butler {
         })?;
         // Whatever an agent does after reading outside content is suspect for
         // the rest of the task, and a delegate's taint flows back to its parent.
+        // A failure counts too: its error text (an MCP tool's error content, a
+        // plugin's stderr) can carry outside words to the planner just as well.
         let untrusted = capability.untrusted_output();
-        if ok && untrusted {
+        if untrusted {
             frame.tainted = true;
         }
         let tainted = frame.tainted;
@@ -1869,6 +1881,17 @@ impl Butler {
     }
 
     /// The budget `task` has run out of, if any, before its next round.
+    /// Resolves when the task's time budget runs out during this stretch,
+    /// with the reason; never, without a time budget.
+    async fn out_of_time(&self, stretch: &Stretch) -> String {
+        let Some(limit) = self.budget.active else {
+            return std::future::pending().await;
+        };
+        let used = Duration::from_millis(stretch.active_ms());
+        tokio::time::sleep(limit.saturating_sub(used)).await;
+        format!("执行时长（上限 {} 秒）", limit.as_secs())
+    }
+
     fn exhausted(&self, task: &Task, stretch: &Stretch) -> Option<String> {
         // `task` was read before this round's requests; read what has been
         // metered since.

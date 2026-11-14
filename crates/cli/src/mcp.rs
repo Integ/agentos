@@ -222,7 +222,14 @@ async fn call_tool(client: &Client, name: &str, arguments: &Map<String, Value>) 
                     .number("wait_seconds")?
                     .unwrap_or(DEFAULT_WAIT_SECONDS)
                     .min(MAX_WAIT_SECONDS);
-                match client.request(Command::Submit { text, thread }).await {
+                match client
+                    .request(Command::Submit {
+                        text,
+                        thread,
+                        spoken: false,
+                    })
+                    .await
+                {
                     Ok(Reply::Accepted { task }) if wait == 0 => Ok(task_view(&task)),
                     // Waiting only reads. If it fails, the task is still
                     // there: say which one instead of losing its number.
@@ -290,6 +297,7 @@ async fn call_tool(client: &Client, name: &str, arguments: &Map<String, Value>) 
                         .filter(|step| *step > 0)
                         .ok_or("需要从 1 开始的 step")? as usize,
                     text: args.text("text")?,
+                    spoken: false,
                 };
                 client
                     .request(command)

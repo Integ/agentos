@@ -90,7 +90,10 @@ async fn connect(path: &Path) -> Result<UnixStream, ClientError> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let metadata = std::fs::symlink_metadata(path).map_err(|e| {
         transport(
-            format!("无法连接 {}：{e}；请先启动 agentosd", path.display()),
+            format!(
+                "无法连接 {}：{e}；请先启动任务服务 agentos-taskd",
+                path.display()
+            ),
             false,
         )
     })?;
@@ -151,6 +154,12 @@ fn reply_matches(command: &Command, reply: &Reply) -> bool {
             | (Command::Capabilities {}, Reply::Capabilities { .. })
             | (Command::Read { .. }, Reply::Value { .. })
             | (Command::Watch { .. }, Reply::Watching { .. })
+            | (
+                Command::Voice {} | Command::Speech { .. },
+                Reply::Voice { .. }
+            )
+            | (Command::Listen { .. }, Reply::Listening { .. })
+            | (Command::Activity { .. }, Reply::Activity { .. })
     )
 }
 
@@ -271,12 +280,21 @@ impl Client {
     }
 
     pub async fn watch(&self, after: Option<u64>) -> Result<WatchStream, ClientError> {
+        self.watch_with(after, false).await
+    }
+
+    /// [`Self::watch`], also receiving voice events when `voice` is set.
+    pub async fn watch_with(
+        &self,
+        after: Option<u64>,
+        voice: bool,
+    ) -> Result<WatchStream, ClientError> {
         let mut stream = connect(&self.path).await?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = Request {
             version: VERSION,
             id,
-            command: Command::Watch { after },
+            command: Command::Watch { after, voice },
             caller: self.caller.clone(),
         };
         timeout(REQUEST_TIMEOUT, write_frame(&mut stream, &request))
@@ -384,6 +402,7 @@ mod tests {
             .request(Command::Submit {
                 text: "记一下 买牛奶".into(),
                 thread: None,
+                spoken: false,
             })
             .await
             .unwrap_err();

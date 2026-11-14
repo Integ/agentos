@@ -384,7 +384,7 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
   <div class="right">
     <span id="mic-ind" class="mic-ind" role="status" hidden><span class="mdot"></span><span id="mic-ind-text">麦克风</span></span>
     <button id="spk-ind" class="spk-ind" hidden title="停止播报（Esc）"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/></svg>正在播报 · 停止</button>
-    <span id="status" class="pill" data-state="offline" role="status"><span class="dot"></span><span id="status-text">正在连接 agentosd…</span></span>
+    <span id="status" class="pill" data-state="offline" role="status"><span class="dot"></span><span id="status-text">正在连接任务服务…</span></span>
     <span class="ime" title="输入法：按 Ctrl+空格 切换">拼</span>
     <span id="clock"></span>
   </div>
@@ -533,7 +533,7 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
   function renderStatus() {
     const pill = $("#status"), text = $("#status-text");
     let s, t;
-    if (!state.connected) { s = "offline"; t = "未连接 agentosd，正在重试…"; }
+    if (!state.connected) { s = "offline"; t = "未连接任务服务，正在重试…"; }
     else if (state.confirm) { s = "confirm"; t = "等待你确认"; }
     else if (state.busy) {
       s = "busy";
@@ -630,8 +630,8 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
       }
       if (a.kind === "crash") {
         const box = el("div"), meta = el("div", "meta");
-        meta.append(el("span", "mono", "agentosd"), document.createTextNode(" · " + relTime(a.at_ms)));
-        box.append(el("div", null, "管家进程异常退出，已自动重启"), meta);
+        meta.append(el("span", "mono", "agentos-taskd"), document.createTextNode(" · " + relTime(a.at_ms)));
+        box.append(el("div", null, "任务服务异常退出，已自动重启"), meta);
         box.title = a.summary || "";
         li.append(el("span", "dot bad"), box);
         return li;
@@ -688,7 +688,7 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
   }
   function talkStart() {
     if (talking) return;
-    if (!state.connected) { bubble("error", "还没连上 agentosd，稍后再试"); return; }
+    if (!state.connected) { bubble("error", "还没连上任务服务，稍后再试"); return; }
     if (!state.voice.input) { bubble("note", "还没有配置语音识别。打开系统菜单运行 agentos-setup，或设置 AGENTOS_STT。"); return; }
     talking = true; send({ type: "listen", action: "start" }); renderVoice();
   }
@@ -704,7 +704,7 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
   micBtn.addEventListener("keyup", (e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); talkEnd(false); } });
   micBtn.addEventListener("click", (e) => e.preventDefault());
   // Hold Caps Lock anywhere (every keyboard has one; the session's xkb
-  // option caps:none stops it toggling caps, and agentosd lights its LED
+  // option caps:none stops it toggling caps, and the task service lights its LED
   // while recording). Matched by physical key, since its keysym is void.
   // Pressing another key meanwhile means it was a slip, so the recording is
   // dropped.
@@ -727,7 +727,7 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
     $("#c-sub").textContent = l3 ? "这一步不可撤销（风险等级 L3），只有你亲自确认后才会执行。" : `风险等级 ${c.risk}（${RISK_TEXT[c.risk] || ""}），需要你确认。`;
     const rows = [["能力", c.capability], ["原因", c.reason || "—"]];
     if (c.args && Object.keys(c.args).length) rows.push(["参数", JSON.stringify(c.args, null, 1)]);
-    if (c.verify_identity) rows.push(["身份核验", c.pin_required ? "需要输入 PIN" : "未设置 PIN，任何人都能确认（运行 agentosd --set-pin 设置）"]);
+    if (c.verify_identity) rows.push(["身份核验", c.pin_required ? "需要输入 PIN" : "未设置 PIN，任何人都能确认（运行 agentos-taskd --set-pin 设置）"]);
     $("#c-rows").replaceChildren(...rows.map(([k, v]) => { const d = el("div"); const dd = el("dd", k === "能力" ? "mono" : null, v); d.append(el("dt", null, k), dd); return d; }));
     $("#c-approve").classList.toggle("mild", !l3);
     let left = CONFIRM_SECONDS;
@@ -853,7 +853,7 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
   function submit(text) {
     text = (text || "").trim();
     if (!text || state.confirm) return;
-    if (!state.connected) { bubble("error", "还没连上 agentosd，稍后再试"); return; }
+    if (!state.connected) { bubble("error", "还没连上任务服务，稍后再试"); return; }
     bubble("user", text);
     state.busy = true; renderStatus();
     send({ type: "intent", text });
@@ -1462,7 +1462,7 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
     if (/清空笔记/.test(text)) steps.push(["notes.clear", () => { const n = demoNotes.length; demoNotes.length = 0; return `已清空 ${n} 条笔记`; }]);
     if (/几点|时间/.test(text)) steps.push(["time.now", () => `现在是 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`]);
     later(400, () => {
-      if (!steps.length) { receive({ type: "expression", kind: "report", intent: id, text: "演示模式只认识：记一下…、看看笔记、清空笔记、现在几点。连上 agentosd 后由真正的规划器处理。" }); receive({ type: "done", intent: id }); return; }
+      if (!steps.length) { receive({ type: "expression", kind: "report", intent: id, text: "演示模式只认识：记一下…、看看笔记、清空笔记、现在几点。连上任务服务后由真正的规划器处理。" }); receive({ type: "done", intent: id }); return; }
       receive({ type: "plan", intent: id, text, steps: steps.map(([c]) => ({ capability: c, description: caps[c][0], risk: caps[c][1] })) });
       demoRun(id, steps, 0);
     });
@@ -1471,7 +1471,7 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
   tick(); setInterval(tick, 1000 * 15); setInterval(renderActivity, 60000);
   if (native) send({ type: "ready" });
   else {
-    receive({ type: "hello", planner: "演示模式（未连接 agentosd）", voice: { input: true, input_label: "演示（不会真的录音）", destination: "本机", output: false, speak: "auto" } });
+    receive({ type: "hello", planner: "演示模式（未连接任务服务）", voice: { input: true, input_label: "演示（不会真的录音）", destination: "本机", output: false, speak: "auto" } });
     receive({ type: "activity", items: [] });
     if (location.hash.startsWith("#setup")) { SA.available = true; openSetup(location.hash === "#setup"); }
   }

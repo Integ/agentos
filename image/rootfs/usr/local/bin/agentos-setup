@@ -18,24 +18,17 @@ set -u
 [ "$EUID" -eq 0 ] || exec sudo "$0" "$@"
 
 ENV_FILE=${AGENTOS_ENV_FILE:-/etc/agentos/agentos.env}
-AGENT_HOME=/home/agent/.local/share/agentos
 TASKD_STATE=/home/agent/.local/state/agentos
 
-# Both daemons guard irreversible steps with the PIN, each with its own copy
-# in its own state directory; set and clear them together. A running task
-# service reads its PIN when it starts, so it is restarted (its user unit
-# brings it straight back).
+# The task service guards irreversible steps with the PIN, kept in its state
+# directory. A running service reads its PIN when it starts, so it is
+# restarted (its user unit brings it straight back).
 set_pins() { # set_pins PIN
-  printf '%s\n%s\n' "$1" "$1" |
-    runuser -u agent -- /usr/local/bin/agentosd --home "$AGENT_HOME" --set-pin >/dev/null 2>&1 || return 1
-  [ -x /usr/local/bin/agentos-taskd ] || return 0
   printf '%s\n%s\n' "$1" "$1" |
     runuser -u agent -- /usr/local/bin/agentos-taskd --state-dir "$TASKD_STATE" --set-pin >/dev/null 2>&1 || return 1
   pkill -x -u agent agentos-taskd 2>/dev/null || true
 }
 clear_pins() {
-  runuser -u agent -- /usr/local/bin/agentosd --home "$AGENT_HOME" --clear-pin >/dev/null 2>&1
-  [ -x /usr/local/bin/agentos-taskd ] || return 0
   runuser -u agent -- /usr/local/bin/agentos-taskd --state-dir "$TASKD_STATE" --clear-pin >/dev/null 2>&1
   pkill -x -u agent agentos-taskd 2>/dev/null || true
 }
@@ -47,7 +40,7 @@ saved() { # saved NAME: its value in the current env file
   [ -r "$ENV_FILE" ] || return 0
   ( set +u; . "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${!1:-}" )
 }
-pin_set() { runuser -u agent -- test -f "$AGENT_HOME/pin.json" 2>/dev/null; }
+pin_set() { runuser -u agent -- test -f "$TASKD_STATE/pin.json" 2>/dev/null; }
 read_input() { # KEY=VALUE lines on stdin → IN[KEY]; KEEP=NAME → IN[NAME] from the file
   declare -gA IN=()
   local line k
@@ -135,7 +128,7 @@ case "${1:-}" in
     rm -f "$tmp"
     if [ -n "${IN[PIN]:-}" ]; then
       set_pins "${IN[PIN]}" ||
-        { echo "设置已保存，但 PIN 设置失败（可以在终端运行 agentosd --set-pin 和 agentos-taskd --set-pin）" >&2; exit 1; }
+        { echo "设置已保存，但 PIN 设置失败（可以在终端运行 agentos-taskd --set-pin）" >&2; exit 1; }
     elif [ -n "${IN[PIN_CLEAR]:-}" ]; then
       clear_pins
     fi
@@ -248,8 +241,8 @@ rm -f "$tmp"
 touch /etc/agentos/setup-done
 
 # --- PIN for irreversible actions -------------------------------------------
-# Stored by agentosd in the agent user's data directory (never in the env
-# file). Without one, a click or "y" is enough to approve an L3 step.
+# Stored by the task service in the agent user's state directory (never in
+# the env file). Without one, a click or "y" is enough to approve an L3 step.
 if pin_set; then
   choice=$(W --title "PIN" --menu "删除数据、开锁、安装插件这类不可逆操作，确认时要输入 PIN。\n已经设置过 PIN。" 13 70 3 \
     keep   "保持不变" \
@@ -276,7 +269,7 @@ case "$choice" in
       if set_pins "$p1"; then
         W --title "PIN" --msgbox "PIN 已设置。" 8 40
       else
-        W --title "PIN" --msgbox "PIN 设置失败，可以稍后在终端运行 agentosd --set-pin 和 agentos-taskd --set-pin。" 9 66
+        W --title "PIN" --msgbox "PIN 设置失败，可以稍后在终端运行 agentos-taskd --set-pin。" 9 60
       fi
       break
     done

@@ -5,19 +5,16 @@
 //! in a WebKit view. Drawing everything in one surface lets the glass materials
 //! blur the wallpaper without compositor support.
 //!
-//! The shell holds no authority of its own: it forwards intents and
-//! confirmation answers to `agentosd` over its Unix socket (see
-//! `agentosd::shell_api`) and renders the events that come back. Every action
-//! still goes through the daemon's policy engine and audit log.
+//! The shell holds no authority of its own: it forwards intents, approvals
+//! and the talk button to the task service `agentos-taskd` over protocol v1
+//! (see `kernel.rs`) and renders what comes back. Every action still goes
+//! through the service's policy engine and audit log.
 //!
-//! Usage: `agentos-shell [--socket PATH] [--windowed | --fullscreen]`.
+//! Usage: `agentos-shell [--task-socket PATH] [--windowed | --fullscreen]`.
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
+use agentos_ipc::{ListenAction, SpeakMode};
 use serde_json::{json, Value};
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
@@ -33,24 +30,18 @@ const UI: &str = include_str!("../ui/index.html");
 /// Internal event: the page can receive events now.
 const READY: &str = "__ready";
 
-/// The daemon connection, shared by the reader thread and the IPC handler.
-type Conn = Arc<Mutex<Option<UnixStream>>>;
-
 const HELP: &str = "\
-用法：agentos-shell [--taskd | --task-socket 路径 | --socket 路径] [--windowed | --fullscreen]
+用法：agentos-shell [--task-socket 路径] [--windowed | --fullscreen]
 
-  --taskd         连接任务服务 agentos-taskd（协议 v1），使用默认状态目录下的 socket
   --task-socket 路径
-                  连接任务服务 agentos-taskd 的指定 socket（或 AGENTOS_TASK_SOCKET）
-  --socket 路径   连接旧的 agentosd（或 AGENTOS_SOCKET；
-                  默认 $XDG_RUNTIME_DIR/agentos.sock）。不指定任务服务时使用它
+                  连接任务服务 agentos-taskd 的指定 socket（或 AGENTOS_TASK_SOCKET；
+                  默认是状态目录下的 control.sock）
   --windowed      以 1440×900 的窗口运行，便于开发
   --fullscreen    无边框全屏
   --help, -h      查看帮助
   --version, -V   查看版本
 
-需要先启动后台：agentos-taskd，或 agentosd --listen <同一个 socket 路径>。
-语音目前只在连接 agentosd 时可用。";
+需要先启动任务服务 agentos-taskd。";
 
 /// What the command line asks for other than opening the desktop: text to
 /// print before exiting, or a usage error. Checked before any window exists,
@@ -68,11 +59,13 @@ fn command_line(args: impl IntoIterator<Item = String>) -> Result<Option<String>
             "--version" | "-V" => {
                 return Ok(Some(format!("agentos-shell {}", env!("CARGO_PKG_VERSION"))))
             }
-            "--socket" | "--task-socket" => {
+            "--task-socket" => {
                 if args.next().is_none_or(|value| value.starts_with("--")) {
                     return Err(format!("{name} 缺少路径，使用 --help 查看用法"));
                 }
             }
+            // `--taskd` chose the task service when there were two backends;
+            // still accepted so older session scripts keep working.
             "--windowed" | "--fullscreen" | "--taskd" => {}
             _ => return Err(format!("未知参数：{name}，使用 --help 查看用法")),
         }
@@ -94,30 +87,17 @@ fn flag(name: &str) -> bool {
     std::env::args().skip(1).any(|a| a == name)
 }
 
-/// `--socket`, `AGENTOS_SOCKET`, or `$XDG_RUNTIME_DIR/agentos.sock`.
-fn socket_path() -> PathBuf {
-    if let Some(p) = arg("--socket").or_else(|| std::env::var("AGENTOS_SOCKET").ok()) {
-        return p.into();
-    }
-    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(dir).join("agentos.sock")
-}
-
-/// The task service's socket, when the desktop is to run on it:
-/// `--task-socket`, `AGENTOS_TASK_SOCKET`, or with `--taskd` the socket in the
-/// default state directory.
-fn task_socket() -> Option<PathBuf> {
+/// The task service's socket: `--task-socket`, `AGENTOS_TASK_SOCKET`, or
+/// the socket in the default state directory.
+fn task_socket() -> PathBuf {
     if let Some(path) = arg("--task-socket") {
-        return Some(path.into());
+        return path.into();
     }
     if let Some(path) = std::env::var_os("AGENTOS_TASK_SOCKET").filter(|p| !p.is_empty()) {
-        return Some(path.into());
-    }
-    if !flag("--taskd") {
-        return None;
+        return path.into();
     }
     match agentos_ipc::default_state_dir() {
-        Ok(state) => Some(agentos_ipc::default_socket_path(&state)),
+        Ok(state) => agentos_ipc::default_socket_path(&state),
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(2);
@@ -136,6 +116,22 @@ fn butler_request(v: &Value) -> Option<kernel::Request> {
             task: v.get("task").and_then(Value::as_u64),
             pin: pin_of(v),
         }),
+        "listen" => Some(kernel::Request::Listen(
+            match v.get("action")?.as_str()? {
+                "start" => ListenAction::Start,
+                "stop" => ListenAction::Stop,
+                "cancel" => ListenAction::Cancel,
+                _ => return None,
+            },
+        )),
+        "speech" => {
+            let mode = match v.get("mode").and_then(Value::as_str) {
+                Some(mode) => Some(SpeakMode::parse(mode)?),
+                None => None,
+            };
+            let stop = v.get("action").and_then(Value::as_str) == Some("stop");
+            (mode.is_some() || stop).then_some(kernel::Request::Speech { mode, stop })
+        }
         _ => None,
     }
 }
@@ -146,32 +142,6 @@ fn pin_of(v: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|pin| (1..=12).contains(&pin.len()) && pin.bytes().all(|b| b.is_ascii_digit()))
         .map(str::to_string)
-}
-
-/// Keep a connection to agentosd, reconnecting every second, and forward each
-/// event line to the UI.
-fn daemon_loop(path: PathBuf, conn: Conn, proxy: EventLoopProxy<Value>) {
-    loop {
-        if let Ok(stream) = UnixStream::connect(&path) {
-            if let Ok(reader) = stream.try_clone() {
-                *conn.lock().unwrap() = Some(stream);
-                for line in BufReader::new(reader).lines() {
-                    let Ok(line) = line else { break };
-                    if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                        if proxy.send_event(v).is_err() {
-                            return;
-                        }
-                    }
-                }
-                *conn.lock().unwrap() = None;
-                let gone = json!({"type": "connection", "connected": false});
-                if proxy.send_event(gone).is_err() {
-                    return;
-                }
-            }
-        }
-        std::thread::sleep(Duration::from_secs(1));
-    }
 }
 
 /// System actions the UI may ask for, run by the `agentos-system` helper that
@@ -230,67 +200,32 @@ fn mark_ready(hello: &Value) {
 }
 
 /// What the UI may ask for. Only intents, confirmation answers and voice
-/// controls (talk button, read-aloud mode) reach the daemon, rebuilt from known
-/// fields; `system` runs a fixed set of actions and `setup` the setup
-/// assistant's checked operations (see `setup.rs`). The shell never touches the
-/// microphone itself: agentosd records, so it can audit and show every use.
+/// controls (talk button, read-aloud mode) reach the task service, rebuilt
+/// from known fields; `system` runs a fixed set of actions and `setup` the
+/// setup assistant's checked operations (see `setup.rs`). The shell never
+/// touches the microphone itself: the service records, so it can audit and
+/// show every use.
 fn handle_ipc(
     body: &str,
-    conn: &Conn,
     proxy: &EventLoopProxy<Value>,
-    tasks: Option<&tokio::sync::mpsc::UnboundedSender<kernel::Request>>,
+    tasks: &tokio::sync::mpsc::UnboundedSender<kernel::Request>,
 ) {
     let Ok(v) = serde_json::from_str::<Value>(body) else {
         return;
     };
-    // On the task service, intents and approvals are protocol requests.
-    if let (Some(tasks), Some(request)) = (tasks, butler_request(&v)) {
+    if let Some(request) = butler_request(&v) {
         let _ = tasks.send(request);
         return;
     }
-    let out = match v.get("type").and_then(Value::as_str) {
-        Some("intent") => match v.get("text").and_then(Value::as_str) {
-            Some(t) => json!({"type": "intent", "text": t}),
-            None => return,
-        },
-        Some("confirm") => match v.get("approved").and_then(Value::as_bool) {
-            Some(a) => {
-                // Which task is answered, and the PIN for an irreversible
-                // step, belong to the answer: without them the daemon answers
-                // its newest waiting task and can never accept a PIN.
-                let mut out = json!({"type": "confirm", "approved": a});
-                if let Some(task) = v.get("task").and_then(Value::as_u64) {
-                    out["task"] = json!(task);
-                }
-                if let Some(pin) = pin_of(&v) {
-                    out["pin"] = json!(pin);
-                }
-                out
-            }
-            None => return,
-        },
-        Some("listen") => match v.get("action").and_then(Value::as_str) {
-            Some(a @ ("start" | "stop" | "cancel")) => json!({"type": "listen", "action": a}),
-            _ => return,
-        },
-        Some("speech") => match (
-            v.get("mode").and_then(Value::as_str),
-            v.get("action").and_then(Value::as_str),
-        ) {
-            (Some(m @ ("auto" | "always" | "off")), _) => json!({"type": "speech", "mode": m}),
-            (_, Some("stop")) => json!({"type": "speech", "action": "stop"}),
-            _ => return,
-        },
-        // The page finished loading: start delivering daemon events.
+    match v.get("type").and_then(Value::as_str) {
+        // The page finished loading: start delivering service events.
         Some("ready") => {
             let _ = proxy.send_event(json!({"type": READY}));
-            return;
         }
         Some("system") => {
             if let Some(action) = system_action(&v) {
                 run_system(action);
             }
-            return;
         }
         // Setup assistant: checked here, run off the UI thread (Wi-Fi scans
         // and connection tests take seconds), answered as a `setup` event.
@@ -307,17 +242,8 @@ fn handle_ipc(
                 Err(e) => json!({"type": "setup", "id": id, "ok": false, "error": e}),
             };
             let _ = proxy.send_event(answer);
-            return;
         }
-        _ => return,
-    };
-    let mut guard = conn.lock().unwrap();
-    if let Some(stream) = guard.as_mut() {
-        let mut line = out.to_string();
-        line.push('\n');
-        if stream.write_all(line.as_bytes()).is_err() {
-            *guard = None;
-        }
+        _ => {}
     }
 }
 
@@ -341,7 +267,6 @@ fn main() -> wry::Result<()> {
             std::process::exit(2);
         }
     }
-    let path = socket_path();
     let event_loop = EventLoopBuilder::<Value>::with_user_event().build();
 
     let mut wb = WindowBuilder::new().with_title("AgentOS");
@@ -363,30 +288,21 @@ fn main() -> wry::Result<()> {
         }
     }
 
-    let conn: Conn = Arc::new(Mutex::new(None));
-    // One backend: the task service over protocol v1, or the older agentosd.
-    let tasks = task_socket().map(|socket| {
-        let (requests, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let proxy = event_loop.create_proxy();
-        eprintln!("agentos-shell：连接任务服务 {}", socket.display());
-        std::thread::spawn(move || {
-            kernel::run(socket, receiver, move |event| {
-                proxy.send_event(event).is_ok()
-            })
-        });
-        requests
+    let socket = task_socket();
+    let (tasks, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let proxy = event_loop.create_proxy();
+    eprintln!("agentos-shell：连接任务服务 {}", socket.display());
+    std::thread::spawn(move || {
+        kernel::run(socket, receiver, move |event| {
+            proxy.send_event(event).is_ok()
+        })
     });
-    if tasks.is_none() {
-        let (conn, proxy, path) = (conn.clone(), event_loop.create_proxy(), path.clone());
-        eprintln!("agentos-shell：连接 {}", path.display());
-        std::thread::spawn(move || daemon_loop(path, conn, proxy));
-    }
 
-    let (ipc_conn, ipc_proxy) = (conn.clone(), event_loop.create_proxy());
+    let ipc_proxy = event_loop.create_proxy();
     let builder = WebViewBuilder::new()
         .with_html(UI)
         .with_background_color((11, 15, 28, 255))
-        .with_ipc_handler(move |req| handle_ipc(req.body(), &ipc_conn, &ipc_proxy, tasks.as_ref()));
+        .with_ipc_handler(move |req| handle_ipc(req.body(), &ipc_proxy, &tasks));
 
     #[cfg(target_os = "linux")]
     let webview = {
@@ -454,14 +370,16 @@ mod tests {
         for args in [
             vec![],
             vec!["--windowed"],
-            vec!["--socket", "/tmp/agentos.sock", "--fullscreen"],
+            vec!["--task-socket", "/tmp/control.sock", "--fullscreen"],
         ] {
             assert_eq!(parse(&args), Ok(None), "{args:?}");
         }
         for args in [
             vec!["--window"],
-            vec!["--socket"],
-            vec!["--socket", "--windowed"],
+            vec!["--task-socket"],
+            vec!["--task-socket", "--windowed"],
+            // The agentosd socket is gone; a script still passing it is told.
+            vec!["--socket", "/tmp/agentos.sock"],
         ] {
             assert!(parse(&args).is_err(), "{args:?}");
         }
@@ -483,15 +401,39 @@ mod tests {
     }
 
     #[test]
-    fn the_task_service_can_be_selected_as_the_backend() {
+    fn the_old_backend_flag_is_still_accepted() {
         let parse = |args: &[&str]| command_line(args.iter().map(|a| a.to_string()));
-        for args in [
-            vec!["--taskd"],
-            vec!["--task-socket", "/run/user/1000/control.sock"],
+        assert_eq!(parse(&["--taskd"]), Ok(None));
+    }
+
+    #[test]
+    fn the_talk_button_and_read_aloud_become_known_requests_only() {
+        let v = |s: &str| serde_json::from_str::<Value>(s).unwrap();
+        assert_eq!(
+            butler_request(&v(r#"{"type":"listen","action":"start"}"#)),
+            Some(kernel::Request::Listen(ListenAction::Start))
+        );
+        assert_eq!(
+            butler_request(&v(r#"{"type":"speech","mode":"always"}"#)),
+            Some(kernel::Request::Speech {
+                mode: Some(SpeakMode::Always),
+                stop: false
+            })
+        );
+        assert_eq!(
+            butler_request(&v(r#"{"type":"speech","action":"stop"}"#)),
+            Some(kernel::Request::Speech {
+                mode: None,
+                stop: true
+            })
+        );
+        for other in [
+            r#"{"type":"listen","action":"forever"}"#,
+            r#"{"type":"speech","mode":"loud"}"#,
+            r#"{"type":"speech"}"#,
         ] {
-            assert_eq!(parse(&args), Ok(None), "{args:?}");
+            assert_eq!(butler_request(&v(other)), None, "{other}");
         }
-        assert!(parse(&["--task-socket"]).is_err());
     }
 
     #[test]

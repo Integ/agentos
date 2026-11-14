@@ -8,14 +8,18 @@
 //! protocol requests. Nothing here decides anything: approval is still bound
 //! to the task, step and token the service issued, and the PIN is only passed
 //! through.
+//!
+//! Voice works the same way: the talk button becomes `listen` requests, the
+//! service records and recognizes, and the words of a recording this window
+//! started come back here and are submitted like typed text, marked spoken.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use agentos_cli::client::{Client, ClientError};
 use agentos_core::{CapabilitySpec, RiskLevel};
-use agentos_ipc::{Command, EventKind, Reply};
+use agentos_ipc::{Command, EventKind, ListenAction, NoticeLevel, Reply, SpeakMode};
 use agentos_runtime::{StepState, Task, TaskId, TaskState};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -30,6 +34,13 @@ pub enum Request {
         approved: bool,
         task: Option<u64>,
         pin: Option<String>,
+    },
+    /// The talk button: pressed, released, or released elsewhere.
+    Listen(ListenAction),
+    /// When replies are read aloud, or stop reading now.
+    Speech {
+        mode: Option<SpeakMode>,
+        stop: bool,
     },
 }
 
@@ -209,31 +220,6 @@ pub fn translate(
     events
 }
 
-/// Recent capability calls, for the activity panel, oldest first.
-fn activity(tasks: &BTreeMap<u64, Task>) -> Value {
-    let mut items: Vec<Value> = tasks
-        .values()
-        .flat_map(|task| {
-            task.steps
-                .iter()
-                .filter(|step| {
-                    step.agent.is_some() || !step.capability.as_str().starts_with("agent.")
-                })
-                .filter(|step| matches!(step.state, StepState::Succeeded | StepState::Failed))
-                .map(|step| {
-                    json!({
-                        "at_ms": task.updated_at_ms, "kind": "invoked",
-                        "capability": step.capability,
-                        "ok": step.state == StepState::Succeeded,
-                    })
-                })
-        })
-        .collect();
-    let skip = items.len().saturating_sub(20);
-    items.drain(..skip);
-    json!({"type": "activity", "items": items})
-}
-
 struct Session {
     client: Client,
     specs: HashMap<String, CapabilitySpec>,
@@ -241,6 +227,8 @@ struct Session {
     shown: BTreeMap<u64, Task>,
     /// The conversation of this window: one run of the shell is one thread.
     thread: Option<TaskId>,
+    /// Recordings this window started; only their words are its to submit.
+    recordings: HashSet<u64>,
 }
 
 impl Session {
@@ -254,11 +242,60 @@ impl Session {
     /// Read a task and report what changed since the page last saw it.
     async fn refresh(&mut self, id: u64, emit: &impl Fn(Value) -> bool) -> Result<(), ClientError> {
         let task = self.task(id).await?;
+        let ended = task.state.is_terminal()
+            && self
+                .shown
+                .get(&id)
+                .is_none_or(|before| !before.state.is_terminal());
         for event in translate(self.shown.get(&id), &task, &self.specs) {
             emit(event);
         }
         self.shown.insert(id, task);
+        // The panel is the audit log's view; bring it up to date once a task
+        // is over rather than on every step.
+        if ended {
+            self.activity(emit).await?;
+        }
         Ok(())
+    }
+
+    /// Recent activity as the audit log records it.
+    async fn activity(&self, emit: &impl Fn(Value) -> bool) -> Result<(), ClientError> {
+        let Reply::Activity { items } =
+            self.client.request(Command::Activity { limit: 20 }).await?
+        else {
+            unreachable!("the client verifies reply types")
+        };
+        emit(json!({"type": "activity", "items": items}));
+        Ok(())
+    }
+
+    /// The page's view of the service's voice event, if it has one.
+    async fn voice_event(&mut self, kind: EventKind, emit: &impl Fn(Value) -> bool) {
+        match kind {
+            EventKind::VoiceState {
+                mic,
+                speaking,
+                speak,
+            } => {
+                emit(json!({"type": "voice", "mic": mic, "speaking": speaking, "speak": speak}));
+            }
+            EventKind::VoiceLevel { level } => {
+                emit(json!({"type": "voice_level", "level": level}));
+            }
+            EventKind::VoiceNotice { level, text } => {
+                emit(json!({"type": "voice_notice", "level": level, "text": text}));
+            }
+            // Another window's recording is that window's to submit.
+            EventKind::Transcript { recording, text } if self.recordings.remove(&recording) => {
+                emit(json!({"type": "transcript", "text": text}));
+                if let Err(error) = self.say(text, true, emit).await {
+                    emit(json!({"type": "expression", "kind": "error", "text": error.to_string()}));
+                    emit(json!({"type": "done"}));
+                }
+            }
+            _ => {}
+        }
     }
 
     /// After (re)connecting: learn the current tasks without replaying their
@@ -301,39 +338,92 @@ impl Session {
             }
             self.shown.insert(id, task);
         }
-        emit(activity(&self.shown));
-        Ok(())
+        self.activity(emit).await
+    }
+
+    /// Words from the human, typed or spoken. The page told them that their
+    /// next words answer the newest open question; they go to exactly that
+    /// task and step, and nowhere else.
+    async fn say(
+        &mut self,
+        text: String,
+        spoken: bool,
+        emit: &impl Fn(Value) -> bool,
+    ) -> Result<(), ClientError> {
+        let asked = self.shown.values().rev().find_map(|task| {
+            let question = task.question.as_ref()?;
+            (task.state == TaskState::AwaitingInput).then_some((task.id, question.step))
+        });
+        let command = match asked {
+            Some((id, step)) => Command::Reply {
+                id,
+                step: step + 1,
+                text,
+                spoken,
+            },
+            None => Command::Submit {
+                text,
+                thread: self.thread,
+                spoken,
+            },
+        };
+        match self.client.request(command).await? {
+            Reply::Accepted { task } => {
+                self.thread = Some(task.thread);
+                self.shown.insert(task.id.0, task);
+                Ok(())
+            }
+            Reply::ReplyQueued { id, .. } => self.refresh(id.0, emit).await,
+            _ => Ok(()),
+        }
+    }
+
+    /// The talk button. A refused start says why and releases the button.
+    async fn listen(
+        &mut self,
+        action: ListenAction,
+        emit: &impl Fn(Value) -> bool,
+    ) -> Result<(), ClientError> {
+        match self.client.request(Command::Listen { action }).await {
+            Ok(Reply::Listening { recording }) => {
+                if action == ListenAction::Start {
+                    self.recordings.insert(recording);
+                }
+                Ok(())
+            }
+            Ok(_) => Ok(()),
+            // Released after a refused start: nothing to stop.
+            Err(ClientError::Remote(error)) if error.code == "not_listening" => Ok(()),
+            Err(ClientError::Remote(error)) => {
+                emit(
+                    json!({"type": "voice_notice", "level": NoticeLevel::Error, "text": error.message}),
+                );
+                emit(json!({"type": "voice", "mic": "idle", "speaking": false}));
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn handle(&mut self, request: Request, emit: &impl Fn(Value) -> bool) {
         let result = match request {
-            Request::Intent(text) => {
-                // The page told the user that their next words answer the
-                // newest open question; they go to exactly that task and
-                // step, and nowhere else.
-                let asked = self.shown.values().rev().find_map(|task| {
-                    let question = task.question.as_ref()?;
-                    (task.state == TaskState::AwaitingInput).then_some((task.id, question.step))
-                });
-                let command = match asked {
-                    Some((id, step)) => Command::Reply {
-                        id,
-                        step: step + 1,
-                        text,
-                    },
-                    None => Command::Submit {
-                        text,
-                        thread: self.thread,
-                    },
-                };
-                match self.client.request(command).await {
-                    Ok(Reply::Accepted { task }) => {
-                        self.thread = Some(task.thread);
-                        self.shown.insert(task.id.0, task);
+            Request::Intent(text) => self.say(text, false, emit).await,
+            Request::Listen(action) => self.listen(action, emit).await,
+            Request::Speech { mode, stop } => {
+                match self.client.request(Command::Speech { mode, stop }).await {
+                    Ok(Reply::Voice { voice }) => {
+                        emit(
+                            json!({"type": "voice", "mic": voice.mic, "speaking": voice.speaking, "speak": voice.speak}),
+                        );
                         Ok(())
                     }
-                    Ok(Reply::ReplyQueued { id, .. }) => self.refresh(id.0, emit).await,
                     Ok(_) => Ok(()),
+                    Err(ClientError::Remote(error)) => {
+                        emit(
+                            json!({"type": "voice_notice", "level": NoticeLevel::Error, "text": error.message}),
+                        );
+                        Ok(())
+                    }
                     Err(error) => Err(error),
                 }
             }
@@ -419,6 +509,7 @@ pub fn run(
             specs: HashMap::new(),
             shown: BTreeMap::new(),
             thread: None,
+            recordings: HashSet::new(),
         };
         loop {
             let connected = async {
@@ -428,11 +519,15 @@ pub fn run(
                     unreachable!("the client verifies reply types")
                 };
                 // Subscribe before reading, so no change falls in between.
-                let stream = session.client.watch(None).await?;
+                let stream = session.client.watch_with(None, true).await?;
+                let Reply::Voice { voice } = session.client.request(Command::Voice {}).await? else {
+                    unreachable!("the client verifies reply types")
+                };
+                // Recordings of a previous connection will not be answered.
+                session.recordings.clear();
                 emit(json!({
                     "type": "hello", "planner": "任务服务", "version": server_version,
-                    // Voice is not hosted by the task service yet.
-                    "voice": {"input": false, "output": false},
+                    "voice": voice,
                 }));
                 session.resync(&emit).await?;
                 Ok::<_, ClientError>(stream)
@@ -453,6 +548,7 @@ pub fn run(
                         change = changes.recv() => match change {
                             Some(EventKind::TaskChanged { id }) => session.refresh(id.0, &emit).await,
                             Some(EventKind::ResyncRequired { .. }) => session.resync(&emit).await,
+                            Some(voice) => { session.voice_event(voice, &emit).await; Ok(()) }
                             None => break,
                         },
                         request = requests.recv() => match request {
@@ -702,13 +798,14 @@ mod tests {
     }
 
     /// The whole bridge against a real task service on a real socket.
-    #[test]
-    fn the_page_drives_a_real_task_service_through_the_bridge() {
+    /// A task service on its own thread and runtime, like the daemon. With
+    /// `words`, its microphone hears a tone and its recognizer those words.
+    fn serve(name: &str, words: Option<&str>) -> (std::path::PathBuf, impl FnOnce()) {
         use std::os::unix::fs::DirBuilderExt;
         use std::sync::mpsc as std_mpsc;
 
         let dir = std::path::PathBuf::from(format!(
-            "{}/aos-shell-{}",
+            "{}/aos-shell-{name}-{}",
             if cfg!(target_os = "macos") {
                 "/private/tmp".to_string()
             } else {
@@ -719,39 +816,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
         let socket = dir.join("control.sock");
-
-        // The service runs on its own runtime, like the daemon would.
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let (ready, is_ready) = std_mpsc::channel();
         let service_socket = socket.clone();
         let audit_path = dir.join("audit.jsonl");
+        let words = words.map(str::to_string);
         let service = std::thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap()
                 .block_on(async move {
-                    let audit =
-                        std::sync::Arc::new(agentos_audit::AuditLog::open(audit_path).unwrap());
+                    use std::sync::Arc;
+                    let audit = Arc::new(agentos_audit::AuditLog::open(audit_path).unwrap());
                     let mut registry = agentos_services::registry::CapabilityRegistry::new();
                     agentos_taskd::builtin::register_all(&mut registry);
                     let mut policy = agentos_policy::PolicyEngine::new();
                     let names: Vec<_> = registry.specs().into_iter().map(|s| s.name).collect();
-                    agentos_taskd::butler::grant_manifest(
-                        &mut policy,
-                        &AgentId::new("butler"),
-                        &names,
-                    );
-                    let server = agentos_taskd::service::Service::new(
-                        std::sync::Arc::new(TaskStore::memory()),
-                        audit,
+                    let butler_id = AgentId::new("butler");
+                    agentos_taskd::butler::grant_manifest(&mut policy, &butler_id, &names);
+                    let butler = agentos_taskd::butler::Butler::with_store(
+                        butler_id,
                         registry,
                         policy,
                         Box::new(agentos_planner::RulePlanner),
-                    )
-                    .bind(&service_socket)
-                    .await
-                    .unwrap();
+                        audit.clone(),
+                        agentos_services::expression::ExpressionHub::new(audit.clone()),
+                        Arc::new(TaskStore::memory()),
+                    );
+                    let mut service =
+                        agentos_taskd::service::Service::with_butler(butler, audit.clone(), None);
+                    if let Some(words) = words {
+                        use agentos_taskd::voice::{CommandStt, Voice, VoiceConfig};
+                        let sh = |script: String| vec!["sh".into(), "-c".into(), script];
+                        let config = VoiceConfig {
+                            stt: Some(Arc::new(CommandStt::new(sh(format!("echo '{words}'"))))),
+                            recorder: sh(
+                                "head -c 32000 /dev/zero | tr '\\0' '\\177'; sleep 30".into()
+                            ),
+                            ..VoiceConfig::disabled()
+                        };
+                        service = service.with_voice(Voice::with_led(
+                            config,
+                            audit,
+                            agentos_taskd::mic_led::MicLed::disabled(),
+                        ));
+                    }
+                    let server = service.bind(&service_socket).await.unwrap();
                     ready.send(()).unwrap();
                     server
                         .run_until(async {
@@ -764,14 +875,63 @@ mod tests {
         is_ready
             .recv_timeout(Duration::from_secs(10))
             .expect("service ready");
+        (socket, move || {
+            stop.send(()).unwrap();
+            service.join().unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+        })
+    }
+
+    #[test]
+    fn a_held_talk_button_becomes_a_spoken_task_in_this_conversation() {
+        use std::sync::mpsc as std_mpsc;
+        let (socket, stop) = serve("voice", Some("记一下 说出来的"));
+        let (requests, receiver) = mpsc::unbounded_channel();
+        let (events_tx, events) = std_mpsc::channel::<Value>();
+        let bridge = std::thread::spawn(move || {
+            run(socket, receiver, move |event| events_tx.send(event).is_ok())
+        });
+        let next = |wanted: &str| loop {
+            let event = events
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap_or_else(|_| panic!("no {wanted} event"));
+            if event["type"] == wanted {
+                return event;
+            }
+        };
+        let hello = next("hello");
+        assert_eq!(hello["voice"]["input"], true);
+        assert_eq!(hello["voice"]["destination"], "本机");
+        requests.send(Request::Listen(ListenAction::Start)).unwrap();
+        assert_eq!(next("voice")["mic"], "listening");
+        std::thread::sleep(Duration::from_millis(400));
+        requests.send(Request::Listen(ListenAction::Stop)).unwrap();
+        // The page shows what was heard, then the task it became.
+        assert_eq!(next("transcript")["text"], "记一下 说出来的");
+        let said = next("expression");
+        assert_eq!(said["text"], "已记下：说出来的");
+        assert_eq!(next("done")["state"], "done");
+        // The microphone use is in recent activity, from the audit log.
+        let activity = next("activity");
+        assert!(activity["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["kind"] == "device"));
+        drop(requests);
+        bridge.join().unwrap();
+        stop();
+    }
+
+    #[test]
+    fn the_page_drives_a_real_task_service_through_the_bridge() {
+        use std::sync::mpsc as std_mpsc;
+        let (socket, stop) = serve("page", None);
 
         let (requests, receiver) = mpsc::unbounded_channel();
         let (events_tx, events) = std_mpsc::channel::<Value>();
-        let bridge_socket = socket.clone();
         let bridge = std::thread::spawn(move || {
-            run(bridge_socket, receiver, move |event| {
-                events_tx.send(event).is_ok()
-            })
+            run(socket, receiver, move |event| events_tx.send(event).is_ok())
         });
         let next = |wanted: &str| loop {
             let event = events
@@ -804,8 +964,6 @@ mod tests {
         // Closing the page ends the bridge; the service is unaffected.
         drop(requests);
         bridge.join().unwrap();
-        stop.send(()).unwrap();
-        service.join().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
+        stop();
     }
 }

@@ -1,9 +1,10 @@
-//! Crash reporting. A panic anywhere in agentosd is a bug that may have left
-//! a task half-done, so the daemon does not limp on: the panic hook prints a
-//! report with a backtrace to stderr (which the image sends to the journal,
-//! `journalctl -t agentosd`), saves it as `crash.txt` in the data directory,
-//! and exits. `agentos-daemon` then starts a fresh daemon, which picks up the
-//! report and records it in the audit log.
+//! Crash reporting. A panic anywhere in the task service is a bug that may
+//! have left a task half-done, so the service does not limp on: the panic
+//! hook prints a report with a backtrace to stderr (the journal, `journalctl
+//! -t agentos-taskd`), saves it as `crash.txt` in the state directory, and
+//! exits. The user unit starts it again; the new run marks unfinished tasks
+//! interrupted, records the report in the audit log, and the desktop shows it
+//! under recent activity.
 
 use std::path::{Path, PathBuf};
 
@@ -18,7 +19,7 @@ fn crash_file(home: &Path) -> PathBuf {
 pub fn report(location: Option<String>, message: &str, thread: &str, backtrace: &str) -> String {
     let when = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%:z");
     format!(
-        "agentosd {} 崩溃：{message}（位置 {}，线程 {thread}，时间 {when}）\n{backtrace}\n",
+        "agentos-taskd {} 崩溃：{message}（位置 {}，线程 {thread}，时间 {when}）\n{backtrace}\n",
         env!("CARGO_PKG_VERSION"),
         location.as_deref().unwrap_or("未知"),
     )
@@ -72,17 +73,17 @@ mod tests {
 
     #[test]
     fn last_crash_is_reported_once() {
-        let home = std::env::temp_dir().join(format!("agentos-crash-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("agentos-taskd-crash-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         assert_eq!(take_last(&home), None);
         std::fs::write(
             home.join("crash.txt"),
-            "agentosd 0.1.0 崩溃：boom\nbacktrace\n",
+            "agentos-taskd 0.1.0 崩溃：boom\nbacktrace\n",
         )
         .unwrap();
         assert_eq!(
             take_last(&home).as_deref(),
-            Some("agentosd 0.1.0 崩溃：boom")
+            Some("agentos-taskd 0.1.0 崩溃：boom")
         );
         assert_eq!(take_last(&home), None);
         assert!(std::fs::read_to_string(home.join("crash.prev.txt"))

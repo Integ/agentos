@@ -18,6 +18,24 @@ use agentos_taskd::butler::{grant_manifest, Butler};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+/// Approve with the token the prompt carried, as a client that showed it
+/// would. The butler itself only accepts an approval that names the token.
+trait ApproveAsShown {
+    async fn approve(&self, id: TaskId, step: usize, responder: &Intent);
+}
+
+impl ApproveAsShown for agentos_taskd::butler::Butler {
+    async fn approve(&self, id: TaskId, step: usize, responder: &Intent) {
+        let token = self
+            .tasks()
+            .get(id)
+            .and_then(|task| task.confirmation)
+            .map(|confirmation| confirmation.token)
+            .unwrap_or_default();
+        self.approve_with_token(id, step, responder, &token).await;
+    }
+}
+
 struct TestCapability {
     spec: CapabilitySpec,
     calls: Mutex<Vec<Value>>,
@@ -155,7 +173,7 @@ impl Harness {
         capabilities: Vec<Arc<dyn Capability>>,
     ) -> Self {
         let audit_path = std::env::temp_dir().join(format!(
-            "agentosd-{name}-{}-{}.jsonl",
+            "taskd-butler-{name}-{}-{}.jsonl",
             std::process::id(),
             now_ms()
         ));

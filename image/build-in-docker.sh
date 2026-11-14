@@ -19,7 +19,6 @@ esac
 # The programs that go into the image and the update bundle, as
 # "variable:package:binary". Give every variable to use prebuilt binaries.
 PROGRAMS=(
-  AGENTOSD_BIN:agentosd:agentosd
   AGENTOS_SHELL_BIN:agentos-shell:agentos-shell
   AGENTOS_TASKD_BIN:agentos-taskd:agentos-taskd
   AGENTOS_CLI_BIN:agentos-cli:agentos

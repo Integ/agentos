@@ -1,10 +1,12 @@
 //! Voice: push-to-talk speech input and spoken replies.
 //!
 //! Two devices share one [`Voice`] hub:
-//! - the **microphone** (a perception device): while the human holds the talk
-//!   button, a recorder process streams 16 kHz mono PCM; on release the audio
-//!   goes to a [`SpeechToText`] backend and the transcript becomes a text
-//!   percept from device [`MIC_DEVICE`], exactly like a typed line;
+//! - the **microphone**: while the human holds the talk button, a recorder
+//!   process streams 16 kHz mono PCM; on release the audio goes to a
+//!   [`SpeechToText`] backend and the words go back, as a `transcript` event,
+//!   to the client that started the recording. That client submits them like
+//!   a typed line, so a spoken intent continues the same conversation and can
+//!   answer a question, and it is the same human's in every respect;
 //! - the **speaker** (an expression device, [`SpeechOutput`]): reports, errors
 //!   and confirmation requests are synthesized by a [`TextToSpeech`] backend
 //!   and played in order. Plans are never read aloud.
@@ -14,13 +16,13 @@
 //!
 //! Privacy rules:
 //! - The microphone only records while the talk button is held (60 s max) and
-//!   never listens for a wake word. Every recording is announced to shells
-//!   (`voice` events, so the menu bar shows a microphone indicator) and written
-//!   to the audit log with its length and where the audio was sent.
+//!   never listens for a wake word. Every recording is announced to clients
+//!   (`voice_state` events, so the menu bar shows a microphone indicator) and
+//!   written to the audit log with its length and where the audio was sent.
 //! - Audio leaves the machine only when the human chose a cloud recognizer
 //!   (`AGENTOS_STT=openai`); there is no silent default.
-//! - A voice transcript can cancel a pending step but cannot approve one that
-//!   needs identity verification (L3); see the butler.
+//! - Words never approve anything: approval is a separate request bound to the
+//!   step's token, which the client sends only when the human acts on screen.
 
 use std::collections::VecDeque;
 use std::process::Stdio;
@@ -31,23 +33,26 @@ use std::time::{Duration, Instant};
 use agentos_audit::{AuditEvent, AuditLog};
 use agentos_core::{
     now_ms, DeviceId, DeviceInfo, Expression, ExpressionKind, IntentId, Modality, Output,
-    OutputError, Percept, PerceptKind, PrivacyClass,
+    OutputError, PrivacyClass,
 };
+pub use agentos_ipc::SpeakMode;
+use agentos_ipc::{EventKind, MicState, NoticeLevel, VoiceStatus};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{broadcast, mpsc, Notify};
 
 use crate::mic_led::MicLed;
-use crate::shell_api::EventBus;
 
-/// Device id of the microphone; intents from it are voice intents.
+/// Device id of the microphone, in the audit log.
 pub const MIC_DEVICE: &str = "mic";
 /// Recorder output format: signed 16-bit little-endian, mono, 16 kHz.
 pub const SAMPLE_RATE: u32 = 16_000;
 /// The longest recording; the talk button is released for the human after this.
 pub const MAX_RECORDING: Duration = Duration::from_secs(60);
+/// How long a stopped recorder's output may take to close.
+const RECORDER_GRACE: Duration = Duration::from_secs(2);
 /// Shorter recordings are treated as an accidental tap.
 const MIN_RECORDING_MS: u64 = 300;
 /// Below this peak level (about -40 dBFS) the recording is treated as silence.
@@ -506,34 +511,6 @@ impl TextToSpeech for CommandTts {
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// When replies are read aloud.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpeakMode {
-    /// Only replies to intents the human spoke.
-    Auto,
-    Always,
-    Off,
-}
-
-impl SpeakMode {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "auto" => Some(Self::Auto),
-            "always" => Some(Self::Always),
-            "off" => Some(Self::Off),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Always => "always",
-            Self::Off => "off",
-        }
-    }
-}
-
 pub struct VoiceConfig {
     pub stt: Option<Arc<dyn SpeechToText>>,
     pub tts: Option<Arc<dyn TextToSpeech>>,
@@ -545,6 +522,17 @@ pub struct VoiceConfig {
 }
 
 impl VoiceConfig {
+    /// No recognizer and no synthesizer.
+    pub fn disabled() -> Self {
+        Self {
+            stt: None,
+            tts: None,
+            recorder: split_command(Self::DEFAULT_RECORDER).unwrap_or_default(),
+            player: split_command(Self::DEFAULT_PLAYER).unwrap_or_default(),
+            speak: SpeakMode::Auto,
+        }
+    }
+
     pub const DEFAULT_RECORDER: &'static str = "arecord -q -t raw -f S16_LE -r 16000 -c 1";
     pub const DEFAULT_PLAYER: &'static str = "aplay -q -";
 
@@ -658,33 +646,18 @@ impl VoiceConfig {
 // The voice hub
 // ---------------------------------------------------------------------------
 
-/// Requests from a shell.
+/// Why a voice request was not carried out; becomes a protocol error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VoiceControl {
-    /// Talk button pressed.
-    ListenStart,
-    /// Talk button released: transcribe and send.
-    ListenStop,
-    /// Talk button released elsewhere / Esc: throw the recording away.
-    ListenCancel,
-    SetSpeakMode(SpeakMode),
-    /// Stop reading aloud and drop queued replies.
-    StopSpeaking,
+pub struct VoiceError {
+    pub code: &'static str,
+    pub message: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MicState {
-    Idle,
-    Listening,
-    Transcribing,
-}
-
-impl MicState {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Listening => "listening",
-            Self::Transcribing => "transcribing",
+impl VoiceError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
         }
     }
 }
@@ -693,7 +666,7 @@ struct Recording {
     child: Child,
     reader: tokio::task::JoinHandle<(Vec<u8>, f32)>,
     started: Instant,
-    /// Distinguishes this recording from later ones (for the 60 s limit).
+    /// Names this recording to clients; its transcript carries it.
     serial: u64,
 }
 
@@ -707,8 +680,7 @@ pub struct Voice {
     tts: Option<Arc<dyn TextToSpeech>>,
     recorder: Vec<String>,
     player: Vec<String>,
-    bus: EventBus,
-    percepts: mpsc::Sender<Percept>,
+    events: broadcast::Sender<EventKind>,
     audit: Arc<AuditLog>,
 
     mic: Mutex<MicState>,
@@ -727,27 +699,31 @@ pub struct Voice {
 
 impl Voice {
     /// Create the hub and start its speech worker. Must run inside Tokio.
-    pub fn new(
-        cfg: VoiceConfig,
-        bus: EventBus,
-        percepts: mpsc::Sender<Percept>,
-        audit: Arc<AuditLog>,
-    ) -> Arc<Self> {
+    pub fn new(cfg: VoiceConfig, audit: Arc<AuditLog>) -> Arc<Self> {
+        Self::with_led(
+            cfg,
+            audit,
+            if cfg!(test) {
+                MicLed::disabled()
+            } else {
+                MicLed::from_env()
+            },
+        )
+    }
+
+    pub fn with_led(cfg: VoiceConfig, audit: Arc<AuditLog>, led: MicLed) -> Arc<Self> {
         let (queue, rx) = mpsc::unbounded_channel();
         let voice = Arc::new(Self {
             stt: cfg.stt,
             tts: cfg.tts,
             recorder: cfg.recorder,
             player: cfg.player,
-            bus,
-            percepts,
+            // Levels arrive ten times a second; a watcher that falls this far
+            // behind loses some, and is told by the next state event.
+            events: broadcast::channel(256).0,
             audit,
             mic: Mutex::new(MicState::Idle),
-            led: if cfg!(test) {
-                MicLed::disabled()
-            } else {
-                MicLed::from_env()
-            },
+            led,
             recording: tokio::sync::Mutex::new(None),
             serial: AtomicU64::new(0),
             speak: Mutex::new(cfg.speak),
@@ -763,6 +739,11 @@ impl Voice {
         voice
     }
 
+    /// Voice events from now on.
+    pub fn subscribe(&self) -> broadcast::Receiver<EventKind> {
+        self.events.subscribe()
+    }
+
     pub fn input_enabled(&self) -> bool {
         self.stt.is_some()
     }
@@ -772,25 +753,29 @@ impl Voice {
     }
 
     pub fn speak_mode(&self) -> SpeakMode {
-        *self.speak.lock().unwrap()
+        *self.speak.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// For the shell's `hello`, and the console banner.
-    pub fn describe(&self) -> Value {
-        json!({
-            "input": self.input_enabled(),
-            "input_label": self.stt.as_ref().map(|s| s.label()),
-            "destination": self.stt.as_ref().map(|s| s.destination()),
-            "output": self.output_enabled(),
-            "output_label": self.tts.as_ref().map(|t| t.label()),
-            "speak": self.speak_mode().as_str(),
-        })
+    fn mic_state(&self) -> MicState {
+        *self.mic.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Remember that `id` came from the microphone, so its replies are spoken
-    /// in `auto` mode.
+    pub fn status(&self) -> VoiceStatus {
+        VoiceStatus {
+            input: self.input_enabled(),
+            input_label: self.stt.as_ref().map(|s| s.label()),
+            destination: self.stt.as_ref().map(|s| s.destination()),
+            output: self.output_enabled(),
+            output_label: self.tts.as_ref().map(|t| t.label()),
+            speak: self.speak_mode(),
+            mic: self.mic_state(),
+            speaking: self.speaking.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Remember that `id` was spoken, so its replies are read in `auto` mode.
     pub fn mark_voice_intent(&self, id: IntentId) {
-        let mut q = self.voice_intents.lock().unwrap();
+        let mut q = self.voice_intents.lock().unwrap_or_else(|p| p.into_inner());
         q.push_back(id);
         while q.len() > 32 {
             q.pop_front();
@@ -798,85 +783,81 @@ impl Voice {
     }
 
     fn is_voice_intent(&self, id: Option<IntentId>) -> bool {
-        id.is_some_and(|id| self.voice_intents.lock().unwrap().contains(&id))
+        id.is_some_and(|id| {
+            self.voice_intents
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains(&id)
+        })
     }
 
-    fn emit(&self, v: Value) {
-        let _ = self.bus.send(v);
+    fn emit(&self, event: EventKind) {
+        let _ = self.events.send(event);
     }
 
     fn emit_state(&self) {
-        let mic = *self.mic.lock().unwrap();
-        self.emit(json!({
-            "type": "voice",
-            "mic": mic.as_str(),
-            "speaking": self.speaking.load(Ordering::SeqCst),
-            "speak": self.speak_mode().as_str(),
-        }));
+        self.emit(EventKind::VoiceState {
+            mic: self.mic_state(),
+            speaking: self.speaking.load(Ordering::SeqCst),
+            speak: self.speak_mode(),
+        });
     }
 
-    fn notice(&self, level: &str, text: impl Into<String>) {
+    fn notice(&self, level: NoticeLevel, text: impl Into<String>) {
         let text = text.into();
         eprintln!("语音：{text}");
-        self.emit(json!({"type": "voice_notice", "level": level, "text": text}));
+        self.emit(EventKind::VoiceNotice { level, text });
     }
 
     fn set_mic(&self, s: MicState) {
-        *self.mic.lock().unwrap() = s;
+        *self.mic.lock().unwrap_or_else(|p| p.into_inner()) = s;
         self.led.set(s == MicState::Listening);
         self.emit_state();
     }
 
-    pub async fn control(self: &Arc<Self>, c: VoiceControl) {
-        match c {
-            VoiceControl::ListenStart => self.listen_start().await,
-            VoiceControl::ListenStop => self.listen_stop(true).await,
-            VoiceControl::ListenCancel => self.listen_stop(false).await,
-            VoiceControl::SetSpeakMode(m) => {
-                *self.speak.lock().unwrap() = m;
-                if m == SpeakMode::Off {
-                    self.stop_speaking();
-                }
-                self.emit_state();
-            }
-            VoiceControl::StopSpeaking => self.stop_speaking(),
+    pub fn set_speak_mode(&self, mode: SpeakMode) {
+        *self.speak.lock().unwrap_or_else(|p| p.into_inner()) = mode;
+        if mode == SpeakMode::Off {
+            self.stop_speaking();
         }
+        self.emit_state();
     }
 
-    async fn listen_start(self: &Arc<Self>) {
+    /// Start recording; the number names the recording to clients.
+    pub async fn listen_start(self: &Arc<Self>) -> Result<u64, VoiceError> {
         if self.stt.is_none() {
-            self.notice(
-                "error",
+            return Err(VoiceError::new(
+                "voice_unavailable",
                 "还没有配置语音识别。运行 agentos-setup，或设置 AGENTOS_STT。",
-            );
-            return;
+            ));
         }
         let mut rec = self.recording.lock().await;
-        if rec.is_some() || *self.mic.lock().unwrap() != MicState::Idle {
-            return;
+        if rec.is_some() || self.mic_state() != MicState::Idle {
+            return Err(VoiceError::new("busy", "麦克风正在使用"));
         }
         // Barge-in: the human talking stops the butler talking.
         self.stop_speaking();
 
-        let mut child = match command(&self.recorder)
+        let mut recorder = command(&self.recorder);
+        // Its own process group, so stopping it stops a recorder script's
+        // children too; otherwise one of them keeps the pipe open and the
+        // microphone never comes back.
+        recorder.process_group(0);
+        let mut child = recorder
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                self.notice(
-                    "error",
+            .map_err(|e| {
+                VoiceError::new(
+                    "voice_failed",
                     format!("无法打开麦克风（{}）：{e}", self.recorder[0]),
-                );
-                return;
-            }
-        };
+                )
+            })?;
         let Some(mut stdout) = child.stdout.take() else {
-            return;
+            return Err(VoiceError::new("voice_failed", "无法读取录音程序的输出"));
         };
-        let bus = self.bus.clone();
+        let events = self.events.clone();
         let reader = tokio::spawn(async move {
             let mut pcm = Vec::new();
             let mut peak = 0f32;
@@ -891,10 +872,9 @@ impl Voice {
                         pcm.extend_from_slice(&buf[..n]);
                         let (p, rms) = levels(&buf[..n & !1]);
                         peak = peak.max(p);
-                        let _ = bus.send(json!({
-                            "type": "voice_level",
-                            "level": (rms * 4.0).min(1.0),
-                        }));
+                        let _ = events.send(EventKind::VoiceLevel {
+                            level: (rms * 4.0).min(1.0),
+                        });
                         if pcm.len() >= limit {
                             break;
                         }
@@ -921,73 +901,89 @@ impl Voice {
             if let Some(v) = me.upgrade() {
                 let current = v.recording.lock().await.as_ref().map(|r| r.serial);
                 if current == Some(serial) {
-                    v.notice("info", "已录满 60 秒，自动发送");
-                    v.listen_stop(true).await;
+                    v.notice(NoticeLevel::Info, "已录满 60 秒，自动发送");
+                    let _ = v.listen_stop(true).await;
                 }
             }
         });
+        Ok(serial)
     }
 
-    async fn listen_stop(self: &Arc<Self>, send: bool) {
+    /// Stop recording. With `send`, what was said is transcribed and comes
+    /// back as a `transcript` event; otherwise it is thrown away.
+    pub async fn listen_stop(self: &Arc<Self>, send: bool) -> Result<u64, VoiceError> {
         let Some(mut rec) = self.recording.lock().await.take() else {
-            return;
+            return Err(VoiceError::new("not_listening", "现在没有在录音"));
         };
+        let serial = rec.serial;
+        if let Some(pid) = rec.child.id().and_then(|pid| i32::try_from(pid).ok()) {
+            // SAFETY: killpg takes no pointers; the group is the one this
+            // recorder leads, and it is still unreaped, so the id is ours.
+            unsafe {
+                libc::killpg(pid, libc::SIGTERM);
+            }
+        }
         let _ = rec.child.start_kill();
         let _ = rec.child.wait().await;
-        let (pcm, peak) = rec.reader.await.unwrap_or_default();
+        // A recorder that leaves something holding its output must not keep
+        // the microphone busy forever: what arrived until then is used.
+        let (pcm, peak) = match tokio::time::timeout(RECORDER_GRACE, &mut rec.reader).await {
+            Ok(read) => read.unwrap_or_default(),
+            Err(_) => {
+                rec.reader.abort();
+                (Vec::new(), 0.0)
+            }
+        };
         let held_ms = rec.started.elapsed().as_millis() as u64;
         let audio_ms = pcm_duration_ms(&pcm);
-        let stt = self.stt.clone().expect("recording implies a recognizer");
+        let Some(stt) = self.stt.clone() else {
+            // Recording needs a recognizer; it cannot have gone away.
+            self.set_mic(MicState::Idle);
+            return Ok(serial);
+        };
 
         if !send || held_ms < MIN_RECORDING_MS {
             self.audit_mic(audio_ms, "本机（已丢弃）");
             self.set_mic(MicState::Idle);
-            return;
+            return Ok(serial);
         }
         if pcm.is_empty() {
             self.audit_mic(0, "本机（已丢弃）");
             self.set_mic(MicState::Idle);
             self.notice(
-                "error",
+                NoticeLevel::Error,
                 format!("麦克风没有声音数据。检查录音设备，或用 AGENTOS_MIC_CMD 指定录音命令（当前：{}）。", self.recorder.join(" ")),
             );
-            return;
+            return Ok(serial);
         }
         if peak < SILENCE_PEAK {
             self.audit_mic(audio_ms, "本机（静音，已丢弃）");
             self.set_mic(MicState::Idle);
-            self.notice("info", "没有听到声音，麦克风可能被静音了");
-            return;
+            self.notice(NoticeLevel::Info, "没有听到声音，麦克风可能被静音了");
+            return Ok(serial);
         }
 
         self.set_mic(MicState::Transcribing);
+        // On record before the audio leaves this process.
         self.audit_mic(audio_ms, &stt.destination());
         let wav = wav_from_pcm(&pcm, SAMPLE_RATE, 1);
         let me = self.clone();
-        // Transcribe off the control path so the shell stays responsive.
+        // Transcribe off the request path so the client stays responsive.
         tokio::spawn(async move {
             let result = stt.transcribe(wav).await;
-            me.set_mic(MicState::Idle);
             match result {
-                Ok(text) if !text.trim().is_empty() => {
-                    let text = text.trim().to_string();
-                    me.emit(json!({"type": "transcript", "text": text}));
-                    let _ = me
-                        .percepts
-                        .send(Percept {
-                            device: DeviceId::new(MIC_DEVICE),
-                            at_ms: now_ms(),
-                            kind: PerceptKind::Text {
-                                text,
-                                speaker: None,
-                            },
-                        })
-                        .await;
-                }
-                Ok(_) => me.notice("info", "没听清，请再说一次"),
-                Err(e) => me.notice("error", format!("语音识别失败：{e}")),
+                Ok(text) if !text.trim().is_empty() => me.emit(EventKind::Transcript {
+                    recording: serial,
+                    text: text.trim().to_string(),
+                }),
+                Ok(_) => me.notice(NoticeLevel::Info, "没听清，请再说一次"),
+                Err(e) => me.notice(NoticeLevel::Error, format!("语音识别失败：{e}")),
             }
+            // After the words: a client sees the transcript before the
+            // microphone is free again.
+            me.set_mic(MicState::Idle);
         });
+        Ok(serial)
     }
 
     fn audit_mic(&self, audio_ms: u64, sent_to: &str) {
@@ -1025,7 +1021,7 @@ impl Voice {
             if u.generation == v.generation.load(Ordering::SeqCst) {
                 v.set_speaking(true);
                 if let Err(e) = v.speak_one(&u).await {
-                    v.notice("error", format!("语音播报失败：{e}"));
+                    v.notice(NoticeLevel::Error, format!("语音播报失败：{e}"));
                 }
             }
             if rx.is_empty() {

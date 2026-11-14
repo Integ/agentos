@@ -26,8 +26,11 @@ use agentos_services::registry::CapabilityRegistry;
 use agentos_taskd::builtin;
 use agentos_taskd::butler::{grant_manifest, Budget, Butler};
 use agentos_taskd::callers::CallerStore;
+use agentos_taskd::crash;
+use agentos_taskd::migrate;
 use agentos_taskd::preauth::PreauthStore;
 use agentos_taskd::service::Service;
+use agentos_taskd::voice::{SpeechOutput, Voice, VoiceConfig};
 
 const HELP: &str = "\
 用法：agentos-taskd [选项]
@@ -252,6 +255,9 @@ async fn main() -> io::Result<()> {
             return Ok(());
         }
     };
+    // Only the desktop user's own service takes over agentosd's data; a
+    // state directory named on the command line is someone's test or tool.
+    let explicit_state_dir = options.state_dir.is_some();
     let state_dir = options
         .state_dir
         .map_or_else(agentos_ipc::default_state_dir, Ok)?;
@@ -273,6 +279,27 @@ async fn main() -> io::Result<()> {
         Mode::ClearPin => return clear_pin(&pin_path),
         Mode::VerifyAudit => return verify_audit(&audit_path),
     }
+    if !explicit_state_dir {
+        if let Some(legacy) = migrate::legacy_dir(|name| std::env::var(name).ok()) {
+            // Before anything opens these files. A failure is reported and
+            // tried again next start; it does not keep the service down.
+            match migrate::from_agentosd(&legacy, &state_dir) {
+                Ok(Some(report)) => {
+                    eprintln!("已从 agentosd 迁移数据（{} 未改动）：", legacy.display());
+                    for line in report.lines() {
+                        eprintln!("  {line}");
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => eprintln!(
+                    "从 agentosd 迁移数据失败（{}），下次启动时重试：{error}",
+                    legacy.display()
+                ),
+            }
+        }
+    }
+    // From here on a panic is reported and ends the service; see crash.rs.
+    crash::install(&state_dir);
     let (planner, text_model, label) = make_planner(options.planner)?;
     let socket = options
         .socket
@@ -288,6 +315,13 @@ async fn main() -> io::Result<()> {
         );
     }
     let audit = Arc::new(audit);
+    if let Some(summary) = crash::take_last(&state_dir) {
+        eprintln!(
+            "上次 agentos-taskd 异常退出：{summary}\n  完整报告：{}（也在 journalctl -t agentos-taskd 里）",
+            state_dir.join("crash.prev.txt").display()
+        );
+        audit.append(agentos_audit::AuditEvent::DaemonCrashed { summary })?;
+    }
     let pins = Arc::new(PinVault::open(&pin_path)?.with_audit(audit.clone()));
 
     let mut registry = CapabilityRegistry::new();
@@ -341,7 +375,17 @@ async fn main() -> io::Result<()> {
 
     let budget = task_budget(|name| std::env::var(name).ok())
         .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
-    let expr = ExpressionHub::new(audit.clone());
+    // Push-to-talk and read-aloud: configured in the environment, off unless
+    // chosen, and never sending audio anywhere the human did not pick.
+    let (voice_config, voice_notes) = VoiceConfig::from_env();
+    for note in voice_notes {
+        eprintln!("{note}");
+    }
+    let voice = Voice::new(voice_config, audit.clone());
+    let mut expr = ExpressionHub::new(audit.clone());
+    if voice.output_enabled() {
+        expr.add_output(Arc::new(SpeechOutput::new(voice.clone())));
+    }
     let mut butler = Butler::with_store(
         butler_id,
         registry,
@@ -373,7 +417,9 @@ async fn main() -> io::Result<()> {
 
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let voice_label = voice_label(&voice.status());
     let server = Service::with_butler(butler, audit, Some(pins.clone()))
+        .with_voice(voice)
         .bind(&socket)
         .await?;
     println!(
@@ -383,7 +429,7 @@ async fn main() -> io::Result<()> {
         server.path().display()
     );
     println!(
-        "子 Agent：{}\n插件：{}\n智能家居：{home}\n裁判：{judge}\n每个任务的预算：{}\nPIN：{}",
+        "子 Agent：{}\n插件：{}\n智能家居：{home}\n语音：{voice_label}\n裁判：{judge}\n每个任务的预算：{}\nPIN：{}",
         agent_names.join("、"),
         sandbox.label(),
         budget_label(budget),
@@ -399,6 +445,19 @@ async fn main() -> io::Result<()> {
             tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {} }
         })
         .await
+}
+
+/// The console line for voice: what recognizes and reads, and where audio goes.
+fn voice_label(status: &agentos_ipc::VoiceStatus) -> String {
+    let input = match (&status.input_label, &status.destination) {
+        (Some(label), Some(to)) => format!("识别 {label}（音频发往 {to}）"),
+        _ => "识别未配置".into(),
+    };
+    let output = match &status.output_label {
+        Some(label) => format!("朗读 {label}（{}）", status.speak.as_str()),
+        None => "朗读未配置".into(),
+    };
+    format!("{input}；{output}")
 }
 
 /// What a task may consume, from the environment: `AGENTOS_TASK_TOKENS` and

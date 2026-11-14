@@ -631,7 +631,7 @@ function setConnection(connected, code) {
   state.connected = connected; state.connection = code;
   $('#connection-button').dataset.state = connected ? 'online' : 'offline';
   $('#connection-label').textContent = connected ? 'AgentOS 已连接' : '本地交互';
-  $('#connection-details').textContent = connected ? '已连接当前用户的 AgentOS 后台。意图、任务和后台笔记来自真实服务。浏览器笔记保持独立，不自动同步。' : code === 'session_required' || !state.token ? '尚未授权后台连接。启动 agentos-shell 后，请打开终端输出的完整访问链接。当前可体验浏览器本地笔记、专注与情景布局。' : '未连接 agentosd。请使用相同 --state-dir 启动后台服务。当前可体验浏览器本地笔记、专注与情景布局。';
+  $('#connection-details').textContent = connected ? '已连接当前用户的 AgentOS 后台。意图、任务和后台笔记来自真实服务。浏览器笔记保持独立，不自动同步。' : code === 'session_required' || !state.token ? '尚未授权后台连接。启动 agentos-shell 后，请打开终端输出的完整访问链接。当前可体验浏览器本地笔记、专注与情景布局。' : '未连接任务服务 agentos-taskd。请使用相同 --state-dir 启动后台服务。当前可体验浏览器本地笔记、专注与情景布局。';
   if (!connected) { state.approval = null; state.remoteNotes = []; state.remoteNotesLoaded = false; state.revision = null; if (changed) state.selected = null; }
   if (changed) render();
 }

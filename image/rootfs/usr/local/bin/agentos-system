@@ -5,13 +5,13 @@ case "${1:-}" in
   terminal)
     exec foot ;;
   setup)
-    # Re-run the setup wizard, then restart agentosd so it picks up the
-    # new planner and keys (agentos-daemon restarts it).
+    # Re-run the setup wizard, then restart the task service so it picks up
+    # the new planner and keys (its user unit starts it again).
     exec foot --app-id agentos-setup sh -c \
-      'sudo /usr/local/bin/agentos-setup; pkill -x -u "$(id -u)" agentosd' ;;
+      'sudo /usr/local/bin/agentos-setup; pkill -x -u "$(id -u)" agentos-taskd' ;;
   update)
-    # Install the latest AgentOS release (agentos-update restarts agentosd;
-    # the desktop itself switches over at the next login).
+    # Install the latest AgentOS release (agentos-update restarts the task
+    # service; the desktop itself switches over at the next login).
     exec foot --app-id agentos-setup sh -c \
       'sudo /usr/local/bin/agentos-update; read -r -p "按回车关闭" _' ;;
   install)

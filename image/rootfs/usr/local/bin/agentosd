@@ -1,0 +1,56 @@
+#!/bin/bash
+# agentosd has been removed: the task service agentos-taskd does its work,
+# the desktop and the `agentos` command talk to it. This stand-in exists for
+# one release, for machines updating from v0.4 or earlier:
+#
+# - Their agentos-update refuses a bundle without usr/local/bin/agentosd and,
+#   before installing, runs it as a self-test from the unpacked bundle:
+#     printf '记一下 更新自检\n看看笔记\n' | agentosd --planner rule --home DIR --audit FILE
+#   Here that runs the bundle's own agentos-taskd with the offline rule
+#   planner in DIR, and carries out each line with the bundle's `agentos`.
+# - Their desktop session, until the next login, keeps restarting
+#   `agentosd --listen …`. That waits quietly instead of failing every second.
+#
+# Remove it in the release after the one that introduced it.
+set -u
+here=$(cd "$(dirname "$0")" && pwd)
+notice() { echo "agentosd 已移除，由任务服务 agentos-taskd 取代；请使用 agentos 命令或图形桌面。" >&2; }
+
+home="" listen=0 rule=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --home) home="${2:-}"; shift ;;
+    --audit) shift ;;
+    --planner) [ "${2:-}" = rule ] && rule=1; shift ;;
+    --listen) listen=1; shift ;;
+    -h|--help|-V|--version) notice; exit 0 ;;
+    *) notice; exit 2 ;;
+  esac
+  shift
+done
+
+if [ "$listen" = 1 ]; then
+  notice
+  while :; do sleep 86400; done
+fi
+if [ "$rule" != 1 ] || [ -z "$home" ]; then
+  notice
+  exit 2
+fi
+
+# The self-test: a private task service, offline, no keys.
+mkdir -p "$home" || exit 1
+state="$home/taskd"
+env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u OPENAI_BASE_URL -u AGENTOS_PLANNER -u AGENTOS_JUDGE \
+  -u AGENTOS_STT -u AGENTOS_TTS -u AGENTOS_STT_CMD -u AGENTOS_TTS_CMD \
+  "$here/agentos-taskd" --planner rule --state-dir "$state" >"$home/taskd.log" 2>&1 &
+pid=$!
+trap 'kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null' EXIT
+for _ in $(seq 100); do [ -S "$state/control.sock" ] && break; sleep 0.1; done
+status=0
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  "$here/agentos" --state-dir "$state" submit --wait --timeout 30 "$line" || status=1
+done
+[ "$status" = 0 ] || cat "$home/taskd.log" >&2
+exit "$status"

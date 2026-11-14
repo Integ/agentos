@@ -1,6 +1,6 @@
 # 自我进化
 
-> **在任务服务上。** `agentos-taskd` 提供同一组 `evolve.*` 能力，插件保存在状态目录的 `evolve/`（默认 `~/.local/state/agentos/evolve/`）。安装是 L3：必须先用 `agentos-taskd --set-pin` 设置 PIN，批准安装时输入它；没有设置 PIN 时安装会被拒绝。下文的 `AGENTOS_HOME` 指旧的 `agentosd`。
+> 任务服务 `agentos-taskd` 提供 `evolve.*` 能力，插件保存在状态目录的 `evolve/`（默认 `~/.local/state/agentos/evolve/`）。安装是 L3：必须先用 `agentos-taskd --set-pin` 设置 PIN，批准安装时输入它；没有设置 PIN 时安装会被拒绝。
 
 用户通过输入设备（键盘、语音）提出一个 AgentOS 现在做不到的要求，AgentOS 自己写出新能力、自测、请用户审阅，确认后装上并立刻可用；不满意可以回滚。
 
@@ -28,7 +28,7 @@
   │
   ▼
 系统自动追加 evolve.install（L3）→ 请求用户确认
-  │  y                                  │ 其他
+  │  批准（带 PIN）                      │ 拒绝
   ▼                                     ▼
 写入新版本并启用，管家立即获得该能力    取消，什么都不装
 ```
@@ -50,13 +50,13 @@
 ## 插件格式
 
 ```
-<AGENTOS_HOME>/evolve/plugins/<名字>/versions/<n>/manifest.json
-<AGENTOS_HOME>/evolve/plugins/<名字>/versions/<n>/main.py   (或 main.sh)
-<AGENTOS_HOME>/evolve/plugins/<名字>/current                 当前版本号，不存在表示停用
-<AGENTOS_HOME>/evolve/plugins/<名字>/data/                   私有存储，跨版本保留
+<状态目录>/evolve/plugins/<名字>/versions/<n>/manifest.json
+<状态目录>/evolve/plugins/<名字>/versions/<n>/main.py   (或 main.sh)
+<状态目录>/evolve/plugins/<名字>/current                 当前版本号，不存在表示停用
+<状态目录>/evolve/plugins/<名字>/data/                   私有存储，跨版本保留
 ```
 
-`AGENTOS_HOME` 默认是 `~/.local/share/agentos`，可用 `--home` 或环境变量 `AGENTOS_HOME` 指定。
+状态目录默认是 `~/.local/state/agentos`，可用 `--state-dir` 或环境变量 `AGENTOS_STATE_DIR` 指定。
 
 调用协议：参数以一个 JSON 对象写入 stdin；插件向 stdout 输出一个 JSON 对象，`message` 字段是给用户看的结果；非零退出码表示失败，stderr 是原因。插件输出中的 `follow_up` 字段会被丢弃，只有内置能力可以串联下一步。
 
