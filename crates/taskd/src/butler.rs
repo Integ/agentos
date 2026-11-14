@@ -1186,7 +1186,11 @@ impl Butler {
             });
         }
         frame.next = plan.steps.len();
+        // A failed outside call taints the frame; the task on record must say
+        // so as well, since later tasks in the thread read it from there.
+        let tainted = frame.tainted;
         self.tasks.update(id, |t| {
+            t.tainted |= tainted;
             for step in &mut t.steps {
                 if step.id == failed {
                     step.state = StepState::Failed;
@@ -1747,8 +1751,10 @@ impl Butler {
         })?;
         // Whatever an agent does after reading outside content is suspect for
         // the rest of the task, and a delegate's taint flows back to its parent.
+        // A failure counts too: its error text (an MCP tool's error content, a
+        // plugin's stderr) can carry outside words to the planner just as well.
         let untrusted = capability.untrusted_output();
-        if ok && untrusted {
+        if untrusted {
             frame.tainted = true;
         }
         let tainted = frame.tainted;

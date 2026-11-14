@@ -904,8 +904,9 @@ impl Butler {
         f.started = None;
         // Whatever the agent does after reading outside content is suspect,
         // for the rest of this task (taint never goes away within a frame,
-        // and a delegate's taint flows back to its parent).
-        if untrusted && result.is_ok() && !f.tainted {
+        // and a delegate's taint flows back to its parent). A failure counts
+        // too: its error text can carry outside words to the planner.
+        if untrusted && !f.tainted {
             f.tainted = true;
             self.emit(json!({
                 "type": "tainted",

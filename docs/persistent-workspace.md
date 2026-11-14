@@ -158,7 +158,8 @@ agentos approve task-3 1 --confirmation <令牌> --pin-stdin
 | 文件 | 内容 |
 | --- | --- |
 | `control.sock` | 仅本用户可访问的本地控制端点，权限 `0600` |
-| `tasks.json` | 稳定任务 ID、持久 revision、生命周期、步骤与结果 |
+| `tasks.json` | 任务快照：稳定任务 ID、持久 revision、生命周期、步骤与结果 |
+| `tasks.journal` | 快照之后的改动，每行是一个任务改动后的样子；攒到和任务数差不多多时并入快照，启动和正常退出时也会并入 |
 | `notes.json` | 笔记与清空恢复快照 |
 | `audit.jsonl` | 意图、策略、调用开始、结果和表达记录 |
 | `blackboard.json` | 所有任务和 Agent 共享的黑板 |
