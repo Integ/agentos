@@ -434,6 +434,7 @@ mod tests {
                 ok: true,
                 content: "{\"message\":\"ok\"}".into(),
             }],
+            turn: None,
         }];
         let body = build_turn_request(
             &cfg("x", None),

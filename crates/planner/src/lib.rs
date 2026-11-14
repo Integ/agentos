@@ -129,6 +129,23 @@ pub struct ToolResult {
     pub content: String,
 }
 
+/// A model's own record of one of its turns, kept so later requests can send
+/// it back exactly as it came.
+///
+/// Models that think between tool calls return signed reasoning blocks that
+/// carry their line of thought into the next round, but only if the turn is
+/// replayed unchanged and everything before it (system prompt, tools, earlier
+/// messages) is what it was when the turn was produced. Opaque to everything
+/// but the planner that made it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelTurn {
+    /// The turn's content blocks, exactly as the service returned them.
+    /// Empty when there is nothing a rebuild from text and calls would lose.
+    pub content: Vec<Value>,
+    /// Identifies the system prompt and tools the turn was produced under.
+    pub prefix: String,
+}
+
 /// One finished round of an agent's work.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Round {
@@ -137,6 +154,9 @@ pub struct Round {
     /// The calls that actually ran, in order (including follow-ups).
     pub calls: Vec<Step>,
     pub results: Vec<ToolResult>,
+    /// The model's own record of the turn, when it has one worth replaying.
+    #[serde(default)]
+    pub turn: Option<ModelTurn>,
 }
 
 /// Everything a planner needs to decide an agent's next round.
@@ -196,6 +216,9 @@ pub struct Plan {
     /// model was asked at all (the rule planner, a scripted planner).
     #[serde(default)]
     pub usage: Option<Usage>,
+    /// The model's record of this turn, to be kept on the round it becomes.
+    #[serde(default)]
+    pub turn: Option<ModelTurn>,
 }
 
 impl Plan {

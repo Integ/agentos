@@ -536,3 +536,195 @@ async fn concurrent_approvals_of_one_request_run_the_step_once() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(tasks.get(TaskId(1)).unwrap().state, TaskState::Succeeded);
 }
+
+fn read_only_spec(name: &str) -> CapabilitySpec {
+    CapabilitySpec {
+        risk: RiskLevel::ReadOnly,
+        ..capability_spec(name)
+    }
+}
+
+/// A read that only returns once `meeting` has been reached by as many
+/// calls as it was made for: run one at a time, it never returns.
+struct MeetingRead {
+    spec: CapabilitySpec,
+    meeting: Arc<tokio::sync::Barrier>,
+    fails: bool,
+}
+
+#[async_trait]
+impl Capability for MeetingRead {
+    fn spec(&self) -> &CapabilitySpec {
+        &self.spec
+    }
+
+    async fn invoke(&self, _args: Value) -> Result<Value, CapabilityError> {
+        self.meeting.wait().await;
+        if self.fails {
+            Err(CapabilityError::Failed("读不到".into()))
+        } else {
+            Ok(json!({"message": format!("{} 读到了", self.spec.name)}))
+        }
+    }
+}
+
+fn meeting_reads(
+    registry: &mut CapabilityRegistry,
+    names: &[(&str, bool)],
+) -> Arc<tokio::sync::Barrier> {
+    let meeting = Arc::new(tokio::sync::Barrier::new(names.len()));
+    for (name, fails) in names {
+        registry.register(Arc::new(MeetingRead {
+            spec: read_only_spec(name),
+            meeting: meeting.clone(),
+            fails: *fails,
+        }));
+    }
+    meeting
+}
+
+#[tokio::test]
+async fn read_only_calls_in_one_round_run_at_the_same_time() {
+    let dir = TempDir::new("parallel-reads");
+    let tasks = Arc::new(TaskStore::open(dir.0.join("runtime")).unwrap());
+    let mut registry = CapabilityRegistry::new();
+    meeting_reads(
+        &mut registry,
+        &[("test.read_a", false), ("test.read_b", false)],
+    );
+    let later_calls = Arc::new(AtomicUsize::new(0));
+    registry.register(Arc::new(CountCapability {
+        spec: capability_spec("test.later"),
+        calls: later_calls.clone(),
+    }));
+    let planner = FixedPlanner(Plan {
+        steps: vec![step("test.read_a"), step("test.read_b"), step("test.later")],
+        ..Plan::default()
+    });
+    let runner = butler(&dir.0, registry, Box::new(planner), tasks.clone());
+    // One at a time, the first read would wait for the second forever.
+    timeout(WAIT_LIMIT, runner.handle(intent("读两样再记一下")))
+        .await
+        .expect("the reads ran together");
+    let task = tasks.get(TaskId(1)).unwrap();
+    assert_eq!(task.state, TaskState::Succeeded);
+    assert!(task
+        .steps
+        .iter()
+        .all(|step| step.state == StepState::Succeeded));
+    assert_eq!(later_calls.load(Ordering::SeqCst), 1);
+    // Guards "persist before running": every call's policy decision and
+    // start marker precede any result, and each start precedes its result.
+    let events: Vec<AuditEvent> = AuditLog::replay(dir.0.join("audit.jsonl"))
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.event)
+        .collect();
+    let position = |want: &dyn Fn(&AuditEvent) -> bool| events.iter().position(want).unwrap();
+    let named = |name: &'static str| move |c: &CapabilityName| c.as_str() == name;
+    for name in ["test.read_a", "test.read_b"] {
+        let is = named(name);
+        let decided = position(
+            &|e| matches!(e, AuditEvent::PolicyDecision { capability, .. } if is(capability)),
+        );
+        let started = position(
+            &|e| matches!(e, AuditEvent::CapabilityStarted { capability, .. } if is(capability)),
+        );
+        let first_result = position(&|e| matches!(e, AuditEvent::CapabilityInvoked { .. }));
+        assert!(decided < started && started < first_result, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn a_read_that_fails_alongside_others_leaves_their_results_as_they_ended() {
+    // Guards "outcomes as they are": a read that ran is never shown as
+    // skipped, and nothing that had not run runs after the failure.
+    let dir = TempDir::new("parallel-failure");
+    let tasks = Arc::new(TaskStore::open(dir.0.join("runtime")).unwrap());
+    let mut registry = CapabilityRegistry::new();
+    meeting_reads(
+        &mut registry,
+        &[("test.read_a", true), ("test.read_b", false)],
+    );
+    let later_calls = Arc::new(AtomicUsize::new(0));
+    registry.register(Arc::new(CountCapability {
+        spec: capability_spec("test.later"),
+        calls: later_calls.clone(),
+    }));
+    let planner = FixedPlanner(Plan {
+        steps: vec![step("test.read_a"), step("test.read_b"), step("test.later")],
+        ..Plan::default()
+    });
+    let runner = butler(&dir.0, registry, Box::new(planner), tasks.clone());
+    timeout(WAIT_LIMIT, runner.handle(intent("读两样再记一下")))
+        .await
+        .unwrap();
+    let task = tasks.get(TaskId(1)).unwrap();
+    assert_eq!(task.state, TaskState::Failed);
+    let states: Vec<StepState> = task.steps.iter().map(|step| step.state).collect();
+    assert_eq!(
+        states,
+        vec![StepState::Failed, StepState::Succeeded, StepState::Skipped]
+    );
+    assert_eq!(later_calls.load(Ordering::SeqCst), 0);
+    // Every start marker is closed with what actually happened.
+    let entries = AuditLog::replay(dir.0.join("audit.jsonl")).unwrap();
+    let count = |want: fn(&AuditEvent) -> bool| entries.iter().filter(|e| want(&e.event)).count();
+    assert_eq!(
+        count(|e| matches!(e, AuditEvent::CapabilityStarted { .. })),
+        2
+    );
+    assert_eq!(
+        count(|e| matches!(e, AuditEvent::CapabilityInvoked { .. })),
+        2
+    );
+}
+
+#[tokio::test]
+async fn cancelling_reads_running_together_closes_every_one_of_them() {
+    let dir = TempDir::new("parallel-cancel");
+    let tasks = Arc::new(TaskStore::open(dir.0.join("runtime")).unwrap());
+    let mut registry = CapabilityRegistry::new();
+    // Three would have to meet; only two are asked for, so both hang.
+    let meeting = Arc::new(tokio::sync::Barrier::new(3));
+    for name in ["test.read_a", "test.read_b"] {
+        registry.register(Arc::new(MeetingRead {
+            spec: read_only_spec(name),
+            meeting: meeting.clone(),
+            fails: false,
+        }));
+    }
+    let planner = FixedPlanner(Plan {
+        steps: vec![step("test.read_a"), step("test.read_b")],
+        ..Plan::default()
+    });
+    let runner = butler(&dir.0, registry, Box::new(planner), tasks.clone());
+    let worker = tokio::spawn(async move {
+        runner.handle(intent("读两样")).await;
+        runner
+    });
+    timeout(WAIT_LIMIT, async {
+        while tasks
+            .get(TaskId(1))
+            .is_none_or(|task| task.steps.iter().any(|s| s.state != StepState::Running))
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("both reads started");
+    tasks.cancel(TaskId(1)).unwrap();
+    let _runner = timeout(WAIT_LIMIT, worker).await.unwrap().unwrap();
+    let task = tasks.get(TaskId(1)).unwrap();
+    assert_eq!(task.state, TaskState::Cancelled);
+    assert!(task
+        .steps
+        .iter()
+        .all(|step| step.state == StepState::Failed));
+    let entries = AuditLog::replay(dir.0.join("audit.jsonl")).unwrap();
+    let interrupted = entries
+        .iter()
+        .filter(|e| matches!(e.event, AuditEvent::CapabilityInterrupted { .. }))
+        .count();
+    assert_eq!(interrupted, 2);
+}

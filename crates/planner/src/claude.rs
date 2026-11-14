@@ -65,6 +65,37 @@ pub fn build_request(cfg: &ClaudeConfig, intent: &Intent, available: &[Capabilit
 
 /// Request body for the next round of a conversation.
 pub fn build_turn_request(cfg: &ClaudeConfig, conv: &Conversation<'_>) -> Value {
+    build(cfg, conv, true).0
+}
+
+/// Identifies a system prompt and tool list. Kept with each recorded turn so
+/// the turn is replayed only while both are unchanged. Hashed in memory
+/// only: turns are never persisted, so the hash need not be stable across
+/// builds.
+fn prefix_of(system: &str, tools: &[Value]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    system.hash(&mut hasher);
+    serde_json::to_string(tools)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// The first round from which recorded turns are sent back verbatim: the
+/// trailing run of rounds produced under the current prefix. Earlier rounds
+/// go back rebuilt without their reasoning; dropping a leading run of
+/// reasoning blocks is allowed, editing what lies before a kept one is not.
+fn replay_from(history: &[crate::Round], prefix: &str) -> usize {
+    history
+        .iter()
+        .rposition(|round| round.turn.as_ref().is_none_or(|turn| turn.prefix != prefix))
+        .map_or(0, |last_stale| last_stale + 1)
+}
+
+/// The body, and the prefix it was built under. With `replay` off, every
+/// round is rebuilt without reasoning, which the service always accepts.
+fn build(cfg: &ClaudeConfig, conv: &Conversation<'_>, replay: bool) -> (Value, String) {
     let tools: Vec<Value> = conv
         .available
         .iter()
@@ -84,18 +115,39 @@ pub fn build_turn_request(cfg: &ClaudeConfig, conv: &Conversation<'_>) -> Value 
         "role": "user",
         "content": [{ "type": "text", "text": user }],
     })];
-    for round in conv.history {
-        let mut content = Vec::new();
-        if let Some(t) = &round.text {
-            content.push(json!({ "type": "text", "text": t }));
-        }
+    let prefix = prefix_of(conv.system, &tools);
+    let verbatim_from = if replay {
+        replay_from(conv.history, &prefix)
+    } else {
+        conv.history.len()
+    };
+    for (index, round) in conv.history.iter().enumerate() {
+        let mut content = match &round.turn {
+            Some(turn) if index >= verbatim_from && !turn.content.is_empty() => {
+                turn.content.clone()
+            }
+            _ => round
+                .text
+                .iter()
+                .map(|t| json!({ "type": "text", "text": t }))
+                .collect(),
+        };
+        // Calls the model did not make itself (a capability's follow-up)
+        // still need their tool_use; they go after the model's own blocks,
+        // which then stay exactly as it wrote them.
         for c in &round.calls {
-            content.push(json!({
-                "type": "tool_use",
-                "id": c.id,
-                "name": tool_name(&c.capability),
-                "input": c.args,
-            }));
+            let present = content.iter().any(|block| {
+                block.get("type").and_then(Value::as_str) == Some("tool_use")
+                    && block.get("id").and_then(Value::as_str) == Some(c.id.as_str())
+            });
+            if !present {
+                content.push(json!({
+                    "type": "tool_use",
+                    "id": c.id,
+                    "name": tool_name(&c.capability),
+                    "input": c.args,
+                }));
+            }
         }
         messages.push(json!({ "role": "assistant", "content": content }));
         let results: Vec<Value> = round
@@ -123,7 +175,7 @@ pub fn build_turn_request(cfg: &ClaudeConfig, conv: &Conversation<'_>) -> Value 
     {
         last["cache_control"] = json!({ "type": "ephemeral" });
     }
-    json!({
+    let body = json!({
         "model": cfg.model,
         "max_tokens": cfg.max_tokens,
         // Tools render before the system prompt, so this breakpoint caches
@@ -139,6 +191,30 @@ pub fn build_turn_request(cfg: &ClaudeConfig, conv: &Conversation<'_>) -> Value 
         "fallbacks": "default",
         "tools": tools,
         "messages": messages,
+    });
+    (body, prefix)
+}
+
+/// Whether a rejected request was refused for the reasoning it sent back.
+fn rejects_replayed_thinking(error: &str) -> bool {
+    error.contains("HTTP 400") && error.contains("thinking")
+}
+
+/// The record of a turn: its content when it holds reasoning, and always the
+/// prefix it was produced under. A turn without reasoning is rebuilt exactly
+/// from its text and calls, so its content is not kept; its prefix still
+/// tells whether the turns after it can be replayed.
+fn model_turn(body: &Value, prefix: String) -> Option<crate::ModelTurn> {
+    let content = body.get("content")?.as_array()?;
+    let thinks = content.iter().any(|block| {
+        matches!(
+            block.get("type").and_then(Value::as_str),
+            Some("thinking" | "redacted_thinking")
+        )
+    });
+    Some(crate::ModelTurn {
+        content: if thinks { content.clone() } else { Vec::new() },
+        prefix,
     })
 }
 
@@ -356,12 +432,25 @@ impl Planner for ClaudePlanner {
     }
 
     async fn plan_turn(&self, conv: &Conversation<'_>) -> Plan {
-        let body = build_turn_request(&self.cfg, conv);
+        let (body, prefix) = build(&self.cfg, conv, true);
+        let mut answer = self.call(&body).await;
+        let replayed = conv
+            .history
+            .iter()
+            .any(|round| round.turn.as_ref().is_some_and(|t| !t.content.is_empty()));
+        if replayed && answer.as_ref().is_err_and(|e| rejects_replayed_thinking(e)) {
+            // The documented recovery: send the history once more without
+            // any reasoning blocks. The turn loses the reasoning they
+            // carried, not the task. The rejection is decided before any
+            // output, so the failed attempt is not metered.
+            answer = self.call(&build(&self.cfg, conv, false).0).await;
+        }
         // A refusal or an unusable answer was paid for like any other, and
         // a request that failed may have been: neither is recorded as free.
-        match self.call(&body).await {
+        match answer {
             Ok(resp) => Plan {
                 usage: Some(response_usage(&self.cfg.model, &resp)),
+                turn: model_turn(&resp, prefix),
                 ..parse_response(&resp)
             },
             Err(e) => Plan {
@@ -436,6 +525,7 @@ mod tests {
                 ok: true,
                 content: "{}".into(),
             }],
+            turn: None,
         };
         let request = |history: &[Round]| {
             build_turn_request(
@@ -489,6 +579,7 @@ mod tests {
                 ok: true,
                 content: page,
             }],
+            turn: None,
         }];
         let body = build_turn_request(
             &cfg("x"),
@@ -523,6 +614,7 @@ mod tests {
                 ok: false,
                 content: "磁盘满了".into(),
             }],
+            turn: None,
         }];
         let body = build_turn_request(
             &cfg("x"),
@@ -635,6 +727,171 @@ mod tests {
         let plan = planner.plan(&intent("记一下买牛奶"), &specs()).await;
         assert_eq!(plan.steps[0].capability.as_str(), "notes.append");
         assert_eq!(server.await.unwrap().len(), 2);
+    }
+
+    /// A turn as Claude returns it with reasoning between two tool calls,
+    /// recorded under the prefix of `system`.
+    fn thinking_round(system: &str, id: &str) -> crate::Round {
+        use crate::{ModelTurn, Round, ToolResult};
+        let content = vec![
+            json!({"type": "thinking", "thinking": "", "signature": format!("sig-{id}-a")}),
+            json!({"type": "tool_use", "id": format!("{id}-1"), "name": "notes__append", "input": {"text": "a"}}),
+            json!({"type": "thinking", "thinking": "", "signature": format!("sig-{id}-b")}),
+            json!({"type": "tool_use", "id": format!("{id}-2"), "name": "notes__append", "input": {"text": "b"}}),
+        ];
+        let tools = build_turn_request(
+            &cfg("x"),
+            &Conversation {
+                system,
+                intent: &intent("记"),
+                history: &[],
+                available: &specs(),
+            },
+        )["tools"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let call = |n: &str, text: &str| Step {
+            id: format!("{id}-{n}"),
+            capability: CapabilityName::new("notes.append"),
+            args: json!({ "text": text }),
+        };
+        let result = |n: &str| ToolResult {
+            id: format!("{id}-{n}"),
+            ok: true,
+            content: "{}".into(),
+        };
+        Round {
+            text: None,
+            calls: vec![call("1", "a"), call("2", "b")],
+            results: vec![result("1"), result("2")],
+            turn: Some(ModelTurn {
+                content,
+                prefix: prefix_of(system, &tools),
+            }),
+        }
+    }
+
+    fn request_with(system: &str, history: &[crate::Round]) -> Value {
+        build_turn_request(
+            &cfg("x"),
+            &Conversation {
+                system,
+                intent: &intent("记"),
+                history,
+                available: &specs(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_turn_with_reasoning_goes_back_exactly_as_the_model_wrote_it() {
+        // Guards preserved thinking: blocks must return unchanged and in
+        // place, interleaved reasoning included, or the service rejects them.
+        let round = thinking_round("sys", "r1");
+        let body = request_with("sys", std::slice::from_ref(&round));
+        assert_eq!(
+            body["messages"][1]["content"],
+            Value::Array(round.turn.clone().unwrap().content)
+        );
+    }
+
+    #[test]
+    fn reasoning_from_under_an_older_prompt_is_dropped_from_the_front_only() {
+        // A new stretch changed the system prompt: the earlier turn's blocks
+        // can no longer be valid and go, the newer turn's stay. Dropping a
+        // leading run is accepted; dropping one in the middle is not.
+        let history = vec![thinking_round("old", "r1"), thinking_round("new", "r2")];
+        let body = request_with("new", &history);
+        let m = body["messages"].as_array().unwrap();
+        let types = |message: &Value| -> Vec<String> {
+            message["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| b["type"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(types(&m[1]), vec!["tool_use", "tool_use"]);
+        assert_eq!(
+            types(&m[3]),
+            vec!["thinking", "tool_use", "thinking", "tool_use"]
+        );
+        // And once the prompt changes again, nothing is replayed.
+        let body = request_with("newer", &history);
+        assert!(!body.to_string().contains("\"thinking\""));
+    }
+
+    #[test]
+    fn a_follow_up_call_is_added_after_the_models_own_blocks() {
+        let mut round = thinking_round("sys", "r1");
+        round.calls.push(Step {
+            id: "call-9".into(),
+            capability: CapabilityName::new("notes.append"),
+            args: json!({"text": "c"}),
+        });
+        round.results.push(crate::ToolResult {
+            id: "call-9".into(),
+            ok: true,
+            content: "{}".into(),
+        });
+        let original = round.turn.clone().unwrap().content;
+        let body = request_with("sys", std::slice::from_ref(&round));
+        let content = body["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(&content[..original.len()], &original[..]);
+        assert_eq!(content[original.len()]["id"], "call-9");
+        // Every result has its call: three tool_use, three tool_result.
+        assert_eq!(body["messages"][2]["content"].as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn rejected_reasoning_is_dropped_and_the_round_asked_once_more() {
+        use crate::test_http::sequence_server;
+        let (url, server) = sequence_server(vec![
+            (
+                "400 Bad Request",
+                json!({"type": "error", "error": {"type": "invalid_request_error",
+                    "message": "messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation."}}),
+            ),
+            (
+                "200 OK",
+                json!({"stop_reason": "end_turn", "content": [{"type": "text", "text": "记好了"}]}),
+            ),
+        ])
+        .await;
+        let planner = local_planner(&url);
+        let i = intent("记");
+        let history = vec![thinking_round(SYSTEM_PROMPT, "r1")];
+        let plan = planner
+            .plan_turn(&Conversation {
+                system: SYSTEM_PROMPT,
+                intent: &i,
+                history: &history,
+                available: &specs(),
+            })
+            .await;
+        assert_eq!(plan.reply.as_deref(), Some("记好了"));
+        assert!(plan.error.is_none());
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].contains("sig-r1"), "the first try replays it");
+        assert!(
+            !requests[1].contains("sig-r1"),
+            "the retry carries no reasoning"
+        );
+    }
+
+    #[test]
+    fn every_turn_records_its_prefix_but_keeps_content_only_with_reasoning() {
+        let plain = json!({"content": [{"type": "text", "text": "好"}]});
+        let turn = model_turn(&plain, "p".into()).unwrap();
+        assert!(turn.content.is_empty());
+        assert_eq!(turn.prefix, "p");
+        let thinking = json!({"content": [
+            {"type": "thinking", "thinking": "", "signature": "s"},
+            {"type": "text", "text": "好"}
+        ]});
+        assert_eq!(model_turn(&thinking, "p".into()).unwrap().content.len(), 2);
     }
 
     #[test]

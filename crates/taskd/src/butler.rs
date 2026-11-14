@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 
 use agentos_audit::{AuditEvent, AuditLog, IntentRecord};
 use agentos_core::{
-    now_ms, AgentId, Capability, CapabilityName, CapabilitySpec, Expression, ExpressionKind,
-    Intent, IntentId, RiskLevel, Urgency,
+    now_ms, AgentId, Capability, CapabilityError, CapabilityName, CapabilitySpec, Expression,
+    ExpressionKind, Intent, IntentId, RiskLevel, Urgency,
 };
 use agentos_planner::{
     sub_agent_prompt, Conversation, Plan, Planner, Round, Step, ToolResult, Usage, SYSTEM_PROMPT,
@@ -169,6 +169,13 @@ pub struct CapabilityView {
     pub readable: BTreeMap<CapabilityName, Arc<dyn Capability>>,
 }
 
+/// A call that ran alongside an earlier step of its round.
+struct Ran {
+    result: Result<Value, CapabilityError>,
+    /// Whether the capability's output comes from outside the user's control.
+    untrusted: bool,
+}
+
 /// One agent's work on a task: the unit of the call stack. The butler's frame
 /// is at the bottom; a delegate's frame sits above it while it works.
 struct Frame {
@@ -194,6 +201,12 @@ struct Frame {
     /// Where this frame's next steps are recorded in the task: right after
     /// the delegating step for a delegate, at the end for the butler.
     insert_at: Option<usize>,
+    /// Results of read-only calls that ran alongside an earlier step of this
+    /// round, by step key, waiting to be recorded in order.
+    prefetched: HashMap<String, Ran>,
+    /// A step of this round failed while later ones had already run: those
+    /// are still recorded as they ended, and only the rest are skipped.
+    halted: bool,
 }
 
 impl Frame {
@@ -851,6 +864,8 @@ impl Butler {
             max_rounds: self.budget.rounds,
             tainted,
             insert_at: None,
+            prefetched: HashMap::new(),
+            halted: false,
         };
         self.drive(id, vec![frame], None, &mut held).await
     }
@@ -1169,6 +1184,28 @@ impl Butler {
             return self.tasks.update(id, |_| {});
         };
         let failed = frame.keys[frame.next].clone();
+        // Steps after this one that already ran alongside it are recorded as
+        // they actually ended, not as skipped; the round stops after them.
+        if frame.keys[frame.next + 1..]
+            .iter()
+            .any(|key| frame.prefetched.contains_key(key))
+        {
+            frame.results.push(ToolResult {
+                id: plan.steps[frame.next].id.clone(),
+                ok: false,
+                content: message.to_string(),
+            });
+            frame.next += 1;
+            frame.halted = true;
+            let tainted = frame.tainted;
+            return self.tasks.update(id, |t| {
+                t.tainted |= tainted;
+                if let Some(step) = t.steps.iter_mut().find(|step| step.id == failed) {
+                    step.state = StepState::Failed;
+                    step.result = Some(Value::String(message.to_string()));
+                }
+            });
+        }
         let skipped: Vec<String> = frame.keys[frame.next + 1..].to_vec();
         for (offset, step) in plan.steps.iter().enumerate().skip(frame.next) {
             frame.results.push(ToolResult {
@@ -1192,6 +1229,30 @@ impl Butler {
                     step.state = StepState::Failed;
                     step.result = Some(Value::String(message.to_string()));
                 } else if skipped.contains(&step.id) {
+                    step.state = StepState::Skipped;
+                }
+            }
+        })
+    }
+
+    /// Skip the current step of `frame` and the rest of its round: an
+    /// earlier step failed, and none of these has run.
+    fn skip_rest(&self, id: TaskId, frame: &mut Frame) -> io::Result<Task> {
+        let Some(plan) = &frame.plan else {
+            return self.tasks.update(id, |_| {});
+        };
+        let skipped: Vec<String> = frame.keys[frame.next..].to_vec();
+        for step in &plan.steps[frame.next..] {
+            frame.results.push(ToolResult {
+                id: step.id.clone(),
+                ok: false,
+                content: "未执行：前面的步骤没有成功".into(),
+            });
+        }
+        frame.next = plan.steps.len();
+        self.tasks.update(id, |t| {
+            for step in &mut t.steps {
+                if skipped.contains(&step.id) {
                     step.state = StepState::Skipped;
                 }
             }
@@ -1378,6 +1439,8 @@ impl Butler {
             frame.keys = keys;
             frame.next = 0;
             frame.results.clear();
+            frame.prefetched.clear();
+            frame.halted = false;
             return Ok(Flow::Continue);
         }
 
@@ -1392,9 +1455,23 @@ impl Butler {
                 text: plan.reply,
                 calls: plan.steps,
                 results: std::mem::take(&mut frame.results),
+                turn: plan.turn,
             });
             return Ok(Flow::Continue);
         };
+
+        // Already ran alongside an earlier step: its policy decision and
+        // start marker were recorded then; only the result is left to record.
+        if let Some(ran) = frame.prefetched.remove(&key) {
+            return self.record_result(id, &task, frame, &step, &key, ran).await;
+        }
+        if frame.halted {
+            // A step before this one failed after a parallel run; nothing
+            // that has not run yet runs now.
+            frame.halted = false;
+            self.skip_rest(id, frame)?;
+            return Ok(Flow::Continue);
+        }
 
         let delegate = self.agents.by_capability(&step.capability).cloned();
         let capability = self.kernel().registry.get(&step.capability).cloned();
@@ -1697,17 +1774,43 @@ impl Butler {
         }
 
         let capability = capability.expect("a non-delegate step has a capability");
+        // Read-only calls right after this one run alongside it, as agent
+        // harnesses run a model's parallel tool calls: each passes policy on
+        // its own, and each start is durable before anything runs. Their
+        // results are recorded afterwards, in order, as if run one by one.
+        let companions = if spec.risk == RiskLevel::ReadOnly && capability.abortable() {
+            self.companions(frame, &subject)
+        } else {
+            Vec::new()
+        };
+        for (other, _, _) in &companions {
+            self.audit.append(AuditEvent::PolicyDecision {
+                intent: task.intent.id,
+                agent: frame.agent.clone(),
+                capability: other.capability.clone(),
+                decision: format!("{:?}", Decision::Allow),
+            })?;
+        }
+        let mut calls = vec![(step.clone(), key.clone(), capability.clone())];
+        calls.extend(companions);
         // Both records must be durable before the capability gets control.
-        self.audit.append(AuditEvent::CapabilityStarted {
-            intent: task.intent.id,
-            agent: frame.agent.clone(),
-            capability: step.capability.clone(),
-            args: step.args.clone(),
-        })?;
+        for (call, _, _) in &calls {
+            self.audit.append(AuditEvent::CapabilityStarted {
+                intent: task.intent.id,
+                agent: frame.agent.clone(),
+                capability: call.capability.clone(),
+                args: call.args.clone(),
+            })?;
+        }
+        let keys: Vec<&str> = calls.iter().map(|(_, key, _)| key.as_str()).collect();
         let started = self.tasks.update(id, |t| {
             if !t.state.is_terminal() {
                 t.state = TaskState::Running;
-                if let Some(step) = t.steps.iter_mut().find(|step| step.id == key) {
+                for step in t
+                    .steps
+                    .iter_mut()
+                    .filter(|step| keys.contains(&step.id.as_str()))
+                {
                     step.state = StepState::Running;
                 }
             }
@@ -1717,10 +1820,10 @@ impl Butler {
         }
         // Why an abortable call was abandoned: cancelled, or out of time.
         let mut over_budget = None;
-        let result = if capability.abortable() {
+        let results = if capability.abortable() {
             tokio::select! {
                 biased;
-                result = capability.invoke(step.args.clone()) => Some(result),
+                results = run_together(&calls) => Some(results),
                 () = self.stopped(id) => None,
                 limit = self.out_of_time(stretch) => {
                     over_budget = Some(limit);
@@ -1731,35 +1834,120 @@ impl Butler {
             // Not safe to abandon: wait for it, and record what it did even
             // though the task may have been cancelled or run out of time
             // meanwhile. The budget stops the task at the next round.
-            Some(capability.invoke(step.args.clone()).await)
+            Some(vec![capability.invoke(step.args.clone()).await])
         };
-        let Some(result) = result else {
-            // The start marker must not be left open, and must not be closed
-            // with a result nobody saw.
-            self.audit.append(AuditEvent::CapabilityInterrupted {
-                intent: task.intent.id,
-                agent: frame.agent.clone(),
-                capability: step.capability.clone(),
-                args: step.args.clone(),
-            })?;
+        let Some(results) = results else {
+            // The start markers must not be left open, and must not be
+            // closed with a result nobody saw.
             let why = if over_budget.is_some() {
                 "超出执行时长预算被打断"
             } else {
                 "执行中被取消打断"
             };
-            let message = if spec.risk == RiskLevel::ReadOnly {
-                format!("{why}，没有返回结果。")
-            } else {
-                format!("{why}，没有返回结果；是否已经生效未知。")
-            };
-            self.tasks.update(id, |t| {
-                if let Some(step) = t.steps.iter_mut().find(|step| step.id == key) {
-                    step.state = StepState::Failed;
-                    step.result = Some(Value::String(message.clone()));
-                }
-            })?;
+            for (index, (call, call_key, _)) in calls.iter().enumerate() {
+                self.audit.append(AuditEvent::CapabilityInterrupted {
+                    intent: task.intent.id,
+                    agent: frame.agent.clone(),
+                    capability: call.capability.clone(),
+                    args: call.args.clone(),
+                })?;
+                // Only the first call may have effects; the others are reads.
+                let message = if index > 0 || spec.risk == RiskLevel::ReadOnly {
+                    format!("{why}，没有返回结果。")
+                } else {
+                    format!("{why}，没有返回结果；是否已经生效未知。")
+                };
+                self.tasks.update(id, |t| {
+                    if let Some(step) = t.steps.iter_mut().find(|step| &step.id == call_key) {
+                        step.state = StepState::Failed;
+                        step.result = Some(Value::String(message.clone()));
+                    }
+                })?;
+            }
             return Ok(over_budget.map_or(Flow::Stop, Flow::OverBudget));
         };
+        let mut results = results.into_iter();
+        let result = results.next().expect("one result per call");
+        // Kept before the first is recorded: a failure there must know which
+        // later steps already ran.
+        for ((_, other_key, other), result) in calls.iter().skip(1).zip(results) {
+            frame.prefetched.insert(
+                other_key.clone(),
+                Ran {
+                    result,
+                    untrusted: other.untrusted_output(),
+                },
+            );
+        }
+        let ran = Ran {
+            result,
+            untrusted: capability.untrusted_output(),
+        };
+        self.record_result(id, &task, frame, &step, &key, ran).await
+    }
+
+    /// Read-only, abortable calls right after the current step of `frame`
+    /// that policy lets run without asking, up to the first that is not.
+    fn companions(&self, frame: &Frame, subject: &Subject) -> Vec<Call> {
+        let Some(plan) = &frame.plan else {
+            return Vec::new();
+        };
+        if let Subject::Caller(caller) = subject {
+            if self.callers.get(caller).is_none() {
+                return Vec::new();
+            }
+        }
+        let now = now_ms();
+        let rules = self.preauths.active(now);
+        let kernel = self.kernel();
+        let mut out = Vec::new();
+        for (step, key) in plan.steps.iter().zip(&frame.keys).skip(frame.next + 1) {
+            if step.capability.as_str() == ASK_USER
+                || self.agents.by_capability(&step.capability).is_some()
+                || !frame.specs.iter().any(|spec| spec.name == step.capability)
+            {
+                break;
+            }
+            let Some(capability) = kernel.registry.get(&step.capability).cloned() else {
+                break;
+            };
+            let spec = capability.spec();
+            if spec.risk != RiskLevel::ReadOnly || !capability.abortable() {
+                break;
+            }
+            let checked = kernel.policy.check_call(
+                &frame.agent,
+                spec,
+                &step.args,
+                CallContext {
+                    tainted: frame.tainted,
+                },
+                Standing {
+                    subject,
+                    preauthorizations: &rules,
+                    now_ms: now,
+                },
+            );
+            if checked.decision != Decision::Allow || checked.preauthorization.is_some() {
+                break;
+            }
+            out.push((step.clone(), key.clone(), capability));
+        }
+        out
+    }
+
+    /// Record how a call ended: in the audit log, on the task, and in the
+    /// results handed back to the planner.
+    async fn record_result(
+        &self,
+        id: TaskId,
+        task: &Task,
+        frame: &mut Frame,
+        step: &Step,
+        key: &str,
+        ran: Ran,
+    ) -> io::Result<Flow> {
+        let result = ran.result;
         let (ok, value) = match &result {
             Ok(v) => (true, v.clone()),
             Err(e) => (false, Value::String(e.to_string())),
@@ -1776,7 +1964,7 @@ impl Butler {
         // the rest of the task, and a delegate's taint flows back to its parent.
         // A failure counts too: its error text (an MCP tool's error content, a
         // plugin's stderr) can carry outside words to the planner just as well.
-        let untrusted = capability.untrusted_output();
+        let untrusted = ran.untrusted;
         if untrusted {
             frame.tainted = true;
         }
@@ -1803,6 +1991,12 @@ impl Butler {
                 .flatten()
                 .filter(|next| frame.specs.iter().any(|spec| spec.name == next.capability));
             let next_key = follow_up.as_ref().map(|_| self.next_call());
+            // A follow-up goes after the steps that already ran alongside
+            // this one, so the task lists steps in the order they ran.
+            let ran_after = frame.keys[frame.next + 1..]
+                .iter()
+                .take_while(|key| frame.prefetched.contains_key(*key))
+                .count();
             let agent = (!frame.is_butler()).then(|| frame.agent.clone());
             let task = self.tasks.update(id, |t| {
                 t.tainted |= tainted;
@@ -1815,7 +2009,7 @@ impl Butler {
                     (&follow_up, &next_key, t.state.is_terminal())
                 {
                     t.steps.insert(
-                        index + 1,
+                        (index + 1 + ran_after).min(t.steps.len()),
                         TaskStep {
                             id: next_key.clone(),
                             agent: agent.clone(),
@@ -1826,7 +2020,7 @@ impl Butler {
             })?;
             if let (Some(mut next), Some(next_key)) = (follow_up, next_key) {
                 next.id = next_key.clone();
-                let at = frame.next + 1;
+                let at = frame.next + 1 + ran_after;
                 frame
                     .plan
                     .as_mut()
@@ -1988,6 +2182,8 @@ impl Butler {
             max_rounds: manifest.max_rounds,
             tainted: parent.tainted,
             insert_at: Some(parent_step.map_or(task.steps.len(), |index| index + 1)),
+            prefetched: HashMap::new(),
+            halted: false,
         })
     }
 
@@ -2013,6 +2209,37 @@ impl Butler {
             Err(e) => eprintln!("{id}：{message}；无法保存失败状态：{e}"),
         }
     }
+}
+
+/// A call about to run: the step, its key in the task, and what runs it.
+type Call = (Step, String, Arc<dyn Capability>);
+
+/// Run `calls` at the same time and return their results in order. A
+/// capability that panics takes the service down exactly as it would alone.
+async fn run_together(calls: &[Call]) -> Vec<Result<Value, CapabilityError>> {
+    if let [(step, _, capability)] = calls {
+        return vec![capability.invoke(step.args.clone()).await];
+    }
+    // Dropping the set (the task was cancelled or ran out of time) aborts
+    // every call still running: they are all abortable reads.
+    let mut set = tokio::task::JoinSet::new();
+    for (index, (step, _, capability)) in calls.iter().enumerate() {
+        let capability = capability.clone();
+        let args = step.args.clone();
+        set.spawn(async move { (index, capability.invoke(args).await) });
+    }
+    let mut results: Vec<Option<Result<Value, CapabilityError>>> =
+        (0..calls.len()).map(|_| None).collect();
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((index, result)) => results[index] = Some(result),
+            Err(error) => std::panic::resume_unwind(error.into_panic()),
+        }
+    }
+    results
+        .into_iter()
+        .map(|result| result.expect("every call reports back"))
+        .collect()
 }
 
 /// Whether `next` asks for exactly the calls of each of the last two rounds,
