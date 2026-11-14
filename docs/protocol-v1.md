@@ -50,7 +50,7 @@
 | `revoke_preauthorization` | `id: string` | `preauthorization_revoked` | 撤销一条预授权，立即生效 |
 | `register_caller` | `id: string`、`name: string`、`max_risk: string`，可选 `capabilities: array`、`pin: string` | `caller_registered` | 注册一个外部调用方，或整体替换它的清单 |
 | `callers` | 无 | `callers` | 已注册的外部调用方 |
-| `revoke_caller` | `id: string` | `caller_revoked` | 撤销调用方及它的预授权，立即生效 |
+| `revoke_caller` | `id: string` | `caller_revoked` | 撤销调用方及它的预授权，立即生效；它没结束的任务同时取消 |
 | `capabilities` | 无 | `capabilities` | 已授权能力的名称、输入 schema、风险和描述 |
 | `read` | `capability: string`，可选 `args: object` | `value` | 直接查询一个已授权的只读（L0）能力，不创建任务 |
 | `watch` | 可选 `after: integer/null`、`voice: boolean` | `watching`，随后事件 | 持续接收任务变更提示与重新同步通知；`voice` 为 true 时也接收语音事件 |

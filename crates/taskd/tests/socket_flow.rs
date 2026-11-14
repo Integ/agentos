@@ -1734,3 +1734,53 @@ async fn the_daemon_starts_in_a_fresh_state_directory_under_a_desktop_umask() {
         0o700
     );
 }
+
+#[tokio::test]
+async fn revoking_a_caller_ends_its_waiting_tasks_and_registering_it_again_revives_none() {
+    let harness = Harness::start(Box::new(RulePlanner), vec![]).await;
+    let mut user = harness.connect().await;
+    user.ok(register("helper", &["notes.append"], RiskLevel::Reversible))
+        .await;
+    let mut helper = harness.connect_as("helper").await;
+    let id = helper.submit("记一下 外部写的").await;
+    // A caller's side effects wait for the human.
+    let waiting = harness.wait(id, TaskState::AwaitingConfirmation).await;
+    let token = waiting.confirmation.unwrap().token;
+
+    user.ok(Command::RevokeCaller {
+        id: "helper".into(),
+    })
+    .await;
+    // Guards "a revoked caller can do nothing from that moment": its task is
+    // over, not left waiting for an approval that would carry it out.
+    let ended = harness.wait(id, TaskState::Cancelled).await;
+    assert!(ended.confirmation.is_none());
+
+    // The same id registered again is given its own permissions, not the
+    // revoked caller's unfinished work.
+    user.ok(register("helper", &["notes.append"], RiskLevel::Reversible))
+        .await;
+    assert_eq!(
+        error_code(
+            user.request(Command::Approve {
+                id,
+                step: 1,
+                confirmation: token,
+                pin: None,
+            })
+            .await
+        ),
+        "invalid_confirmation"
+    );
+    assert_eq!(harness.tasks.get(id).unwrap().state, TaskState::Cancelled);
+    let Reply::Value { value, .. } = user
+        .ok(Command::Read {
+            capability: CapabilityName::new("notes.list"),
+            args: json!({}),
+        })
+        .await
+    else {
+        panic!("expected a value");
+    };
+    assert!(!value.to_string().contains("外部写的"));
+}

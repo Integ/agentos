@@ -999,6 +999,28 @@ impl Controller {
                             by: by.clone(),
                         }),
                 );
+                // Its unfinished tasks end now. Left open they would wait to
+                // be approved or resumed, and a caller registered again under
+                // the same id would hand them back what was just taken away.
+                let source = revoked.source();
+                let open: Vec<TaskId> = self
+                    .tasks
+                    .list()
+                    .into_iter()
+                    .filter(|task| task.intent.source.as_str() == source)
+                    .filter(|task| !task.state.is_terminal())
+                    .map(|task| task.id)
+                    .collect();
+                for id in open {
+                    let task = self.tasks.cancel(id).map_err(storage_error)?;
+                    if task.state == TaskState::Cancelled {
+                        events.push(AuditEvent::TaskStateChanged {
+                            intent: task.intent.id,
+                            state: "cancelled".into(),
+                            message: task.message.clone(),
+                        });
+                    }
+                }
                 for event in events {
                     self.audit.append(event).map_err(|error| {
                         protocol_error(
