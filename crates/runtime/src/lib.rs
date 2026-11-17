@@ -102,7 +102,7 @@ impl StepState {
 /// One capability call of a task. Planning is a loop, so a task's steps grow
 /// round by round; a step delegated to another agent is followed by the steps
 /// that agent took on its behalf.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskStep {
     /// Unique within the task. Empty in tasks stored before steps had ids.
@@ -247,12 +247,25 @@ struct SnapshotView<'a> {
 /// One line of the journal: a task as it is after one change, and the
 /// counters as they are after it. Replaying the lines above the snapshot's
 /// revision, in order, gives the state the store last acknowledged.
+///
+/// Steps the change left alone are not written again: `kept_steps` says how
+/// many of the task's steps, from the start, are as they were, and `task`
+/// carries only the ones after them. Steps hold every call's full result, so
+/// writing them all on each change made a long task's journal grow with the
+/// square of its steps.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct JournalEntry<T> {
     revision: u64,
     next_id: u64,
+    // Absent when nothing is kept, so such lines read as before.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    kept_steps: usize,
     task: T,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone)]
@@ -698,13 +711,26 @@ impl TaskStore {
             };
             return Ok(());
         }
+        let kept = state.tasks.get(&task.id).map_or(0, |before| {
+            let same = before.steps.iter().zip(&task.steps);
+            same.take_while(|(old, new)| old == new).count()
+        });
         drop(state);
+        // Only the steps after the kept ones are written. They are moved
+        // aside and back rather than copied: they can be large.
+        let mut task = task;
+        let mut steps = std::mem::take(&mut task.steps);
+        task.steps = steps.split_off(kept);
         let entry = JournalEntry {
             revision,
             next_id,
+            kept_steps: kept,
             task: &task,
         };
-        let mut line = serde_json::to_vec(&entry).map_err(invalid_data)?;
+        let line = serde_json::to_vec(&entry);
+        steps.append(&mut task.steps);
+        task.steps = steps;
+        let mut line = line.map_err(invalid_data)?;
         line.push(b'\n');
         if let Err(error) = append_journal(directory, &line) {
             journal.broken = true;
@@ -944,8 +970,19 @@ fn replay_journal(directory: &Path, state: &mut State) -> io::Result<()> {
         if Some(entry.revision) != state.revision.checked_add(1) {
             return Err(invalid_data("task journal skips a revision"));
         }
-        validate_change(state, &entry.task, entry.next_id, entry.revision)?;
-        state.apply(entry.task, entry.next_id, entry.revision);
+        let mut task = entry.task;
+        if entry.kept_steps > 0 {
+            let kept = state
+                .tasks
+                .get(&task.id)
+                .and_then(|before| before.steps.get(..entry.kept_steps))
+                .ok_or_else(|| invalid_data("task journal keeps steps the task never had"))?;
+            let mut steps = kept.to_vec();
+            steps.append(&mut task.steps);
+            task.steps = steps;
+        }
+        validate_change(state, &task, entry.next_id, entry.revision)?;
+        state.apply(task, entry.next_id, entry.revision);
     }
     Ok(())
 }
@@ -1811,5 +1848,113 @@ mod tests {
         assert!(!store.unfinished().contains(&TaskId(4)));
         assert_eq!(store.usage(TaskId(1)), Some(TaskUsage::default()));
         assert_eq!(store.usage(TaskId(9)), None);
+    }
+
+    #[test]
+    fn journalling_a_step_does_not_rewrite_the_steps_before_it() {
+        // Guards the cost of a long task: each change of a step must not
+        // write every earlier step's result again.
+        let dir = TempDir::new();
+        let store = TaskStore::open(&dir.0).unwrap();
+        let task = store.create(intent()).unwrap();
+        let page = "网页内容".repeat(10_000);
+        let mut largest = 0;
+        let mut written = 0;
+        for n in 0..30 {
+            let before = fs::metadata(dir.0.join(JOURNAL_FILE)).unwrap().len();
+            store
+                .update(task.id, |task| {
+                    task.state = TaskState::Running;
+                    task.steps.push(TaskStep {
+                        id: format!("s{n}"),
+                        ..step(StepState::Running)
+                    });
+                })
+                .unwrap();
+            store
+                .update(task.id, |task| {
+                    let step = task.steps.last_mut().unwrap();
+                    step.state = StepState::Succeeded;
+                    step.result = Some(json!(page));
+                })
+                .unwrap();
+            let after = fs::metadata(dir.0.join(JOURNAL_FILE)).unwrap().len();
+            // A fold empties the journal; only appends are measured.
+            if after > before {
+                largest = largest.max(after - before);
+                written += after - before;
+            }
+        }
+        // Before steps were kept, this task wrote about 63 MB.
+        assert!(written < 8 * 30 * page.len() as u64, "{written}");
+        assert!(largest < 3 * page.len() as u64, "{largest}");
+        drop(store);
+        let reopened = TaskStore::open(&dir.0).unwrap();
+        let read = reopened.get(task.id).unwrap();
+        assert_eq!(read.steps.len(), 30);
+        assert!(read.steps.iter().all(|s| s.result == Some(json!(page))));
+    }
+
+    #[test]
+    fn a_journal_of_kept_steps_reads_back_after_a_crash_whichever_step_changed() {
+        // Guards durability of the step-saving journal: replaying it gives
+        // exactly the task the store acknowledged, including when an
+        // earlier step changes after later ones were added (a delegating
+        // step settles after its agent's steps).
+        let dir = TempDir::new();
+        let store = TaskStore::open(&dir.0).unwrap();
+        // Enough other tasks that the next changes are appended, not folded.
+        for _ in 0..8 {
+            store.create(intent()).unwrap();
+        }
+        let task = store.create(intent()).unwrap();
+        drop(store);
+        let store = TaskStore::open(&dir.0).unwrap();
+        for n in 0..3 {
+            store
+                .update(task.id, |task| {
+                    task.steps.push(TaskStep {
+                        id: format!("s{n}"),
+                        ..step(StepState::Running)
+                    })
+                })
+                .unwrap();
+        }
+        store
+            .update(task.id, |task| {
+                task.steps[0].state = StepState::Succeeded;
+                task.steps[2].result = Some(json!("后来的结果"));
+            })
+            .unwrap();
+        let journal = fs::read_to_string(dir.0.join(JOURNAL_FILE)).unwrap();
+        assert!(journal.contains("\"kept_steps\":2"), "{journal}");
+        let crashed = crash_copy(&dir.0);
+        let reopened = TaskStore::open(&crashed.0).unwrap();
+        let (read, acknowledged) = (reopened.get(task.id).unwrap(), store.get(task.id).unwrap());
+        assert_eq!(read.steps, acknowledged.steps);
+        assert_eq!(read.steps[0].state, StepState::Succeeded);
+    }
+
+    #[test]
+    fn a_journal_line_keeping_steps_the_task_never_had_refuses_to_open() {
+        // Guards "never guess": a line that cannot be rebuilt is damage.
+        let dir = TempDir::new();
+        let store = TaskStore::open(&dir.0).unwrap();
+        let task = store.create(intent()).unwrap();
+        let crashed = crash_copy(&dir.0);
+        let line = format!(
+            "{}\n",
+            json!({"revision": store.revision() + 1, "next_id": 2, "kept_steps": 3, "task": store.get(task.id).unwrap()})
+        );
+        let mut journal = OpenOptions::new()
+            .append(true)
+            .open(crashed.0.join(JOURNAL_FILE))
+            .unwrap();
+        journal.write_all(line.as_bytes()).unwrap();
+        drop(journal);
+        let before = fs::read(crashed.0.join(JOURNAL_FILE)).unwrap();
+        let error = TaskStore::open(&crashed.0).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(crashed.0.join(JOURNAL_FILE)).unwrap(), before);
     }
 }
