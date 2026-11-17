@@ -756,9 +756,15 @@ impl Butler {
             return (text, tainted);
         }
         let thread = self.tasks.thread_of(current);
-        let (recent, _, _) =
-            self.tasks
-                .page(Some(current), (MEMORY_TASKS + THREAD_TASKS) * 4, None);
+        // Only what each task was about and how it ended is used below.
+        let (recent, _, _) = self.tasks.page_as(
+            Some(current),
+            (MEMORY_TASKS + THREAD_TASKS) * 4,
+            None,
+            None,
+            None,
+            Task::without_steps,
+        );
         let recent: Vec<Task> = recent
             .into_iter()
             .filter(|task| caller_of(&task.intent).is_none())
@@ -1026,7 +1032,7 @@ impl Butler {
         let stretch = Stretch {
             since: Instant::now(),
             started: chrono::Local::now(),
-            before_ms: self.tasks.get(id).map_or(0, |task| task.usage.active_ms),
+            before_ms: self.tasks.usage(id).map_or(0, |usage| usage.active_ms),
         };
         let outcome = self.drive_stretch(id, stack, resume, held, &stretch).await;
         let active_ms = stretch.active_ms();
@@ -2107,7 +2113,7 @@ impl Butler {
     fn exhausted(&self, task: &Task, stretch: &Stretch) -> Option<String> {
         // `task` was read before this round's requests; read what has been
         // metered since.
-        let used = self.tasks.get(task.id).map_or(task.usage, |t| t.usage);
+        let used = self.tasks.usage(task.id).unwrap_or(task.usage);
         if let Some(limit) = self.budget.tokens.filter(|limit| used.tokens() >= *limit) {
             return Some(format!("token（上限 {limit}，已用 {}）", used.tokens()));
         }

@@ -11,7 +11,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
 
 use agentos_core::{now_ms, AgentId, CapabilityName, Intent, IntentId};
 use serde::{Deserialize, Serialize};
@@ -202,6 +202,28 @@ pub struct Task {
     pub updated_at_ms: u64,
 }
 
+impl Task {
+    /// The task without its steps, for readers that only need what it was
+    /// about and how it ended. Steps hold every call's full result and can
+    /// be far larger than everything else.
+    pub fn without_steps(&self) -> Self {
+        Self {
+            id: self.id,
+            thread: self.thread,
+            intent: self.intent.clone(),
+            state: self.state,
+            steps: Vec::new(),
+            tainted: self.tainted,
+            confirmation: self.confirmation.clone(),
+            question: self.question.clone(),
+            usage: self.usage,
+            message: self.message.clone(),
+            created_at_ms: self.created_at_ms,
+            updated_at_ms: self.updated_at_ms,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Snapshot {
@@ -250,15 +272,6 @@ impl Default for State {
     }
 }
 
-/// What [`State::apply`] replaced, so a change that could not be made
-/// durable can be taken back.
-struct Undo {
-    id: TaskId,
-    task: Option<Task>,
-    next_id: u64,
-    revision: u64,
-}
-
 impl State {
     fn from_snapshot(mut snapshot: Snapshot) -> io::Result<Self> {
         for task in &mut snapshot.tasks {
@@ -282,29 +295,10 @@ impl State {
         })
     }
 
-    fn apply(&mut self, task: Task, next_id: u64, revision: u64) -> Undo {
-        let undo = Undo {
-            id: task.id,
-            task: self.tasks.insert(task.id, task),
-            next_id: self.next_id,
-            revision: self.revision,
-        };
+    fn apply(&mut self, task: Task, next_id: u64, revision: u64) {
+        self.tasks.insert(task.id, task);
         self.next_id = next_id;
         self.revision = revision;
-        undo
-    }
-
-    fn undo(&mut self, undo: Undo) {
-        match undo.task {
-            Some(task) => {
-                self.tasks.insert(undo.id, task);
-            }
-            None => {
-                self.tasks.remove(&undo.id);
-            }
-        }
-        self.next_id = undo.next_id;
-        self.revision = undo.revision;
     }
 }
 
@@ -317,12 +311,6 @@ struct Journal {
     broken: bool,
 }
 
-#[derive(Debug)]
-struct Inner {
-    state: State,
-    journal: Journal,
-}
-
 /// A task store owns an exclusive process lock until it is dropped.
 ///
 /// Methods take `&self`, so a daemon may share one store via `Arc<TaskStore>`.
@@ -332,9 +320,19 @@ struct Inner {
 /// made since (`tasks.journal`). A change appends the one task it touched,
 /// so its cost does not grow with the history; the journal is folded into
 /// the snapshot once it holds about as many entries as there are tasks.
+///
+/// Reading never waits for the disk. Changes are made one at a time under
+/// `writer`, which is held while a change is written and synced; `state` is
+/// locked only to copy tasks out or to swap a durable change in. A client
+/// asking for a task therefore does not queue behind another task's sync,
+/// or behind a fold that rewrites the whole history.
 pub struct TaskStore {
     directory: Option<PathBuf>,
-    inner: Mutex<Inner>,
+    /// Serialises changes. Between taking it and applying a change, `state`
+    /// cannot move, so what a change was validated against is what it
+    /// replaces.
+    writer: Mutex<Journal>,
+    state: RwLock<State>,
     _lock: Option<File>,
     changes: broadcast::Sender<TaskChange>,
 }
@@ -389,10 +387,8 @@ impl TaskStore {
         reset_journal(&directory)?;
         Ok(Self {
             directory: Some(directory),
-            inner: Mutex::new(Inner {
-                state,
-                journal: Journal::default(),
-            }),
+            writer: Mutex::new(Journal::default()),
+            state: RwLock::new(state),
             _lock: Some(lock),
             changes: broadcast::channel(256).0,
         })
@@ -402,17 +398,21 @@ impl TaskStore {
     pub fn memory() -> Self {
         Self {
             directory: None,
-            inner: Mutex::new(Inner {
-                state: State::default(),
-                journal: Journal::default(),
-            }),
+            writer: Mutex::new(Journal::default()),
+            state: RwLock::new(State::default()),
             _lock: None,
             changes: broadcast::channel(256).0,
         }
     }
 
-    fn locked(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    // A poisoned lock is still used: a change is applied in one step after
+    // it is durable, so a panic elsewhere cannot leave either half-made.
+    fn read(&self) -> RwLockReadGuard<'_, State> {
+        self.state.read().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn writing(&self) -> MutexGuard<'_, Journal> {
+        self.writer.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// A task that starts a new thread.
@@ -424,29 +424,29 @@ impl TaskStore {
     /// thread that does not exist is `NotFound`; continuing one that another
     /// source started is `PermissionDenied`, so conversations never mix.
     pub fn create_in(&self, mut intent: Intent, thread: Option<TaskId>) -> io::Result<Task> {
-        let mut guard = self.locked();
-        if let Some(thread) = thread {
-            let root = guard
-                .state
-                .tasks
-                .get(&thread)
-                .filter(|root| root.thread == thread)
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotFound, format!("unknown thread: {thread}"))
-                })?;
-            if root.intent.source != intent.source || root.intent.speaker != intent.speaker {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "a thread can only be continued by the source that started it",
-                ));
+        let mut journal = self.writing();
+        let (id, revision) = {
+            let state = self.read();
+            if let Some(thread) = thread {
+                let root = state
+                    .tasks
+                    .get(&thread)
+                    .filter(|root| root.thread == thread)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::NotFound, format!("unknown thread: {thread}"))
+                    })?;
+                if root.intent.source != intent.source || root.intent.speaker != intent.speaker {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "a thread can only be continued by the source that started it",
+                    ));
+                }
             }
-        }
-        let id = TaskId(guard.state.next_id);
-        let next_id = guard
-            .state
-            .next_id
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("task id space exhausted"))?;
+            (TaskId(state.next_id), next_revision(state.revision)?)
+        };
+        let next_id =
+            id.0.checked_add(1)
+                .ok_or_else(|| io::Error::other("task id space exhausted"))?;
         intent.id = IntentId(id.0);
         let at_ms = now_ms();
         let task = Task {
@@ -463,18 +463,27 @@ impl TaskStore {
             created_at_ms: at_ms,
             updated_at_ms: at_ms,
         };
-        let revision = next_revision(guard.state.revision)?;
-        self.commit(&mut guard, task.clone(), next_id, revision)?;
+        self.commit(&mut journal, task.clone(), next_id, revision)?;
         let _ = self.changes.send(TaskChange { revision, id });
         Ok(task)
     }
 
     pub fn get(&self, id: TaskId) -> Option<Task> {
-        self.locked().state.tasks.get(&id).cloned()
+        self.read().tasks.get(&id).cloned()
     }
 
     pub fn list(&self) -> Vec<Task> {
-        self.locked().state.tasks.values().cloned().collect()
+        self.read().tasks.values().cloned().collect()
+    }
+
+    /// The tasks that have not reached an outcome, oldest first.
+    pub fn unfinished(&self) -> Vec<TaskId> {
+        let state = self.read();
+        let open = state
+            .tasks
+            .values()
+            .filter(|task| !task.state.is_terminal());
+        open.map(|task| task.id).collect()
     }
 
     /// Page history by descending task ID. `before` is exclusive and the next
@@ -499,13 +508,27 @@ impl TaskStore {
         thread: Option<TaskId>,
         source: Option<&str>,
     ) -> (Vec<Task>, Option<TaskId>, u64) {
-        let guard = self.locked();
+        self.page_as(before, limit, state, thread, source, Task::clone)
+    }
+
+    /// [`Self::page_in`], returning what `view` makes of each task instead
+    /// of a copy of it. A task carries the full result of every step, so a
+    /// listing that only needs a line per task should not copy them all.
+    pub fn page_as<T>(
+        &self,
+        before: Option<TaskId>,
+        limit: usize,
+        state: Option<TaskState>,
+        thread: Option<TaskId>,
+        source: Option<&str>,
+        view: impl Fn(&Task) -> T,
+    ) -> (Vec<T>, Option<TaskId>, u64) {
+        let guard = self.read();
         if limit == 0 {
-            return (Vec::new(), None, guard.state.revision);
+            return (Vec::new(), None, guard.revision);
         }
         let bound = before.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
         let mut matching = guard
-            .state
             .tasks
             .range((std::ops::Bound::Unbounded, bound))
             .rev()
@@ -513,24 +536,25 @@ impl TaskStore {
             .filter(|task| state.is_none_or(|state| task.state == state))
             .filter(|task| thread.is_none_or(|thread| task.thread == thread))
             .filter(|task| source.is_none_or(|source| task.intent.source.as_str() == source));
-        let tasks: Vec<_> = matching.by_ref().take(limit).cloned().collect();
-        let next = if matching.next().is_some() {
-            tasks.last().map(|task| task.id)
-        } else {
-            None
-        };
-        (tasks, next, guard.state.revision)
+        let mut oldest = None;
+        let tasks: Vec<T> = matching
+            .by_ref()
+            .take(limit)
+            .inspect(|task| oldest = Some(task.id))
+            .map(view)
+            .collect();
+        let next = oldest.filter(|_| matching.next().is_some());
+        (tasks, next, guard.revision)
     }
 
     /// Earlier tasks of the same thread as `id`, oldest first, at most the
     /// `limit` most recent ones.
     pub fn earlier_in_thread(&self, id: TaskId, limit: usize) -> Vec<Task> {
-        let guard = self.locked();
-        let Some(thread) = guard.state.tasks.get(&id).map(|task| task.thread) else {
+        let guard = self.read();
+        let Some(thread) = guard.tasks.get(&id).map(|task| task.thread) else {
             return Vec::new();
         };
         let mut earlier: Vec<Task> = guard
-            .state
             .tasks
             .range(..id)
             .rev()
@@ -545,11 +569,11 @@ impl TaskStore {
 
     /// The thread a task belongs to.
     pub fn thread_of(&self, id: TaskId) -> Option<TaskId> {
-        self.locked().state.tasks.get(&id).map(|task| task.thread)
+        self.read().tasks.get(&id).map(|task| task.thread)
     }
 
     pub fn revision(&self) -> u64 {
-        self.locked().state.revision
+        self.read().revision
     }
 
     /// Subscribe before reading a page/revision, then discard hints at or below
@@ -559,13 +583,8 @@ impl TaskStore {
     }
 
     pub fn update(&self, id: TaskId, change: impl FnOnce(&mut Task)) -> io::Result<Task> {
-        let mut guard = self.locked();
-        let mut task = guard
-            .state
-            .tasks
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| missing_task(id))?;
+        let mut journal = self.writing();
+        let (mut task, next_id, revision) = self.current(id)?;
         let (created_at_ms, thread) = (task.created_at_ms, task.thread);
         let previous_updated_at_ms = task.updated_at_ms;
         change(&mut task);
@@ -583,22 +602,27 @@ impl TaskStore {
             .max(task.updated_at_ms)
             .max(previous_updated_at_ms)
             .max(created_at_ms);
-        let next_id = guard.state.next_id;
-        let revision = next_revision(guard.state.revision)?;
-        self.commit(&mut guard, task.clone(), next_id, revision)?;
+        self.commit(&mut journal, task.clone(), next_id, revision)?;
         let _ = self.changes.send(TaskChange { revision, id });
         Ok(task)
     }
 
-    pub fn cancel(&self, id: TaskId) -> io::Result<Task> {
-        // A terminal task is returned unchanged, including its timestamps.
-        let mut guard = self.locked();
-        let mut task = guard
-            .state
+    /// A copy of the task to change, and the counters the change will carry.
+    /// Only meaningful while holding `writer`.
+    fn current(&self, id: TaskId) -> io::Result<(Task, u64, u64)> {
+        let state = self.read();
+        let task = state
             .tasks
             .get(&id)
             .cloned()
             .ok_or_else(|| missing_task(id))?;
+        Ok((task, state.next_id, next_revision(state.revision)?))
+    }
+
+    pub fn cancel(&self, id: TaskId) -> io::Result<Task> {
+        // A terminal task is returned unchanged, including its timestamps.
+        let mut journal = self.writing();
+        let (mut task, next_id, revision) = self.current(id)?;
         if task.state.is_terminal() {
             return Ok(task);
         }
@@ -608,16 +632,19 @@ impl TaskStore {
         task.updated_at_ms = now_ms().max(task.updated_at_ms);
         task.message =
             Some("任务已取消；后续步骤不会执行，已开始的能力调用可能仍产生结果。".into());
-        let next_id = guard.state.next_id;
-        let revision = next_revision(guard.state.revision)?;
-        self.commit(&mut guard, task.clone(), next_id, revision)?;
+        self.commit(&mut journal, task.clone(), next_id, revision)?;
         let _ = self.changes.send(TaskChange { revision, id });
         Ok(task)
     }
 
     /// The task's current state, without copying the task.
     pub fn state(&self, id: TaskId) -> Option<TaskState> {
-        self.locked().state.tasks.get(&id).map(|task| task.state)
+        self.read().tasks.get(&id).map(|task| task.state)
+    }
+
+    /// What the task has consumed so far, without copying the task.
+    pub fn usage(&self, id: TaskId) -> Option<TaskUsage> {
+        self.read().tasks.get(&id).map(|task| task.usage)
     }
 
     pub fn is_cancelled(&self, id: TaskId) -> bool {
@@ -625,35 +652,53 @@ impl TaskStore {
     }
 
     /// Make one task's new state durable, and only then visible. A change
-    /// that cannot be written leaves memory as it was.
-    fn commit(&self, inner: &mut Inner, task: Task, next_id: u64, revision: u64) -> io::Result<()> {
-        validate_change(&inner.state, &task, next_id, revision)?;
+    /// that cannot be written leaves memory as it was. The caller holds
+    /// `writer`; `state` is locked only around the disk writes, not across
+    /// them.
+    fn commit(
+        &self,
+        journal: &mut Journal,
+        task: Task,
+        next_id: u64,
+        revision: u64,
+    ) -> io::Result<()> {
+        let apply = |task| {
+            self.state
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .apply(task, next_id, revision);
+        };
+        let state = self.read();
+        validate_change(&state, &task, next_id, revision)?;
         let Some(directory) = &self.directory else {
-            inner.state.apply(task, next_id, revision);
+            drop(state);
+            apply(task);
             return Ok(());
         };
         // Folding the journal in once it holds as many entries as there are
         // tasks keeps the full rewrite's cost, spread over those changes,
         // constant per change.
-        let due = inner.journal.entries >= inner.state.tasks.len().max(COMPACT_AFTER);
-        if inner.journal.broken || due {
-            let undo = inner.state.apply(task, next_id, revision);
-            if let Err(error) = persist(directory, &inner.state) {
-                inner.state.undo(undo);
-                return Err(error);
-            }
+        let due = journal.entries >= state.tasks.len().max(COMPACT_AFTER);
+        if journal.broken || due {
+            // The snapshot is built from the state as it will be, so that
+            // the change is on disk before anyone can read it from memory.
+            let bytes = snapshot_bytes(&state, Some(&task), next_id, revision)?;
+            drop(state);
+            agentos_core::durable::write_atomic(&directory.join(STATE_FILE), &bytes)?;
+            apply(task);
             // The change is durable with the snapshot. Old journal lines are
             // at or below its revision, so emptying the journal is only
             // housekeeping; if it fails, the next change tries again.
-            inner.journal = match reset_journal(directory) {
+            *journal = match reset_journal(directory) {
                 Ok(()) => Journal::default(),
                 Err(_) => Journal {
-                    entries: inner.journal.entries,
+                    entries: journal.entries,
                     broken: true,
                 },
             };
             return Ok(());
         }
+        drop(state);
         let entry = JournalEntry {
             revision,
             next_id,
@@ -662,11 +707,11 @@ impl TaskStore {
         let mut line = serde_json::to_vec(&entry).map_err(invalid_data)?;
         line.push(b'\n');
         if let Err(error) = append_journal(directory, &line) {
-            inner.journal.broken = true;
+            journal.broken = true;
             return Err(error);
         }
-        inner.journal.entries += 1;
-        inner.state.apply(task, next_id, revision);
+        journal.entries += 1;
+        apply(task);
         Ok(())
     }
 }
@@ -679,11 +724,12 @@ impl Drop for TaskStore {
         let Some(directory) = &self.directory else {
             return;
         };
-        let inner = self.inner.get_mut().unwrap_or_else(|p| p.into_inner());
-        if inner.journal.entries == 0 && !inner.journal.broken {
+        let journal = self.writer.get_mut().unwrap_or_else(|p| p.into_inner());
+        if journal.entries == 0 && !journal.broken {
             return;
         }
-        if persist(directory, &inner.state).is_ok() {
+        let state = self.state.get_mut().unwrap_or_else(|p| p.into_inner());
+        if persist(directory, state).is_ok() {
             let _ = reset_journal(directory);
         }
     }
@@ -935,15 +981,36 @@ fn reset_journal(directory: &Path) -> io::Result<()> {
 
 /// Atomically replace the snapshot with `state`. Callers validate first.
 fn persist(directory: &Path, state: &State) -> io::Result<()> {
+    let bytes = snapshot_bytes(state, None, state.next_id, state.revision)?;
+    agentos_core::durable::write_atomic(&directory.join(STATE_FILE), &bytes)
+}
+
+/// The snapshot of `state`, with `changed` in place of (or added to) the
+/// task of the same id and the counters as given.
+fn snapshot_bytes(
+    state: &State,
+    changed: Option<&Task>,
+    next_id: u64,
+    revision: u64,
+) -> io::Result<Vec<u8>> {
+    let mut tasks: Vec<&Task> = state
+        .tasks
+        .values()
+        .filter(|task| changed.is_none_or(|changed| changed.id != task.id))
+        .collect();
+    if let Some(changed) = changed {
+        let at = tasks.partition_point(|task| task.id < changed.id);
+        tasks.insert(at, changed);
+    }
     let snapshot = SnapshotView {
         schema_version: SCHEMA_VERSION,
-        next_id: state.next_id,
-        revision: state.revision,
-        tasks: state.tasks.values().collect(),
+        next_id,
+        revision,
+        tasks,
     };
     let mut bytes = serde_json::to_vec_pretty(&snapshot).map_err(invalid_data)?;
     bytes.push(b'\n');
-    agentos_core::durable::write_atomic(&directory.join(STATE_FILE), &bytes)
+    Ok(bytes)
 }
 
 #[cfg(unix)]
@@ -1640,5 +1707,108 @@ mod tests {
             fs::metadata(&nested).unwrap().permissions().mode() & 0o777,
             0o750
         );
+    }
+
+    #[test]
+    fn reading_does_not_wait_for_a_change_that_is_being_written() {
+        use std::io::Read;
+        use std::sync::{mpsc, Arc};
+        use std::time::Duration;
+
+        let dir = TempDir::new();
+        let store = Arc::new(TaskStore::open(&dir.0).unwrap());
+        let task = store.create(intent()).unwrap();
+        // A journal that is a FIFO holds the change in the middle of its
+        // write: the line is larger than a pipe's buffer, so the append
+        // cannot finish until this test reads it.
+        let journal = dir.0.join(JOURNAL_FILE);
+        fs::remove_file(&journal).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(&journal)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let writing = std::thread::spawn({
+            let store = store.clone();
+            move || {
+                store.update(task.id, |task| {
+                    task.state = TaskState::Failed;
+                    let mut step = step(StepState::Failed);
+                    step.result = Some(json!("x".repeat(4 << 20)));
+                    task.steps.push(step);
+                })
+            }
+        });
+        // Returns once the change has opened the journal to append to it.
+        let mut pipe = File::open(&journal).unwrap();
+        let (seen, read) = mpsc::channel();
+        std::thread::spawn({
+            let store = store.clone();
+            move || {
+                seen.send((
+                    store.get(task.id),
+                    store.revision(),
+                    store.page(None, 5, None),
+                ))
+            }
+        });
+        // Guards two things at once: a read is answered while the disk is
+        // busy, and what it sees is the last durable state, not the change
+        // still being written.
+        let (during, revision, (page, _, page_revision)) = read
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a read waited for a change that was being written");
+        assert_eq!(during.unwrap().state, TaskState::Queued);
+        assert_eq!(revision, 1);
+        assert_eq!((page.len(), page_revision), (1, 1));
+        assert!(page[0].steps.is_empty());
+        // Let the write end. Whether syncing a FIFO counts as durable is up
+        // to the platform; either way memory must agree with the answer.
+        pipe.read_to_end(&mut Vec::new()).unwrap();
+        let written = writing.join().unwrap();
+        // Nothing reads the FIFO any more; closing the store must not wait
+        // on it.
+        fs::remove_file(&journal).unwrap();
+        File::create(&journal).unwrap();
+        match written {
+            Ok(changed) => {
+                assert_eq!(changed.state, TaskState::Failed);
+                assert_eq!(store.get(task.id).unwrap().state, TaskState::Failed);
+                assert_eq!(store.revision(), 2);
+            }
+            Err(_) => {
+                assert_eq!(store.get(task.id).unwrap().state, TaskState::Queued);
+                assert_eq!(store.revision(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn a_page_can_be_viewed_without_copying_its_tasks() {
+        let store = TaskStore::memory();
+        for _ in 0..5 {
+            store.create(intent()).unwrap();
+        }
+        store
+            .update(TaskId(4), |task| task.state = TaskState::Failed)
+            .unwrap();
+        // Guards that a view pages exactly like the copying page: same
+        // tasks, same cursor, same revision.
+        for (before, limit, state) in [
+            (None, 2, None),
+            (Some(TaskId(4)), 3, None),
+            (Some(TaskId(3)), 5, None),
+            (None, 1, Some(TaskState::Queued)),
+            (None, 0, None),
+        ] {
+            let (tasks, next, revision) = store.page(before, limit, state);
+            let viewed = store.page_as(before, limit, state, None, None, |task| task.id);
+            let ids: Vec<TaskId> = tasks.iter().map(|task| task.id).collect();
+            assert_eq!(viewed, (ids, next, revision));
+        }
+        assert_eq!(store.unfinished().len(), 4);
+        assert!(!store.unfinished().contains(&TaskId(4)));
+        assert_eq!(store.usage(TaskId(1)), Some(TaskUsage::default()));
+        assert_eq!(store.usage(TaskId(9)), None);
     }
 }
