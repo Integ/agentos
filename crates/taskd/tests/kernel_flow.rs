@@ -1302,18 +1302,23 @@ async fn waiting_for_the_user_does_not_spend_the_time_budget_but_working_does() 
         asking,
         Options {
             budget: Some(Budget {
-                active: Some(std::time::Duration::from_millis(250)),
+                active: Some(std::time::Duration::from_millis(1000)),
                 ..Budget::default()
             }),
             ..Options::default()
         },
     );
     h.say("安排一下").await;
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    // The wait is far longer than the work, so the check below tells the
+    // two apart even on a slow CI runner, where the work alone (audit
+    // syncs included) has taken close to 400 ms against a 250 ms budget.
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
     h.reply(1, 0, "周三").await;
     let task = h.task(1);
+    // Guards "waiting for the human is not active time": counted, the
+    // wait alone would exceed the budget and fail the task.
     assert_eq!(task.state, TaskState::Succeeded);
-    assert!(task.usage.active_ms < 250, "{}", task.usage.active_ms);
+    assert!(task.usage.active_ms < 1000, "{}", task.usage.active_ms);
 
     let mut h = Harness::with(
         "time-budget-spent",
