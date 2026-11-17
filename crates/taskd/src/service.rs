@@ -323,23 +323,20 @@ impl Server {
                 }
             }
         }
-        for task in tasks.list() {
-            if !task.state.is_terminal() {
-                let interrupted = tasks.update(task.id, |task| {
-                    if !task.state.is_terminal() {
-                        task.state = TaskState::Interrupted;
-                        task.confirmation = None;
-                        task.question = None;
-                        task.message =
-                            Some("后台服务已停止；任务未完成，不会自动重复执行。".into());
-                    }
-                })?;
-                let _ = audit.append(AuditEvent::TaskStateChanged {
-                    intent: interrupted.intent.id,
-                    state: "interrupted".into(),
-                    message: interrupted.message,
-                });
-            }
+        for id in tasks.unfinished() {
+            let interrupted = tasks.update(id, |task| {
+                if !task.state.is_terminal() {
+                    task.state = TaskState::Interrupted;
+                    task.confirmation = None;
+                    task.question = None;
+                    task.message = Some("后台服务已停止；任务未完成，不会自动重复执行。".into());
+                }
+            })?;
+            let _ = audit.append(AuditEvent::TaskStateChanged {
+                intent: interrupted.intent.id,
+                state: "interrupted".into(),
+                message: interrupted.message,
+            });
         }
         outcome
     }
@@ -690,15 +687,18 @@ impl Controller {
                         "page limit must be between 1 and 50",
                     ));
                 }
-                let (tasks, next_before, revision) = self.tasks.page_in(
+                // Summaries are made in place: a task carries every step's
+                // full result, which a listing has no use for.
+                let (tasks, next_before, revision) = self.tasks.page_as(
                     before,
                     limit,
                     state,
                     thread,
                     actor.map(Caller::source).as_deref(),
+                    |task| TaskSummary::from(task),
                 );
                 Ok(Reply::Tasks {
-                    tasks: tasks.iter().map(TaskSummary::from).collect(),
+                    tasks,
                     next_before,
                     revision,
                 })
