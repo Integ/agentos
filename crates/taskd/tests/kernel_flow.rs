@@ -1344,7 +1344,7 @@ async fn every_round_is_told_the_time_and_the_device_by_the_system_not_the_user(
     h.say("看看笔记").await;
     let seen = h.seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 4);
-    let year = chrono::Local::now().format("%Y-").to_string();
+    let year = jiff::Zoned::now().strftime("%Y-").to_string();
     for round in &seen {
         // The butler and its delegate, on every round.
         assert!(

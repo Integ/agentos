@@ -70,35 +70,31 @@ impl Capability for ClockNow {
 
     async fn invoke(&self, args: Value) -> Result<Value, CapabilityError> {
         validate_args(&args, &[])?;
-        Ok(clock_reading(chrono::Local::now()))
+        Ok(clock_reading(&jiff::Zoned::now()))
     }
 }
 
 /// What `clock.now` says for a moment in some time zone. Someone asking the
 /// time means the time where they are, so the reading is local and carries its
 /// offset. `unix_ms` stays for clients that render the time themselves.
-fn clock_reading<Tz: chrono::TimeZone>(t: chrono::DateTime<Tz>) -> Value
-where
-    Tz::Offset: std::fmt::Display,
-{
-    use chrono::{Datelike, Offset};
+fn clock_reading(t: &jiff::Zoned) -> Value {
     const WEEKDAYS: [&str; 7] = ["一", "二", "三", "四", "五", "六", "日"];
-    let secs = t.offset().fix().local_minus_utc();
+    let secs = t.offset().seconds();
     let utc_offset = format!(
         "UTC{}{:02}:{:02}",
         if secs < 0 { '-' } else { '+' },
         secs.abs() / 3600,
         secs.abs() / 60 % 60
     );
-    let weekday = WEEKDAYS[t.weekday().num_days_from_monday() as usize];
+    let weekday = WEEKDAYS[t.weekday().to_monday_zero_offset() as usize];
     json!({
-        "unix_ms": t.timestamp_millis(),
-        "local": t.to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+        "unix_ms": t.timestamp().as_millisecond(),
+        "local": t.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string(),
         "utc_offset": utc_offset,
         "message": format!(
             "现在是 {} 星期{weekday} {}（{utc_offset}）",
-            t.format("%Y-%m-%d"),
-            t.format("%H:%M:%S")
+            t.strftime("%Y-%m-%d"),
+            t.strftime("%H:%M:%S")
         ),
     })
 }
@@ -106,10 +102,7 @@ where
 /// What an agent is told about where and when it runs. The service states
 /// these facts; they are not the user's words and not outside content, so
 /// they go into the system prompt and never into the intent.
-pub fn environment<Tz: chrono::TimeZone>(now: chrono::DateTime<Tz>, intent: &Intent) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
+pub fn environment(now: &jiff::Zoned, intent: &Intent) -> String {
     let reading = clock_reading(now);
     format!(
         "当前环境（由系统提供，任务开始或继续执行时更新）：{}；设备 {}（{} {}）；这个意图来自 {}。",
@@ -559,12 +552,19 @@ mod tests {
         assert!(notes.lock().unwrap().is_empty());
     }
 
+    /// A moment at a fixed UTC offset of `hours`.
+    fn at(y: i16, mo: i8, d: i8, h: i8, mi: i8, s: i8, hours: i8) -> jiff::Zoned {
+        let zone = jiff::tz::TimeZone::fixed(jiff::tz::Offset::constant(hours));
+        jiff::civil::date(y, mo, d)
+            .at(h, mi, s, 0)
+            .to_zoned(zone)
+            .unwrap()
+    }
+
     #[test]
     fn clock_reports_local_time_with_offset() {
-        use chrono::TimeZone;
-        let tz = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
-        let t = tz.with_ymd_and_hms(2026, 11, 1, 22, 30, 5).unwrap();
-        let v = clock_reading(t);
+        let t = at(2026, 11, 1, 22, 30, 5, 8);
+        let v = clock_reading(&t);
         assert_eq!(v["utc_offset"], "UTC+08:00");
         assert_eq!(v["local"], "2026-11-01T22:30:05+08:00");
         assert_eq!(
@@ -572,9 +572,8 @@ mod tests {
             "现在是 2026-11-01 星期日 22:30:05（UTC+08:00）"
         );
         // The instant is unchanged; only its presentation is local.
-        assert_eq!(v["unix_ms"], t.timestamp_millis());
-        let west = chrono::FixedOffset::west_opt(7 * 3600).unwrap();
-        let v = clock_reading(west.with_ymd_and_hms(2026, 11, 11, 11, 24, 50).unwrap());
+        assert_eq!(v["unix_ms"], t.timestamp().as_millisecond());
+        let v = clock_reading(&at(2026, 11, 11, 11, 24, 50, -7));
         assert_eq!(
             v["message"],
             "现在是 2026-11-11 星期三 11:24:50（UTC-07:00）"
@@ -585,31 +584,27 @@ mod tests {
     async fn clock_capability_answers_in_the_machine_time_zone() {
         let mut reg = CapabilityRegistry::new();
         register_all(&mut reg);
-        let before = chrono::Local::now().timestamp_millis();
+        let before = jiff::Timestamp::now().as_millisecond();
         let v = invoke(&reg, "clock.now", json!({})).await;
-        let after = chrono::Local::now().timestamp_millis();
+        let after = jiff::Timestamp::now().as_millisecond();
         let unix_ms = v["unix_ms"].as_i64().unwrap();
         assert!((before..=after).contains(&unix_ms));
-        let local = chrono::DateTime::parse_from_rfc3339(v["local"].as_str().unwrap()).unwrap();
-        assert_eq!(local.timestamp(), unix_ms / 1000);
-        // Compare offsets for the same instant, so a DST change cannot race.
-        use chrono::TimeZone;
-        let expected = chrono::Local
-            .timestamp_millis_opt(unix_ms)
+        let local: jiff::Timestamp = v["local"].as_str().unwrap().parse().unwrap();
+        assert_eq!(local.as_second(), unix_ms.div_euclid(1000));
+        // Compare with the system zone at the same instant, so a DST change
+        // cannot race.
+        let expected = jiff::Timestamp::from_millisecond(unix_ms)
             .unwrap()
-            .offset()
-            .local_minus_utc();
-        assert_eq!(local.offset().local_minus_utc(), expected);
+            .to_zoned(jiff::tz::TimeZone::system())
+            .strftime("%Y-%m-%dT%H:%M:%S%:z")
+            .to_string();
+        assert_eq!(v["local"], expected);
         assert!(!v["message"].as_str().unwrap().contains("UTC "));
     }
 
     #[test]
     fn the_environment_names_the_local_time_the_machine_and_the_input_source() {
-        use chrono::TimeZone;
-        let moment = chrono::FixedOffset::east_opt(8 * 3600)
-            .unwrap()
-            .with_ymd_and_hms(2026, 11, 12, 9, 30, 0)
-            .unwrap();
+        let moment = at(2026, 11, 12, 9, 30, 0, 8);
         let intent = Intent {
             id: agentos_core::IntentId(1),
             source: agentos_core::DeviceId::new("unix:uid:501"),
@@ -618,7 +613,7 @@ mod tests {
             urgency: agentos_core::Urgency::Normal,
             at_ms: 0,
         };
-        let text = environment(moment, &intent);
+        let text = environment(&moment, &intent);
         assert!(
             text.contains("2026-11-12 星期四 09:30:00（UTC+08:00）"),
             "{text}"
