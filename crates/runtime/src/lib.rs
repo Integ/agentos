@@ -1745,11 +1745,12 @@ mod tests {
         std::thread::spawn({
             let store = store.clone();
             move || {
-                seen.send((
+                // The receiver only goes away if the test already failed.
+                let _ = seen.send((
                     store.get(task.id),
                     store.revision(),
                     store.page(None, 5, None),
-                ))
+                ));
             }
         });
         // Guards two things at once: a read is answered while the disk is
