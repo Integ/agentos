@@ -119,7 +119,7 @@ struct Stretch {
     /// than read every round so the system prompt stays byte-identical from
     /// round to round and the model's prompt cache can be reused; a task
     /// that waited for the human starts a new stretch and is told afresh.
-    started: chrono::DateTime<chrono::Local>,
+    started: jiff::Zoned,
 }
 
 impl Stretch {
@@ -1031,7 +1031,7 @@ impl Butler {
     ) -> io::Result<()> {
         let stretch = Stretch {
             since: Instant::now(),
-            started: chrono::Local::now(),
+            started: jiff::Zoned::now(),
             before_ms: self.tasks.usage(id).map_or(0, |usage| usage.active_ms),
         };
         let outcome = self.drive_stretch(id, stack, resume, held, &stretch).await;
@@ -1316,7 +1316,7 @@ impl Butler {
             let system = format!(
                 "{}\n\n{}",
                 frame.system,
-                crate::builtin::environment(stretch.started, &frame.intent)
+                crate::builtin::environment(&stretch.started, &frame.intent)
             );
             let conversation = Conversation {
                 system: &system,

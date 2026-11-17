@@ -17,7 +17,7 @@ fn crash_file(home: &Path) -> PathBuf {
 
 /// Text of a crash report.
 pub fn report(location: Option<String>, message: &str, thread: &str, backtrace: &str) -> String {
-    let when = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%:z");
+    let when = jiff::Zoned::now().strftime("%Y-%m-%d %H:%M:%S%:z");
     format!(
         "agentos-taskd {} 崩溃：{message}（位置 {}，线程 {thread}，时间 {when}）\n{backtrace}\n",
         env!("CARGO_PKG_VERSION"),
