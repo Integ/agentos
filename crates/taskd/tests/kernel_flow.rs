@@ -850,8 +850,16 @@ async fn the_planner_is_reminded_of_recent_tasks_and_the_blackboard() {
 
 #[tokio::test]
 async fn running_out_of_rounds_fails_the_task_and_keeps_what_it_did() {
-    let mut h = Harness::new("bounded", |_| call("clock.now", json!({})));
-    let r = h.say("一直看时间").await;
+    // Each round asks for something new: repeating one call could look
+    // like a loop (clock.now reads the same within a second) and be
+    // stopped for that instead of for the budget this test is about.
+    let mut h = Harness::new("bounded", |s| {
+        call(
+            "notes.append",
+            json!({"text": format!("第 {} 条", s.rounds)}),
+        )
+    });
+    let r = h.say("一直记笔记").await;
     assert_eq!(r.kind, ExpressionKind::Error);
     assert!(r.text.contains("超出预算：规划轮数（8 轮）"), "{}", r.text);
     let task = h.task(1);
