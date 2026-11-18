@@ -527,7 +527,7 @@ function observeNotebookTask(task) {
     return false;
   }
   if ((task.steps || []).some(step => step.state === 'succeeded'
-    && ['notes.append', 'notes.clear', 'notes.restore'].includes(step.capability))) {
+    && ['notes.append', 'notes.update', 'notes.remove', 'notes.clear', 'notes.restore'].includes(step.capability))) {
     state.remoteNotesLoaded = false;
     state.notebookRefreshNeeded = true;
   }

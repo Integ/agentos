@@ -386,6 +386,7 @@ impl TaskStore {
                 task.message = Some(
                     "守护进程已重启；未完成任务已中断，不会自动重复执行可能已发生的副作用。".into(),
                 );
+                interrupt_steps(&mut task.steps);
             }
         }
         if recovered {
@@ -645,6 +646,13 @@ impl TaskStore {
         task.updated_at_ms = now_ms().max(task.updated_at_ms);
         task.message =
             Some("任务已取消；后续步骤不会执行，已开始的能力调用可能仍产生结果。".into());
+        // Steps that never started never will. A running call is left alone:
+        // it may still finish, and its result is recorded when it does.
+        for step in &mut task.steps {
+            if step.state == StepState::Pending {
+                step.state = StepState::Skipped;
+            }
+        }
         self.commit(&mut journal, task.clone(), next_id, revision)?;
         let _ = self.changes.send(TaskChange { revision, id });
         Ok(task)
@@ -807,6 +815,29 @@ fn validate_snapshot(snapshot: &Snapshot) -> io::Result<()> {
         snapshot.revision,
         snapshot.tasks.iter(),
     )
+}
+
+/// End the steps of a task interrupted by the service stopping, which will
+/// never be worked on again. Nothing is running once the work has been
+/// stopped, so a step left `running` would claim work that is not
+/// happening; it becomes `failed` with a result saying the outcome is
+/// unknown, and steps that never started become `skipped`.
+pub fn interrupt_steps(steps: &mut [TaskStep]) {
+    for step in steps {
+        match step.state {
+            StepState::Running => {
+                step.state = StepState::Failed;
+                if step.result.is_none() {
+                    step.result = Some(Value::String(
+                        "服务停止时这一步正在执行，被打断了；它是否已经生效未知，不会自动重做。"
+                            .into(),
+                    ));
+                }
+            }
+            StepState::Pending => step.state = StepState::Skipped,
+            _ => {}
+        }
+    }
 }
 
 fn validate_state(state: &State) -> io::Result<()> {
@@ -1345,8 +1376,20 @@ mod tests {
             assert_eq!(task.state, TaskState::Interrupted);
             assert!(task.confirmation.is_none());
             assert!(task.message.unwrap().contains("不会自动重复"));
+            // Nothing runs once the process is gone: the call that was in
+            // flight is failed with an unknown outcome, never left running,
+            // and steps that never started are skipped.
             if task.id == TaskId(3) {
-                assert_eq!(task.steps[0].state, StepState::Running);
+                assert_eq!(task.steps[0].state, StepState::Failed);
+                assert!(task.steps[0]
+                    .result
+                    .as_ref()
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .contains("未知"));
+            } else {
+                assert_eq!(task.steps[0].state, StepState::Skipped);
             }
         }
     }
@@ -1364,6 +1407,8 @@ mod tests {
         let cancelled = store.cancel(task.id).unwrap();
         assert_eq!(cancelled.state, TaskState::Cancelled);
         assert_eq!(cancelled.steps[0].state, StepState::Running);
+        // A step that never started is not shown as still to come.
+        assert_eq!(cancelled.steps[1].state, StepState::Skipped);
         assert!(store.is_cancelled(task.id));
         assert_eq!(
             store.cancel(task.id).unwrap().updated_at_ms,

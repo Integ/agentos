@@ -509,7 +509,14 @@ impl NotebookSnapshot {
             if step.state != StepState::Succeeded {
                 continue;
             }
-            if ["notes.append", "notes.clear", "notes.restore"].contains(&step.capability.as_str())
+            if [
+                "notes.append",
+                "notes.update",
+                "notes.remove",
+                "notes.clear",
+                "notes.restore",
+            ]
+            .contains(&step.capability.as_str())
             {
                 self.latest_write = self.latest_write.max(task.id.0);
             }

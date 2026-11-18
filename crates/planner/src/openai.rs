@@ -7,6 +7,7 @@
 //! engine before anything runs. Earlier rounds are replayed as assistant
 //! `tool_calls` followed by `tool` messages.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use agentos_core::{CapabilitySpec, Intent};
@@ -238,6 +239,36 @@ pub struct OpenAiPlanner {
     cfg: OpenAiConfig,
     http: reqwest::Client,
     retry: Retry,
+    /// Set once the service has refused function tools at the model's
+    /// default reasoning effort (OpenAI's gpt-5.6 family on Chat
+    /// Completions). Learned from the error rather than from model names:
+    /// other models, and other servers, reject the parameter instead.
+    reasoning_none: AtomicBool,
+}
+
+/// A refused request: what to tell the user, and whether the refusal was
+/// about reasoning effort combined with function tools.
+struct CallError {
+    message: String,
+    wants_no_reasoning: bool,
+}
+
+impl From<CallError> for String {
+    fn from(error: CallError) -> Self {
+        error.message
+    }
+}
+
+/// Whether a 400 says function tools need `reasoning_effort` turned off.
+fn rejects_tools_with_reasoning(status: reqwest::StatusCode, error: &Value) -> bool {
+    if status != reqwest::StatusCode::BAD_REQUEST {
+        return false;
+    }
+    let message = error
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    message.contains("reasoning_effort") && message.contains("tools")
 }
 
 impl OpenAiPlanner {
@@ -254,6 +285,7 @@ impl OpenAiPlanner {
             cfg,
             http,
             retry: Retry::default(),
+            reasoning_none: AtomicBool::new(false),
         }
     }
 
@@ -271,7 +303,7 @@ impl OpenAiPlanner {
         &self.cfg.base_url
     }
 
-    async fn call(&self, body: &Value) -> Result<Value, String> {
+    async fn call(&self, body: &Value) -> Result<Value, CallError> {
         let url = format!(
             "{}/chat/completions",
             self.cfg.base_url.trim_end_matches('/')
@@ -284,21 +316,51 @@ impl OpenAiPlanner {
             }
         })
         .await
-        .map_err(|e| format!("无法连接 {}：{e}", self.cfg.base_url))?;
+        .map_err(|e| CallError {
+            message: format!("无法连接 {}：{e}", self.cfg.base_url),
+            wants_no_reasoning: false,
+        })?;
         let status = resp.status();
-        let value: Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("模型服务返回了无法解析的响应（HTTP {status}）：{e}"))?;
+        let value: Value = resp.json().await.map_err(|e| CallError {
+            message: format!("模型服务返回了无法解析的响应（HTTP {status}）：{e}"),
+            wants_no_reasoning: false,
+        })?;
         if !status.is_success() {
             let msg = value
                 .pointer("/error/message")
                 .and_then(Value::as_str)
                 .unwrap_or("未知错误");
-            return Err(format!("模型服务错误（HTTP {status}）：{msg}"));
+            return Err(CallError {
+                message: format!("模型服务错误（HTTP {status}）：{msg}"),
+                wants_no_reasoning: rejects_tools_with_reasoning(status, &value),
+            });
         }
         Ok(value)
     }
+
+    /// Send a request that offers function tools. A service that refuses
+    /// them at the model's default reasoning effort gets the same request
+    /// once more with reasoning turned off, and every later one starts that
+    /// way. A 400 is refused before any work, so the retry neither repeats
+    /// side effects (planning has none) nor pays twice.
+    async fn call_with_tools(&self, body: &Value) -> Result<Value, CallError> {
+        if self.reasoning_none.load(Ordering::Relaxed) {
+            return self.call(&without_reasoning(body)).await;
+        }
+        match self.call(body).await {
+            Err(error) if error.wants_no_reasoning => {
+                self.reasoning_none.store(true, Ordering::Relaxed);
+                self.call(&without_reasoning(body)).await
+            }
+            other => other,
+        }
+    }
+}
+
+fn without_reasoning(body: &Value) -> Value {
+    let mut body = body.clone();
+    body["reasoning_effort"] = json!("none");
+    body
 }
 
 #[async_trait]
@@ -321,7 +383,7 @@ impl TextModel for OpenAiPlanner {
         });
         let resp = match self.call(&body).await {
             Ok(resp) => resp,
-            Err(error) => return (Err(error), Some(Usage::unknown(&self.cfg.model))),
+            Err(error) => return (Err(error.into()), Some(Usage::unknown(&self.cfg.model))),
         };
         let usage = Some(response_usage(&self.cfg.model, &resp));
         let Some(msg) = resp.pointer("/choices/0/message") else {
@@ -355,14 +417,19 @@ impl Planner for OpenAiPlanner {
         let body = build_turn_request(&self.cfg, conv);
         // A refusal or an unusable answer was paid for like any other, and
         // a request that failed may have been: neither is recorded as free.
-        match self.call(&body).await {
+        let sent = if body.get("tools").is_some() {
+            self.call_with_tools(&body).await
+        } else {
+            self.call(&body).await
+        };
+        match sent {
             Ok(resp) => Plan {
                 usage: Some(response_usage(&self.cfg.model, &resp)),
                 ..parse_response(&resp)
             },
             Err(e) => Plan {
                 usage: Some(Usage::unknown(&self.cfg.model)),
-                ..Plan::failed(e)
+                ..Plan::failed(e.message)
             },
         }
     }
@@ -546,6 +613,51 @@ mod tests {
             .await;
         assert!(plan.steps.is_empty());
         assert!(plan.reply.unwrap().contains("model not found"));
+    }
+
+    #[tokio::test]
+    async fn a_model_that_refuses_tools_while_reasoning_is_asked_again_without_it() {
+        // gpt-5.6 on Chat Completions refuses function tools unless
+        // reasoning_effort is "none"; other models refuse that parameter,
+        // so it is sent only after the service asked for it.
+        let refusal = json!({"error": {
+            "message": "Function tools with reasoning_effort are not supported for gpt-5.6-terra in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.",
+            "type": "invalid_request_error", "param": "reasoning_effort"
+        }});
+        let call = json!({"choices": [{"finish_reason": "tool_calls", "message": {"tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "notes__list", "arguments": "{}"}}
+        ]}}]});
+        let (url, server) = crate::test_http::sequence_server(vec![
+            ("400 Bad Request", refusal),
+            ("200 OK", call.clone()),
+            ("200 OK", call),
+        ])
+        .await;
+        let planner = local_planner(&url, None);
+        let first = planner.plan(&intent("看看笔记"), &specs()).await;
+        let second = planner.plan(&intent("再看看"), &specs()).await;
+        assert_eq!(first.steps[0].capability.as_str(), "notes.list");
+        assert_eq!(second.steps[0].capability.as_str(), "notes.list");
+        let seen = server.await.unwrap();
+        assert!(!seen[0].contains("reasoning_effort"));
+        assert!(seen[1].contains(r#""reasoning_effort":"none""#));
+        // Learned once: the next request does not pay for another refusal.
+        assert!(seen[2].contains(r#""reasoning_effort":"none""#));
+    }
+
+    #[tokio::test]
+    async fn other_bad_requests_are_not_retried() {
+        let (url, server) = crate::test_http::sequence_server(vec![(
+            "400 Bad Request",
+            json!({"error": {"message": "Unrecognized request argument supplied: reasoning_effort"}}),
+        )])
+        .await;
+        let plan = local_planner(&url, None)
+            .plan(&intent("hi"), &specs())
+            .await;
+        assert!(plan.steps.is_empty());
+        assert!(plan.reply.unwrap().contains("Unrecognized"));
+        assert_eq!(server.await.unwrap().len(), 1);
     }
 
     #[test]

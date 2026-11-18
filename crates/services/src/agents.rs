@@ -161,7 +161,7 @@ pub fn builtin() -> Vec<AgentManifest> {
             capabilities: vec!["notes.*".into(), "board.*".into(), "clock.now".into()],
             max_risk: RiskLevel::Irreversible,
             instructions: Some(
-                "整理笔记时先列出现有笔记，再决定怎么做。清空笔记不可撤销，只在任务明确要求时才做。"
+                "整理笔记时先列出现有笔记，再决定怎么做。改一条用 notes.update，删一条用 notes.remove；不要用清空再重写的办法改笔记，那会用掉唯一的恢复快照。清空全部笔记只在任务明确要求时才做。"
                     .into(),
             ),
             max_rounds: DEFAULT_MAX_ROUNDS,
