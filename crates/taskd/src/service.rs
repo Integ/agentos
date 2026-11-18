@@ -330,6 +330,7 @@ impl Server {
                     task.confirmation = None;
                     task.question = None;
                     task.message = Some("后台服务已停止；任务未完成，不会自动重复执行。".into());
+                    agentos_runtime::interrupt_steps(&mut task.steps);
                 }
             })?;
             let _ = audit.append(AuditEvent::TaskStateChanged {
@@ -511,16 +512,13 @@ fn unconfigured_voice() -> VoiceStatus {
 }
 
 fn voice_unavailable() -> ProtocolError {
-    protocol_error(
-        "voice_unavailable",
-        "this machine has no voice input or output configured",
-    )
+    protocol_error("voice_unavailable", "这台机器没有配置语音输入或输出")
 }
 
 fn forbidden() -> ProtocolError {
     protocol_error(
         "forbidden",
-        "an outside caller cannot do this; it is for the user at this machine",
+        "外部调用方不能做这件事，只有这台机器前的用户可以",
     )
 }
 
@@ -532,7 +530,7 @@ impl Controller {
                 self.butler
                     .callers()
                     .get(id)
-                    .ok_or_else(|| protocol_error("not_found", format!("no caller {id}")))
+                    .ok_or_else(|| protocol_error("not_found", format!("没有调用方 {id}")))
             })
             .transpose()
     }
@@ -543,7 +541,7 @@ impl Controller {
         let task = self.task(id)?;
         match actor {
             Some(caller) if task.intent.source.as_str() != caller.source() => {
-                Err(protocol_error("not_found", format!("no task {id}")))
+                Err(protocol_error("not_found", format!("没有任务 {id}")))
             }
             _ => Ok(task),
         }
@@ -565,7 +563,7 @@ impl Controller {
     fn task(&self, id: TaskId) -> Result<Task, ProtocolError> {
         self.tasks
             .get(id)
-            .ok_or_else(|| protocol_error("not_found", format!("no task {id}")))
+            .ok_or_else(|| protocol_error("not_found", format!("没有任务 {id}")))
     }
 
     /// A standing change (a rule, a caller) removes the human from later
@@ -578,7 +576,7 @@ impl Controller {
         let Some(pin) = pin else {
             return Err(protocol_error(
                 "identity_required",
-                "a PIN is set; this change needs it",
+                "已经设置了 PIN，这项更改需要输入它",
             ));
         };
         match pins.check(&pin) {
@@ -599,7 +597,7 @@ impl Controller {
         self.work_tx.send(Admitted { work, place }).map_err(|_| {
             protocol_error(
                 "queue_unavailable",
-                "the service is stopping; the request was saved but will not run",
+                "任务服务正在停止；请求已保存，但不会执行",
             )
         })
     }
@@ -645,10 +643,10 @@ impl Controller {
                 if text.trim().is_empty() || text.len() > MAX_TEXT_BYTES {
                     return Err(protocol_error(
                         "invalid_argument",
-                        "intent must be non-empty and at most 64 KiB",
+                        "意图不能为空，且不能超过 64 KiB",
                     ));
                 }
-                let place = self.admit("task queue is full or unavailable; no task was created")?;
+                let place = self.admit("任务队列已满或不可用；没有创建任务")?;
                 let task = self
                     .tasks
                     .create_in(actor_intent(uid, actor, text.trim().into()), thread)
@@ -658,10 +656,9 @@ impl Controller {
                         (
                             io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied,
                             Some(thread),
-                        ) => protocol_error(
-                            "not_found",
-                            format!("no thread {thread}; no task was created"),
-                        ),
+                        ) => {
+                            protocol_error("not_found", format!("没有对话 {thread}；没有创建任务"))
+                        }
                         _ => storage_error(error),
                     })?;
                 // Marked before the task can run, so its first reply is read.
@@ -684,7 +681,7 @@ impl Controller {
                 if !(1..=MAX_PAGE_SIZE).contains(&limit) {
                     return Err(protocol_error(
                         "invalid_argument",
-                        "page limit must be between 1 and 50",
+                        "每页数量必须在 1 到 50 之间",
                     ));
                 }
                 // Summaries are made in place: a task carries every step's
@@ -719,7 +716,7 @@ impl Controller {
                         .map_err(|error| {
                             protocol_error(
                                 "audit_unavailable",
-                                format!("cancellation was saved, but audit failed: {error}"),
+                                format!("取消已保存，但审计日志写入失败：{error}"),
                             )
                         })?;
                 }
@@ -735,11 +732,11 @@ impl Controller {
             } => {
                 let index = step
                     .checked_sub(1)
-                    .ok_or_else(|| protocol_error("invalid_argument", "step numbers start at 1"))?;
+                    .ok_or_else(|| protocol_error("invalid_argument", "步骤编号从 1 开始"))?;
                 let task = self.task(id)?;
                 let responder = responder(uid, format!("approve {id} {step}"));
                 if !approval_matches_with_token(&task, index, &responder, now_ms(), &confirmation) {
-                    return Err(protocol_error("invalid_confirmation", "approval must match the current task, step, OS user, token and five-minute validity period"));
+                    return Err(protocol_error("invalid_confirmation", "批准没有对上：必须是这个任务当前等待批准的步骤、同一系统用户、正确的确认令牌，并在五分钟有效期内。请重新查看任务详情"));
                 }
                 // An irreversible step needs proof of who approves it. The
                 // PIN is checked here and never leaves this function; a
@@ -752,13 +749,13 @@ impl Controller {
                     let Some(pins) = &self.pins else {
                         return Err(protocol_error(
                             "identity_unavailable",
-                            "this step needs identity verification, which is not configured",
+                            "这一步需要身份核验，但还没有设置 PIN（agentos-taskd --set-pin）",
                         ));
                     };
                     let Some(pin) = pin else {
                         return Err(protocol_error(
                             "identity_required",
-                            "this step is irreversible; approve it with the PIN",
+                            "这一步不可逆，批准时需要输入 PIN（--pin-stdin）",
                         ));
                     };
                     match pins.verify_for(Some(id.0), &pin) {
@@ -766,8 +763,7 @@ impl Controller {
                         other => return Err(protocol_error("identity_rejected", other.message())),
                     }
                 }
-                let place =
-                    self.admit("approval queue is full or unavailable; retry explicitly")?;
+                let place = self.admit("批准队列已满或不可用；请稍后自己再批准一次")?;
                 self.enqueue(
                     Work::Approve {
                         id,
@@ -787,11 +783,11 @@ impl Controller {
             } => {
                 let index = step
                     .checked_sub(1)
-                    .ok_or_else(|| protocol_error("invalid_argument", "step numbers start at 1"))?;
+                    .ok_or_else(|| protocol_error("invalid_argument", "步骤编号从 1 开始"))?;
                 if text.trim().is_empty() || text.len() > MAX_TEXT_BYTES {
                     return Err(protocol_error(
                         "invalid_argument",
-                        "reply must be non-empty and at most 64 KiB",
+                        "回答不能为空，且不能超过 64 KiB",
                     ));
                 }
                 let task = self.task_for(id, actor)?;
@@ -799,10 +795,10 @@ impl Controller {
                 if !reply_matches(&task, index, &responder) {
                     return Err(protocol_error(
                         "invalid_reply",
-                        "reply must match the question the task is waiting on now, its step and the OS user",
+                        "回答没有对上：必须是这个任务现在等待回答的那一步，并来自同一系统用户",
                     ));
                 }
-                let place = self.admit("reply queue is full or unavailable; retry explicitly")?;
+                let place = self.admit("回答队列已满或不可用；请稍后自己再回答一次")?;
                 if spoken {
                     if let Some(voice) = &self.voice {
                         voice.mark_voice_intent(task.intent.id);
@@ -833,16 +829,14 @@ impl Controller {
                     Some(id) => self
                         .butler
                         .caller_specs(id)
-                        .ok_or_else(|| protocol_error("not_found", format!("no caller {id}")))?,
+                        .ok_or_else(|| protocol_error("not_found", format!("没有调用方 {id}")))?,
                     None => self.view().specs.clone(),
                 };
                 let risk = specs
                     .iter()
                     .find(|spec| spec.name == capability)
                     .map(|spec| spec.risk)
-                    .ok_or_else(|| {
-                        protocol_error("not_found", format!("no capability {capability}"))
-                    })?;
+                    .ok_or_else(|| protocol_error("not_found", format!("没有能力 {capability}")))?;
                 // A rule for a call that never asks would do nothing, and an
                 // irreversible call is confirmed with identity every time.
                 match risk {
@@ -850,15 +844,13 @@ impl Controller {
                     RiskLevel::ReadOnly => {
                         return Err(protocol_error(
                             "not_preauthorizable",
-                            format!("{capability} is read-only and never asks for confirmation"),
+                            format!("{capability} 是只读能力，从来不需要确认，不用预授权"),
                         ));
                     }
                     RiskLevel::Irreversible => {
                         return Err(protocol_error(
                             "not_preauthorizable",
-                            format!(
-                                "{capability} is irreversible; it is confirmed with the PIN every time"
-                            ),
+                            format!("{capability} 是不可逆能力，每次都要用 PIN 确认，不能预授权"),
                         ));
                     }
                 }
@@ -893,7 +885,7 @@ impl Controller {
                         let _ = self.preauths.revoke(&created.id);
                         protocol_error(
                             "audit_unavailable",
-                            format!("the pre-authorization was not created: {error}"),
+                            format!("审计日志写入失败，没有创建预授权：{error}"),
                         )
                     })?;
                 Ok(Reply::Preauthorized {
@@ -908,9 +900,7 @@ impl Controller {
                     .preauths
                     .revoke(&id)
                     .map_err(storage_error)?
-                    .ok_or_else(|| {
-                        protocol_error("not_found", format!("no pre-authorization {id}"))
-                    })?;
+                    .ok_or_else(|| protocol_error("not_found", format!("没有预授权 {id}")))?;
                 self.audit
                     .append(AuditEvent::PreauthorizationRevoked {
                         id: revoked.id.clone(),
@@ -919,7 +909,7 @@ impl Controller {
                     .map_err(|error| {
                         protocol_error(
                             "audit_unavailable",
-                            format!("the pre-authorization was revoked, but audit failed: {error}"),
+                            format!("预授权已撤销，但审计日志写入失败：{error}"),
                         )
                     })?;
                 Ok(Reply::PreauthorizationRevoked { id: revoked.id })
@@ -964,7 +954,7 @@ impl Controller {
                         self.butler.sync_caller(&registered.id);
                         protocol_error(
                             "audit_unavailable",
-                            format!("the caller was not registered: {error}"),
+                            format!("审计日志写入失败，没有注册调用方：{error}"),
                         )
                     })?;
                 Ok(Reply::CallerRegistered { caller: registered })
@@ -978,7 +968,7 @@ impl Controller {
                     .callers()
                     .remove(&id)
                     .map_err(storage_error)?
-                    .ok_or_else(|| protocol_error("not_found", format!("no caller {id}")))?;
+                    .ok_or_else(|| protocol_error("not_found", format!("没有调用方 {id}")))?;
                 // From here on it holds nothing, tasks under way included,
                 // and none of its standing permissions outlive it.
                 self.butler.sync_caller(&revoked.id);
@@ -1025,7 +1015,7 @@ impl Controller {
                     self.audit.append(event).map_err(|error| {
                         protocol_error(
                             "audit_unavailable",
-                            format!("the caller was revoked, but audit failed: {error}"),
+                            format!("调用方已撤销，但审计日志写入失败：{error}"),
                         )
                     })?;
                 }
@@ -1041,7 +1031,7 @@ impl Controller {
                 if limit == 0 || limit > MAX_ACTIVITY {
                     return Err(protocol_error(
                         "invalid_argument",
-                        format!("activity limit must be between 1 and {MAX_ACTIVITY}"),
+                        format!("活动条数必须在 1 到 {MAX_ACTIVITY} 之间"),
                     ));
                 }
                 Ok(Reply::Activity {
@@ -1108,20 +1098,20 @@ impl Controller {
             if !given {
                 return Err(protocol_error(
                     "not_found",
-                    format!("no capability {capability}"),
+                    format!("没有能力 {capability}"),
                 ));
             }
         }
         if capability.as_str().is_empty() || capability.as_str().len() > MAX_CAPABILITY_NAME_BYTES {
             return Err(protocol_error(
                 "invalid_argument",
-                "capability name must be 1 to 128 bytes",
+                "能力名必须是 1 到 128 字节",
             ));
         }
         if !args.is_object() {
             return Err(protocol_error(
                 "invalid_argument",
-                "capability arguments must be a JSON object",
+                "能力参数必须是 JSON 对象",
             ));
         }
         let target = {
@@ -1131,13 +1121,13 @@ impl Controller {
                 None if view.specs.iter().any(|spec| spec.name == capability) => {
                     return Err(protocol_error(
                         "not_readable",
-                        format!("{capability} is not a read-only capability; submit an intent"),
+                        format!("{capability} 不是只读能力，不能直接读取；请用 submit 提交意图"),
                     ));
                 }
                 None => {
                     return Err(protocol_error(
                         "not_found",
-                        format!("no capability {capability}"),
+                        format!("没有能力 {capability}"),
                     ));
                 }
             }
@@ -1150,7 +1140,7 @@ impl Controller {
             Ok(Err(error)) => Err(protocol_error("capability_failed", error.to_string())),
             Err(_) => Err(protocol_error(
                 "capability_failed",
-                format!("{capability} did not answer within 10 seconds"),
+                format!("{capability} 10 秒内没有回答"),
             )),
         }
     }
@@ -1170,7 +1160,7 @@ async fn send_response<W: AsyncWrite + Unpin>(
                     &Response::error(
                         response.id,
                         "response_too_large",
-                        "response exceeds the 1 MiB protocol limit; use the paged task list or a narrower read",
+                        "回复超过协议的 1 MiB 上限；请分页列出任务，或缩小读取范围",
                     ),
                 )
                 .await
@@ -1212,7 +1202,7 @@ async fn serve_connection(stream: UnixStream, controller: Arc<Controller>) -> io
                 Response::error(
                     request.id,
                     "unsupported_version",
-                    format!("supported protocol version is {VERSION}"),
+                    format!("只支持协议版本 {VERSION}"),
                 ),
             )
             .await?;

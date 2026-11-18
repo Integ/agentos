@@ -1809,8 +1809,13 @@ impl Butler {
             })?;
         }
         let keys: Vec<&str> = calls.iter().map(|(_, key, _)| key.as_str()).collect();
+        // The time worked so far goes down with the start: a stretch is
+        // otherwise only recorded when it ends, and a service that stops
+        // mid-call would leave the task reporting no time at all.
+        let worked_ms = stretch.active_ms();
         let started = self.tasks.update(id, |t| {
             if !t.state.is_terminal() {
+                t.usage.active_ms = t.usage.active_ms.max(worked_ms);
                 t.state = TaskState::Running;
                 for step in t
                     .steps

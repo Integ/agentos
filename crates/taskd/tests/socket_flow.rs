@@ -20,7 +20,7 @@ use agentos_ipc::{
 };
 use agentos_planner::{Plan, Planner, RulePlanner, Step};
 use agentos_policy::PolicyEngine;
-use agentos_runtime::{Task, TaskId, TaskState, TaskStore};
+use agentos_runtime::{StepState, Task, TaskId, TaskState, TaskStore};
 use agentos_services::registry::CapabilityRegistry;
 use agentos_taskd::builtin;
 use agentos_taskd::butler::grant_manifest;
@@ -756,6 +756,12 @@ async fn stopping_a_pending_confirmation_marks_it_interrupted_without_invoking()
     let task = harness.tasks.get(id).unwrap();
     assert_eq!(task.state, TaskState::Interrupted);
     assert!(task.confirmation.is_none());
+    // The step that waited for approval never ran and never will: it is
+    // skipped, not left looking like it still waits.
+    assert!(task
+        .steps
+        .iter()
+        .all(|step| step.state == StepState::Skipped));
     assert_eq!(capability.calls.load(Ordering::SeqCst), 0);
 }
 

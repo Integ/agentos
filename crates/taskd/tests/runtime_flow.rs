@@ -251,7 +251,8 @@ async fn cancelling_in_flight_capability_keeps_cancelled_and_skips_later_steps()
         finished.steps[0].result.as_ref().unwrap()["performed"],
         true
     );
-    assert_eq!(finished.steps[1].state, StepState::Pending);
+    // Never started and never will: skipped, not shown as still to come.
+    assert_eq!(finished.steps[1].state, StepState::Skipped);
     assert_eq!(gated_calls.load(Ordering::SeqCst), 1);
     assert_eq!(later_calls.load(Ordering::SeqCst), 0);
     drop(runner);
@@ -423,7 +424,7 @@ async fn cancelling_abandons_an_abortable_call_and_records_its_outcome_as_unknow
         .as_ref()
         .and_then(Value::as_str)
         .is_some_and(|text| text.contains("未知")));
-    assert_eq!(task.steps[1].state, StepState::Pending);
+    assert_eq!(task.steps[1].state, StepState::Skipped);
     assert_eq!(later_calls.load(Ordering::SeqCst), 0);
     // Guards the audit trail: the start marker is closed by an interruption,
     // never by a result nobody saw.

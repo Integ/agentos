@@ -204,9 +204,9 @@ pub struct CapabilitySpec {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CapabilityError {
-    #[error("invalid arguments: {0}")]
+    #[error("参数无效：{0}")]
     InvalidArgs(String),
-    #[error("capability failed: {0}")]
+    #[error("执行失败：{0}")]
     Failed(String),
 }
 

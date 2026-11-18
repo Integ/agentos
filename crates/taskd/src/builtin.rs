@@ -251,6 +251,98 @@ pub struct NotesRestore {
     notebook: Arc<Notebook>,
 }
 
+/// Rewrite or remove one note in place. Without these a planner asked to
+/// change one note clears the notebook and appends everything again, which
+/// spends the single restore snapshot on an edit: the user can then no
+/// longer clear, and a restore brings back stale copies.
+pub struct NotesUpdate {
+    spec: CapabilitySpec,
+    notebook: Arc<Notebook>,
+}
+
+pub struct NotesRemove {
+    spec: CapabilitySpec,
+    notebook: Arc<Notebook>,
+}
+
+fn note_text(args: &Value, key: &str) -> Result<String, CapabilityError> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && t.chars().count() <= MAX_NOTE_CHARS)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            CapabilityError::InvalidArgs(format!(
+                "`{key}` 必须是不超过 {MAX_NOTE_CHARS} 个字符的非空文字"
+            ))
+        })
+}
+
+/// The 0-based position of note `index` (1-based, as `notes.list` numbers
+/// them), but only while it still reads `current`. Other tasks may change
+/// the notebook between the list a planner read and this call; matching
+/// the text keeps a shifted index from changing the wrong note.
+fn locate_note(notes: &[String], args: &Value) -> Result<usize, CapabilityError> {
+    let index = args
+        .get("index")
+        .and_then(Value::as_u64)
+        .filter(|i| *i >= 1)
+        .ok_or_else(|| CapabilityError::InvalidArgs("`index` 必须是从 1 开始的笔记编号".into()))?;
+    let current = note_text(args, "current")?;
+    let position = usize::try_from(index - 1).unwrap_or(usize::MAX);
+    match notes.get(position) {
+        Some(note) if *note == current => Ok(position),
+        Some(note) => Err(CapabilityError::Failed(format!(
+            "第 {index} 条笔记现在是“{note}”，不是“{current}”；笔记可能已被改动，请重新列出后再试。没有做任何修改。"
+        ))),
+        None => Err(CapabilityError::Failed(format!(
+            "没有第 {index} 条笔记（现在共 {} 条）；没有做任何修改。",
+            notes.len()
+        ))),
+    }
+}
+
+#[async_trait]
+impl Capability for NotesUpdate {
+    fn spec(&self) -> &CapabilitySpec {
+        &self.spec
+    }
+
+    async fn invoke(&self, args: Value) -> Result<Value, CapabilityError> {
+        validate_args(&args, &["index", "current", "text"])?;
+        let text = note_text(&args, "text")?;
+        self.notebook.change(|data| {
+            let position = locate_note(&data.notes, &args)?;
+            let previous = std::mem::replace(&mut data.notes[position], text.clone());
+            Ok(json!({
+                "index": position + 1,
+                "previous": previous,
+                "message": format!("已把第 {} 条笔记从“{previous}”改为“{text}”", position + 1),
+            }))
+        })
+    }
+}
+
+#[async_trait]
+impl Capability for NotesRemove {
+    fn spec(&self) -> &CapabilitySpec {
+        &self.spec
+    }
+
+    async fn invoke(&self, args: Value) -> Result<Value, CapabilityError> {
+        validate_args(&args, &["index", "current"])?;
+        self.notebook.change(|data| {
+            let position = locate_note(&data.notes, &args)?;
+            let removed = data.notes.remove(position);
+            Ok(json!({
+                "removed": removed,
+                "count": data.notes.len(),
+                "message": format!("已删除第 {} 条笔记：{removed}；需要时可以再记一次", position + 1),
+            }))
+        })
+    }
+}
+
 #[async_trait]
 impl Capability for NotesAppend {
     fn spec(&self) -> &CapabilitySpec {
@@ -321,7 +413,12 @@ impl Capability for NotesClear {
                 }
                 data.undo = Some(std::mem::take(&mut data.notes));
             }
-            Ok(json!({"removed": removed, "message": format!("已清空 {removed} 条笔记；可用“恢复笔记”撤销最近一次清空")}))
+            let message = if removed == 0 {
+                "笔记本来就是空的，没有清空任何内容".to_string()
+            } else {
+                format!("已清空 {removed} 条笔记；可用“恢复笔记”撤销最近一次清空")
+            };
+            Ok(json!({"removed": removed, "message": message}))
         })
     }
 }
@@ -370,9 +467,39 @@ fn register(reg: &mut CapabilityRegistry, notebook: Notebook) -> NoteStore {
     reg.register(Arc::new(NotesClear {
         spec: spec(
             "notes.clear",
-            "清空全部笔记，保留一次可恢复快照；已有快照时须先恢复",
+            "清空全部笔记，保留一次可恢复快照；已有快照时须先恢复。只在用户要清空全部笔记时使用，改一条或删一条用 notes.update、notes.remove",
             RiskLevel::Reversible,
             empty_schema(),
+        ),
+        notebook: notebook.clone(),
+    }));
+    let edit_schema = |with_text: bool| {
+        let mut properties = json!({
+            "index": {"type": "integer", "minimum": 1, "description": "notes.list 里的编号，从 1 开始"},
+            "current": {"type": "string", "minLength": 1, "maxLength": MAX_NOTE_CHARS, "description": "这条笔记现在的原文，用来确认没有改错"},
+        });
+        let mut required = vec!["index", "current"];
+        if with_text {
+            properties["text"] = json!({"type": "string", "minLength": 1, "maxLength": MAX_NOTE_CHARS, "description": "改成的新内容"});
+            required.push("text");
+        }
+        json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})
+    };
+    reg.register(Arc::new(NotesUpdate {
+        spec: spec(
+            "notes.update",
+            "修改一条笔记的内容（先用 notes.list 看编号和原文）；不影响其他笔记和清空快照",
+            RiskLevel::Reversible,
+            edit_schema(true),
+        ),
+        notebook: notebook.clone(),
+    }));
+    reg.register(Arc::new(NotesRemove {
+        spec: spec(
+            "notes.remove",
+            "删除一条笔记（先用 notes.list 看编号和原文）；结果里带着删掉的原文，不影响清空快照",
+            RiskLevel::Reversible,
+            edit_schema(false),
         ),
         notebook: notebook.clone(),
     }));
@@ -485,6 +612,65 @@ mod tests {
         invoke(&reopened, "notes.restore", json!({})).await;
         assert_eq!(*notes.lock().unwrap(), vec!["before", "after"]);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn editing_one_note_leaves_the_clear_snapshot_alone() {
+        // Guards the restore promise: an edit must not spend the one
+        // snapshot that "恢复笔记" brings back.
+        let dir = temp_dir("edit");
+        let path = dir.join("notes.json");
+        let mut reg = CapabilityRegistry::new();
+        let notes = register_persistent(&mut reg, &path).unwrap();
+        invoke(&reg, "notes.append", json!({"text":"周五交房租"})).await;
+        invoke(&reg, "notes.append", json!({"text":"周六去超市"})).await;
+        let updated = invoke(
+            &reg,
+            "notes.update",
+            json!({"index": 1, "current": "周五交房租", "text": "周五下午交房租"}),
+        )
+        .await;
+        assert_eq!(updated["previous"], "周五交房租");
+        invoke(
+            &reg,
+            "notes.remove",
+            json!({"index": 2, "current": "周六去超市"}),
+        )
+        .await;
+        assert_eq!(*notes.lock().unwrap(), vec!["周五下午交房租"]);
+        // No snapshot was taken, so clearing still works and restores exactly.
+        invoke(&reg, "notes.clear", json!({})).await;
+        invoke(&reg, "notes.restore", json!({})).await;
+        assert_eq!(*notes.lock().unwrap(), vec!["周五下午交房租"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn an_edit_aimed_at_a_note_that_moved_changes_nothing() {
+        let mut reg = CapabilityRegistry::new();
+        let notes = register_all(&mut reg);
+        invoke(&reg, "notes.append", json!({"text":"a"})).await;
+        invoke(&reg, "notes.append", json!({"text":"b"})).await;
+        for (name, args) in [
+            (
+                "notes.update",
+                json!({"index": 1, "current": "b", "text": "x"}),
+            ),
+            ("notes.remove", json!({"index": 3, "current": "b"})),
+            ("notes.remove", json!({"index": 0, "current": "a"})),
+            (
+                "notes.update",
+                json!({"index": 1, "current": "a", "text": " "}),
+            ),
+        ] {
+            let result = reg
+                .get(&CapabilityName::new(name))
+                .unwrap()
+                .invoke(args.clone())
+                .await;
+            assert!(result.is_err(), "{name} {args}");
+        }
+        assert_eq!(*notes.lock().unwrap(), vec!["a", "b"]);
     }
 
     #[test]

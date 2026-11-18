@@ -411,7 +411,7 @@ async fn a_failure_the_planner_recovers_from_does_not_fail_the_task() {
                 ("notes.append", json!({"text": "不应执行"})),
             ]),
             1 => {
-                assert_eq!(s.last[0], (false, "capability failed: 磁盘不可用".into()));
+                assert_eq!(s.last[0], (false, "执行失败：磁盘不可用".into()));
                 assert!(!s.last[1].0 && s.last[1].1.contains("未执行"));
                 call("notes.append", json!({"text": "改用笔记"}))
             }
@@ -993,7 +993,9 @@ async fn an_unanswered_question_is_never_an_outcome_and_cancelling_closes_it() {
     h.reply(1, 0, "Alice").await;
     let task = h.task(1);
     assert_eq!(task.state, TaskState::Cancelled);
-    assert_eq!(task.steps[0].state, StepState::Pending);
+    // The question was never answered and never will be: it is skipped, not
+    // left looking like it still waits.
+    assert_eq!(task.steps[0].state, StepState::Skipped);
     assert_eq!(h.seen.lock().unwrap().len(), 1);
 }
 

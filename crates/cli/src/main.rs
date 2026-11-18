@@ -35,7 +35,12 @@ async fn main() -> io::Result<()> {
                 | Command::RegisterCaller { pin, .. },
             ) = (options.pin_stdin, &mut command)
             {
-                eprint!("PIN：");
+                // A prompt only makes sense to someone typing. Piped in, it
+                // would run into the reply on the same line.
+                let typed = std::io::IsTerminal::is_terminal(&std::io::stdin());
+                if typed {
+                    eprint!("PIN：");
+                }
                 let mut line = String::new();
                 std::io::stdin().read_line(&mut line)?;
                 *pin = Some(line.trim().to_string());

@@ -221,7 +221,14 @@ pub fn task_detail(task: &Task, include_token: bool) -> String {
             )
         });
     }
-    if task.state == TaskState::Cancelled {
+    // The service's own cancellation message already says this; repeat it
+    // only when the task's message says something else.
+    if task.state == TaskState::Cancelled
+        && !task
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("已开始的能力调用可能仍产生结果"))
+    {
         lines.push("  后续步骤已停止；已开始的调用可能仍产生结果。".into());
     }
     lines.join("\n")
@@ -559,6 +566,24 @@ mod tests {
         );
         assert!(view.contains("/quit（后台任务继续）"));
         assert!(!view.contains('\x1b'));
+    }
+
+    #[test]
+    fn a_cancelled_task_says_once_that_started_calls_may_still_finish() {
+        let store = TaskStore::memory();
+        let task = store
+            .create(Intent {
+                id: IntentId(0),
+                source: DeviceId::new("test"),
+                speaker: None,
+                text: "x".into(),
+                urgency: Urgency::Normal,
+                at_ms: now_ms(),
+            })
+            .unwrap();
+        let cancelled = store.cancel(task.id).unwrap();
+        let detail = task_detail(&cancelled, true);
+        assert_eq!(detail.matches("可能仍产生结果").count(), 1, "{detail}");
     }
 
     #[test]
