@@ -246,8 +246,38 @@ fn verify_audit(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Name the state file a startup failure came from and what to do about
+/// it. A damaged file is never repaired or replaced automatically (it may be
+/// the only copy of the user's data), so the person reading the log, or
+/// `systemctl --user status`, must learn which file it is and that moving it
+/// aside lets the service start empty.
+fn state_file<T>(what: &str, path: &Path, result: io::Result<T>) -> io::Result<T> {
+    result.map_err(|error| {
+        let message = if error.kind() == io::ErrorKind::InvalidData {
+            format!(
+                "{what}（{}）已损坏，读不出来：{error}。文件没有被改动；修好它，或者把它改名移走（例如加上 .bad 后缀）再启动，那样{what}会从空白开始",
+                path.display()
+            )
+        } else {
+            format!("打不开{what}（{}）：{error}", path.display())
+        };
+        io::Error::new(error.kind(), message)
+    })
+}
+
 #[tokio::main]
-async fn main() -> io::Result<()> {
+async fn main() -> std::process::ExitCode {
+    match serve().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            // Display, not Debug: this is the line the user reads.
+            eprintln!("agentos-taskd 无法运行：{error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn serve() -> io::Result<()> {
     let options = match options(std::env::args().skip(1))? {
         Ok(options) => options,
         Err(text) => {
@@ -304,7 +334,11 @@ async fn main() -> io::Result<()> {
     let socket = options
         .socket
         .unwrap_or_else(|| agentos_ipc::default_socket_path(&state_dir));
-    let tasks = Arc::new(TaskStore::open(&state_dir)?);
+    let tasks = Arc::new(state_file(
+        "任务记录",
+        &state_dir.join("tasks.json"),
+        TaskStore::open(&state_dir),
+    )?);
     // A damaged or altered log must not keep the machine from starting: it
     // is set aside untouched and a new one begins, saying so.
     let (audit, set_aside) = AuditLog::open_or_set_aside(audit_path)?;
@@ -322,16 +356,34 @@ async fn main() -> io::Result<()> {
         );
         audit.append(agentos_audit::AuditEvent::DaemonCrashed { summary })?;
     }
-    let pins = Arc::new(PinVault::open(&pin_path)?.with_audit(audit.clone()));
+    let pins = Arc::new(
+        state_file("PIN 文件", &pin_path, PinVault::open(&pin_path))?.with_audit(audit.clone()),
+    );
 
     let mut registry = CapabilityRegistry::new();
-    builtin::register_persistent(&mut registry, state_dir.join("notes.json"))?;
-    let board = Blackboard::open(state_dir.join("blackboard.json"))?;
+    let notes_path = state_dir.join("notes.json");
+    state_file(
+        "笔记",
+        &notes_path,
+        builtin::register_persistent(&mut registry, &notes_path),
+    )?;
+    let board_path = state_dir.join("blackboard.json");
+    let board = state_file("黑板", &board_path, Blackboard::open(&board_path))?;
     blackboard::register_all(&mut registry, board.clone());
 
     // Self-evolution: plugins the system wrote for itself, sandboxed.
     let sandbox = SandboxMode::detect();
-    let plugins = Arc::new(PluginManager::open(state_dir.join("evolve"), sandbox)?);
+    let evolve_dir = state_dir.join("evolve");
+    let plugins = Arc::new(state_file(
+        "插件目录",
+        &evolve_dir,
+        PluginManager::open(&evolve_dir, sandbox),
+    )?);
+    // A damaged plugin does not stop the service, but it must not vanish
+    // without a word either.
+    for problem in plugins.problems() {
+        eprintln!("{problem}");
+    }
     let text_model = text_model.or_else(fallback_text_model);
     let generator: Arc<dyn PluginGenerator> = match text_model.clone() {
         Some(model) => Arc::new(LlmGenerator::new(model)),
@@ -386,6 +438,8 @@ async fn main() -> io::Result<()> {
     if voice.output_enabled() {
         expr.add_output(Arc::new(SpeechOutput::new(voice.clone())));
     }
+    let preauth_path = state_dir.join("preauthorizations.json");
+    let callers_path = state_dir.join("callers.json");
     let mut butler = Butler::with_store(
         butler_id,
         registry,
@@ -400,10 +454,16 @@ async fn main() -> io::Result<()> {
     .with_pin_vault(pins.clone())
     .with_plugins(plugins)
     .with_budget(budget)
-    .with_preauthorizations(Arc::new(PreauthStore::open(
-        state_dir.join("preauthorizations.json"),
+    .with_preauthorizations(Arc::new(state_file(
+        "预授权",
+        &preauth_path,
+        PreauthStore::open(&preauth_path),
     )?))
-    .with_callers(Arc::new(CallerStore::open(state_dir.join("callers.json"))?));
+    .with_callers(Arc::new(state_file(
+        "外部调用方",
+        &callers_path,
+        CallerStore::open(&callers_path),
+    )?));
     // AGENTOS_JUDGE=1: a model reviews allowed L1+ steps before they run.
     let judge_on = std::env::var("AGENTOS_JUDGE").is_ok_and(|v| v == "1" || v == "on");
     let judge = match (&text_model, judge_on) {

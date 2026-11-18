@@ -4,7 +4,9 @@
 //!
 //! Protocol: the script receives the call arguments as one JSON object on
 //! stdin and prints one JSON object on stdout (with a `message` string for the
-//! human). A non-zero exit status is a failure; stderr is the reason.
+//! human). A non-zero exit status is a failure; stderr is the reason. So is
+//! output whose `error` field is set: generated code often reports bad input
+//! that way and exits 0, and a task must never call that a success.
 //!
 //! Every run happens in a sandbox (bubblewrap when available): read-only
 //! system, no home directory, no network unless the manifest asks for it, and
@@ -90,6 +92,11 @@ pub struct TestCase {
     /// The `message` field of the output must contain this text.
     #[serde(default)]
     pub expect_contains: Option<String>,
+    /// The call must fail (bad input is refused, not answered). Then
+    /// `expect_contains` is looked for in the failure reason instead.
+    /// Omitted when false, so manifests written before it hash the same.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub expect_failure: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -353,6 +360,17 @@ pub async fn run_plugin(
     };
     // Only trusted, built-in capabilities may chain further steps.
     obj.remove("follow_up");
+    if obj
+        .get("error")
+        .is_some_and(|e| !e.is_null() && *e != Value::Bool(false))
+    {
+        let reason = obj
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| obj["error"].to_string());
+        return Err(CapabilityError::Failed(format!("插件报告了错误：{reason}")));
+    }
     Ok(value)
 }
 
@@ -376,7 +394,13 @@ impl PluginCapability {
     ) -> Self {
         let spec = CapabilitySpec {
             name: manifest.name.clone(),
-            description: format!("{}（自生成插件 v{version}）", manifest.description),
+            // Said where the model reads it when choosing and when reading
+            // the result: a general rule in the system prompt was not enough
+            // for models to doubt a plugin's plainly wrong answer.
+            description: format!(
+                "{}（AgentOS 自己编写的插件 v{version}，没有经过人工验证：结果和常识明显不符时不要照搬，告诉用户并提出修复）",
+                manifest.description
+            ),
             risk: effective_risk(&manifest, sandbox),
             input_schema: manifest.input_schema.clone(),
         };
@@ -426,6 +450,15 @@ impl Capability for PluginCapability {
             &args,
         )
         .await
+        .map_err(|error| match error {
+            // A failing plugin can be repaired, unlike most failures; say so
+            // in the result the planner reads next, so the user hears it.
+            CapabilityError::Failed(reason) => CapabilityError::Failed(format!(
+                "{reason}\n（{} v{} 是 AgentOS 自己编写的插件，可以修复：告诉用户它出错了，并提出交给能力工匠 Agent 修复，或用 evolve.rollback 切回旧版本。）",
+                self.manifest.name, self.version
+            )),
+            other => other,
+        })
     }
 }
 
@@ -498,6 +531,44 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(v["message"], "got ok");
         assert!(v.get("follow_up").is_none(), "plugins may not chain steps");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn output_that_reports_an_error_is_a_failure_even_with_exit_0() {
+        // Guards honest outcomes: "invalid input" printed with exit 0 must
+        // not make the step, and the task, a success.
+        let dir = temp_dir("error-field");
+        std::fs::write(
+            dir.join("main.sh"),
+            "printf '{\"error\":\"invalid\",\"message\":\"输入无效\"}'\n",
+        )
+        .unwrap();
+        let err = run_plugin(
+            SandboxMode::detect(),
+            &manifest("t.err", "sh"),
+            &dir,
+            None,
+            &json!({}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("输入无效"), "{err}");
+        std::fs::write(
+            dir.join("main.sh"),
+            "printf '{\"error\":null,\"message\":\"ok\"}'\n",
+        )
+        .unwrap();
+        let ok = run_plugin(
+            SandboxMode::detect(),
+            &manifest("t.err", "sh"),
+            &dir,
+            None,
+            &json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ok["message"], "ok");
         let _ = std::fs::remove_dir_all(dir);
     }
 

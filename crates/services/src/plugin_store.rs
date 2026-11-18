@@ -59,6 +59,12 @@ pub struct PluginInfo {
     pub current: Option<u32>,
     pub description: String,
     pub risk: RiskLevel,
+    /// Why the plugin cannot run although it is meant to, if it cannot.
+    /// A damaged plugin is still listed: hiding it would leave the user and
+    /// the agent believing it was never installed, when an earlier version
+    /// on disk could be rolled back to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -247,21 +253,76 @@ impl PluginManager {
         self.names()
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|name| {
-                let versions = self.versions(&name).ok()?;
-                let current = self.current(&name).ok()?;
-                let latest = self
-                    .read_version(&name, current.or(versions.last().copied())?)
-                    .ok()?;
-                Some(PluginInfo {
-                    name: CapabilityName::new(name),
-                    versions,
-                    current,
-                    risk: effective_risk(&latest.manifest, self.sandbox),
-                    description: latest.manifest.description,
-                })
-            })
+            .map(|name| self.inspect(&name))
             .collect()
+    }
+
+    /// What state one installed plugin is in, including when it is damaged.
+    fn inspect(&self, name: &str) -> PluginInfo {
+        let versions = self.versions(name).unwrap_or_default();
+        let readable = |v: u32| self.read_version(name, v).ok();
+        let raw_current = self
+            .plugin_dir(name)
+            .ok()
+            .map(|dir| std::fs::read_to_string(dir.join("current")));
+        let (current, problem) = match raw_current {
+            None | Some(Err(_)) if versions.is_empty() => (None, Some("没有任何版本".to_string())),
+            Some(Err(e)) if e.kind() == io::ErrorKind::NotFound => (None, None),
+            None | Some(Err(_)) => (None, Some("读不出当前版本记录".to_string())),
+            Some(Ok(text)) => match text.trim().parse::<u32>() {
+                Err(_) => (None, Some(format!("当前版本记录无效（{:?}）", text.trim()))),
+                Ok(v) if readable(v).is_none() => (
+                    None,
+                    Some(format!("当前版本 v{v} 不存在或已损坏，没有加载")),
+                ),
+                Ok(v) => (Some(v), None),
+            },
+        };
+        // Describe it by the version that runs, else the newest one that can
+        // still be read; a fallback a rollback could switch to is named.
+        let shown = current
+            .and_then(readable)
+            .or_else(|| versions.iter().rev().find_map(|v| readable(*v)));
+        let problem = problem.map(
+            |problem| match self.rollback_target(name, &versions, None) {
+                Some(v) => format!("{problem}；可以用 evolve.rollback 切回 v{v}"),
+                None => format!("{problem}；没有能用的旧版本，需要重新编写"),
+            },
+        );
+        PluginInfo {
+            name: CapabilityName::new(name),
+            versions: versions.clone(),
+            current,
+            risk: shown.as_ref().map_or(RiskLevel::Irreversible, |d| {
+                effective_risk(&d.manifest, self.sandbox)
+            }),
+            description: shown.map_or_else(
+                || "（没有能读出的版本）".to_string(),
+                |d| d.manifest.description,
+            ),
+            problem,
+        }
+    }
+
+    /// One line per installed plugin that is damaged, for the service to
+    /// report when it starts.
+    pub fn problems(&self) -> Vec<String> {
+        self.list()
+            .into_iter()
+            .filter_map(|p| Some(format!("插件 {}：{}", p.name, p.problem?)))
+            .collect()
+    }
+
+    /// The newest readable version below `below` (all versions when the
+    /// current one is missing or damaged).
+    fn rollback_target(&self, name: &str, versions: &[u32], below: Option<u32>) -> Option<u32> {
+        let below = below.unwrap_or(u32::MAX);
+        versions
+            .iter()
+            .rev()
+            .copied()
+            .filter(|v| *v < below)
+            .find(|v| self.read_version(name, *v).is_ok())
     }
 
     /// Run the draft's self-tests in a scratch directory. `None` means the
@@ -288,7 +349,20 @@ impl PluginManager {
         for t in &draft.manifest.tests {
             let r = run_plugin(self.sandbox, &draft.manifest, &code, Some(&data), &t.args).await;
             let (passed, detail) = match r {
+                Err(e) if t.expect_failure => {
+                    let reason = e.to_string();
+                    match &t.expect_contains {
+                        Some(want) if !reason.contains(want.as_str()) => {
+                            (false, format!("失败原因应包含「{want}」，实际：{reason}"))
+                        }
+                        _ => (true, reason),
+                    }
+                }
                 Err(e) => (false, e.to_string()),
+                Ok(v) if t.expect_failure => (
+                    false,
+                    format!("这个用例应该失败（无效输入要以非零状态退出），实际成功了：{v}"),
+                ),
                 Ok(v) => match v.get("message").and_then(Value::as_str) {
                     None => (false, format!("输出缺少 message 字段：{v}")),
                     Some(msg) => match &t.expect_contains {
@@ -385,17 +459,19 @@ impl PluginManager {
             return Err(invalid(format!("没有安装过插件 {name}")));
         }
         let current = self.current(name)?;
+        // A current version that cannot be read is no floor: rolling back
+        // from it is how a damaged plugin is repaired.
+        let floor = current.filter(|v| self.read_version(name, *v).is_ok());
         let target = match to {
-            Some(v) if versions.contains(&v) => v,
-            Some(v) => return Err(invalid(format!("{name} 没有 v{v}"))),
-            None => {
-                let below = current.unwrap_or(u32::MAX);
-                *versions
-                    .iter()
-                    .rev()
-                    .find(|v| **v < below)
-                    .ok_or_else(|| invalid(format!("{name} 没有更早的版本")))?
+            Some(v) if versions.contains(&v) => {
+                self.read_version(name, v)
+                    .map_err(|e| invalid(format!("{name} 的 v{v} 已损坏，不能切换过去：{e}")))?;
+                v
             }
+            Some(v) => return Err(invalid(format!("{name} 没有 v{v}"))),
+            None => self
+                .rollback_target(name, &versions, floor)
+                .ok_or_else(|| invalid(format!("{name} 没有能用的更早版本")))?,
         };
         self.set_current(name, Some(target))?;
         Ok((current, target))
@@ -436,6 +512,7 @@ mod tests {
         m.tests = vec![TestCase {
             args: json!({}),
             expect_contains: Some(greeting.into()),
+            expect_failure: false,
         }];
         PluginDraft {
             manifest: m,
@@ -498,6 +575,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(pm.root());
     }
 
+    #[tokio::test]
+    async fn a_damaged_plugin_is_listed_with_its_problem_and_rolls_back_to_a_working_version() {
+        // Guards repairability: a plugin whose current version cannot be
+        // loaded is not silently forgotten, so a rollback can still save it.
+        let pm = pm("store-damaged");
+        for greeting in ["你好", "hello"] {
+            let id = pm.stage(draft("hi.say", greeting));
+            pm.install(&id).unwrap();
+        }
+        let current = pm.root().join("plugins").join("hi.say").join("current");
+        std::fs::write(&current, "7").unwrap();
+        assert!(pm.active().is_empty());
+        let info = pm.list();
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0].current, None);
+        let problem = info[0].problem.as_deref().unwrap();
+        assert!(
+            problem.contains("v7") && problem.contains("切回 v2"),
+            "{problem}"
+        );
+        assert_eq!(pm.problems().len(), 1);
+
+        std::fs::write(&current, "garbage").unwrap();
+        assert!(pm.list()[0].problem.is_some());
+
+        // v2 is damaged too: rollback skips it and lands on v1.
+        std::fs::write(&current, "7").unwrap();
+        std::fs::remove_file(pm.root().join("plugins/hi.say/versions/2/manifest.json")).unwrap();
+        assert_eq!(pm.rollback("hi.say", None).unwrap(), (Some(7), 1));
+        assert!(pm.rollback("hi.say", Some(2)).is_err());
+        let out = pm.active()[0].invoke(json!({})).await.unwrap();
+        assert_eq!(out["message"], "你好");
+        assert!(pm.list()[0].problem.is_none());
+        assert!(pm.problems().is_empty());
+        let _ = std::fs::remove_dir_all(pm.root());
+    }
+
     #[test]
     fn an_installed_version_is_complete_and_leaves_no_temporary_files() {
         // Guards the crash-safety of install: `current` only ever names a
@@ -536,6 +650,26 @@ mod tests {
         let t = pm.test_draft(&d).await.unwrap().unwrap();
         assert!(!t[0].passed);
         assert!(t[0].detail.contains("再见"));
+        let _ = std::fs::remove_dir_all(pm.root());
+    }
+
+    #[tokio::test]
+    async fn a_test_that_expects_failure_passes_only_when_the_plugin_refuses() {
+        // Guards the self-test of error handling: a plugin that "answers"
+        // bad input with exit 0 does not pass a case that expects refusal.
+        let pm = pm("store-expect-failure");
+        let mut d = draft("hi.say", "你好");
+        d.manifest.tests[0].expect_failure = true;
+        d.manifest.tests[0].expect_contains = Some("无效".into());
+        let t = pm.test_draft(&d).await.unwrap().unwrap();
+        assert!(!t[0].passed, "{:?}", t[0]);
+        d.source = "echo 输入无效 >&2\nexit 2\n".into();
+        let t = pm.test_draft(&d).await.unwrap().unwrap();
+        assert!(t[0].passed, "{:?}", t[0]);
+        // Old manifests, without the field, hash as before.
+        let plain = draft("hi.say", "你好");
+        let text = serde_json::to_string(&plain.manifest).unwrap();
+        assert!(!text.contains("expect_failure"));
         let _ = std::fs::remove_dir_all(pm.root());
     }
 
