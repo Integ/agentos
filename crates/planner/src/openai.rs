@@ -1,4 +1,9 @@
-//! Planner for any OpenAI-compatible Chat Completions endpoint.
+//! Planner for OpenAI and OpenAI-compatible services.
+//!
+//! OpenAI itself is spoken to through the Responses API (see
+//! [`crate::responses`]), the only one on which its newer models reason
+//! while using tools. Compatible servers mostly speak only Chat Completions,
+//! which this module implements; [`OpenAiApi`] chooses between the two.
 //!
 //! Works with OpenAI itself and with the many servers that speak the same
 //! protocol (vLLM, Ollama, LM Studio, DeepSeek, Qwen/DashScope, Moonshot, ...).
@@ -27,11 +32,58 @@ pub struct OpenAiConfig {
     /// or `http://localhost:11434/v1`.
     pub base_url: String,
     pub model: String,
+    /// Which of the two request formats to speak.
+    pub api: OpenAiApi,
+}
+
+/// The request format: OpenAI's Responses API, or Chat Completions, which
+/// most compatible servers (Ollama, vLLM, DeepSeek, Qwen …) implement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenAiApi {
+    Responses,
+    ChatCompletions,
+}
+
+impl OpenAiApi {
+    /// `responses` or `chat` (also `chat_completions`, `chat-completions`).
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "responses" => Some(Self::Responses),
+            "chat" | "chat_completions" | "chat-completions" => Some(Self::ChatCompletions),
+            _ => None,
+        }
+    }
+
+    /// Responses for OpenAI's own service, Chat Completions for any other
+    /// base URL: a compatible server cannot be assumed to have Responses.
+    pub fn default_for(base_url: &str) -> Self {
+        let host = base_url
+            .split_once("://")
+            .map_or(base_url, |(_, rest)| rest)
+            .split(['/', ':'])
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if host == "api.openai.com" {
+            Self::Responses
+        } else {
+            Self::ChatCompletions
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Responses => "Responses API",
+            Self::ChatCompletions => "Chat Completions",
+        }
+    }
 }
 
 impl OpenAiConfig {
-    /// Build from `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`.
-    /// Returns `None` unless a model is set and either a key or a base URL is.
+    /// Build from `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` and
+    /// `OPENAI_API`. Returns `None` unless a model is set and either a key or
+    /// a base URL is. An `OPENAI_API` that names no format falls back to the
+    /// default here; [`OpenAiConfig::api_from_env`] reports it.
     pub fn from_env() -> Option<Self> {
         let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let api_key = get("OPENAI_API_KEY");
@@ -39,11 +91,31 @@ impl OpenAiConfig {
         if api_key.is_none() && base_url.is_none() {
             return None;
         }
+        let base_url = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.into());
+        let api = Self::api_from_env()
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| OpenAiApi::default_for(&base_url));
         Some(Self {
             api_key,
-            base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.into()),
+            base_url,
             model: get("OPENAI_MODEL")?,
+            api,
         })
+    }
+
+    /// The format `OPENAI_API` asks for: `Ok(None)` when unset, an error
+    /// when it names neither.
+    pub fn api_from_env() -> Result<Option<OpenAiApi>, String> {
+        match std::env::var("OPENAI_API")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+        {
+            None => Ok(None),
+            Some(value) => OpenAiApi::parse(&value)
+                .map(Some)
+                .ok_or_else(|| format!("OPENAI_API={value} 无效，可选 responses 或 chat")),
+        }
     }
 }
 
@@ -251,6 +323,9 @@ pub struct OpenAiPlanner {
 struct CallError {
     message: String,
     wants_no_reasoning: bool,
+    /// The service read the request and refused the reasoning replayed in
+    /// it (Responses API).
+    rejects_replay: bool,
 }
 
 impl From<CallError> for String {
@@ -304,10 +379,11 @@ impl OpenAiPlanner {
     }
 
     async fn call(&self, body: &Value) -> Result<Value, CallError> {
-        let url = format!(
-            "{}/chat/completions",
-            self.cfg.base_url.trim_end_matches('/')
-        );
+        let path = match self.cfg.api {
+            OpenAiApi::Responses => "responses",
+            OpenAiApi::ChatCompletions => "chat/completions",
+        };
+        let url = format!("{}/{path}", self.cfg.base_url.trim_end_matches('/'));
         let resp = send_with_retry(self.retry, || {
             let req = self.http.post(&url).json(body);
             match &self.cfg.api_key {
@@ -319,11 +395,13 @@ impl OpenAiPlanner {
         .map_err(|e| CallError {
             message: format!("无法连接 {}：{e}", self.cfg.base_url),
             wants_no_reasoning: false,
+            rejects_replay: false,
         })?;
         let status = resp.status();
         let value: Value = resp.json().await.map_err(|e| CallError {
             message: format!("模型服务返回了无法解析的响应（HTTP {status}）：{e}"),
             wants_no_reasoning: false,
+            rejects_replay: false,
         })?;
         if !status.is_success() {
             let msg = value
@@ -333,6 +411,7 @@ impl OpenAiPlanner {
             return Err(CallError {
                 message: format!("模型服务错误（HTTP {status}）：{msg}"),
                 wants_no_reasoning: rejects_tools_with_reasoning(status, &value),
+                rejects_replay: crate::responses::rejects_replayed_reasoning(status, &value),
             });
         }
         Ok(value)
@@ -374,6 +453,16 @@ impl TextModel for OpenAiPlanner {
         system: &str,
         user: &str,
     ) -> (Result<String, String>, Option<Usage>) {
+        if self.cfg.api == OpenAiApi::Responses {
+            let body = crate::responses::text_request(&self.cfg, system, user);
+            return match self.call(&body).await {
+                Ok(resp) => (
+                    crate::responses::output_text(&resp),
+                    Some(crate::responses::response_usage(&self.cfg.model, &resp)),
+                ),
+                Err(error) => (Err(error.into()), Some(Usage::unknown(&self.cfg.model))),
+            };
+        }
         let body = json!({
             "model": self.cfg.model,
             "messages": [
@@ -414,6 +503,9 @@ impl Planner for OpenAiPlanner {
     }
 
     async fn plan_turn(&self, conv: &Conversation<'_>) -> Plan {
+        if self.cfg.api == OpenAiApi::Responses {
+            return self.plan_turn_responses(conv).await;
+        }
         let body = build_turn_request(&self.cfg, conv);
         // A refusal or an unusable answer was paid for like any other, and
         // a request that failed may have been: neither is recorded as free.
@@ -435,6 +527,42 @@ impl Planner for OpenAiPlanner {
     }
 }
 
+impl OpenAiPlanner {
+    /// One planning round on the Responses API, replaying the reasoning of
+    /// earlier rounds where it is still valid.
+    async fn plan_turn_responses(&self, conv: &Conversation<'_>) -> Plan {
+        let (body, prefix) = crate::responses::build(&self.cfg, conv, true);
+        let mut answer = self.call(&body).await;
+        let replayed = conv
+            .history
+            .iter()
+            .any(|round| round.turn.as_ref().is_some_and(|t| !t.content.is_empty()));
+        if replayed && answer.as_ref().is_err_and(|e| e.rejects_replay) {
+            // Send the history once more without its reasoning: the round
+            // loses the model's earlier line of thought, not the task. The
+            // refusal comes before any output, so it is not paid for twice.
+            answer = self
+                .call(&crate::responses::build(&self.cfg, conv, false).0)
+                .await;
+        }
+        match answer {
+            Ok(resp) => Plan {
+                usage: Some(crate::responses::response_usage(&self.cfg.model, &resp)),
+                turn: crate::responses::model_turn(&resp, prefix),
+                ..crate::responses::parse_response(&resp)
+            },
+            Err(e) => Plan {
+                usage: Some(Usage::unknown(&self.cfg.model)),
+                ..Plan::failed(e.message)
+            },
+        }
+    }
+
+    pub fn api(&self) -> OpenAiApi {
+        self.cfg.api
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,6 +574,7 @@ mod tests {
             api_key: key.map(str::to_string),
             base_url: base_url.into(),
             model: "test-model".into(),
+            api: OpenAiApi::ChatCompletions,
         }
     }
 
@@ -613,6 +742,127 @@ mod tests {
             .await;
         assert!(plan.steps.is_empty());
         assert!(plan.reply.unwrap().contains("model not found"));
+    }
+
+    fn responses_planner(url: &str) -> OpenAiPlanner {
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut cfg = cfg(url, Some("sk-test"));
+        cfg.api = OpenAiApi::Responses;
+        OpenAiPlanner::with_client(cfg, http)
+    }
+
+    #[test]
+    fn openai_itself_gets_the_responses_api_and_other_servers_chat_completions() {
+        // Compatible servers rarely implement Responses; OpenAI's newer
+        // models only reason with tools there.
+        assert_eq!(
+            OpenAiApi::default_for(DEFAULT_BASE_URL),
+            OpenAiApi::Responses
+        );
+        assert_eq!(
+            OpenAiApi::default_for("https://API.openai.com:443/v1/"),
+            OpenAiApi::Responses
+        );
+        for other in [
+            "http://localhost:11434/v1",
+            "https://api.deepseek.com/v1",
+            "https://api.openai.com.evil.example/v1",
+        ] {
+            assert_eq!(
+                OpenAiApi::default_for(other),
+                OpenAiApi::ChatCompletions,
+                "{other}"
+            );
+        }
+        assert_eq!(OpenAiApi::parse(" Responses "), Some(OpenAiApi::Responses));
+        assert_eq!(OpenAiApi::parse("chat"), Some(OpenAiApi::ChatCompletions));
+        assert_eq!(OpenAiApi::parse("completions"), None);
+    }
+
+    #[tokio::test]
+    async fn plans_over_the_responses_api_and_keeps_the_reasoning_turn() {
+        let (url, server) = one_shot_server(
+            "200 OK",
+            json!({"status": "completed", "model": "test-model", "output": [
+                {"id": "rs_1", "type": "reasoning", "summary": [], "encrypted_content": "e"},
+                {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "notes__append", "arguments": "{\"text\":\"x\"}"}
+            ], "usage": {"input_tokens": 10, "output_tokens": 3}}),
+        )
+        .await;
+        let plan = responses_planner(&format!("{url}/v1"))
+            .plan(&intent("记一下 x"), &specs())
+            .await;
+        assert!(plan.error.is_none(), "{:?}", plan.error);
+        assert_eq!(plan.steps[0].id, "call_1");
+        assert_eq!(plan.turn.unwrap().content.len(), 2);
+        assert_eq!(plan.usage.unwrap().input_tokens, Some(10));
+        let req = server.await.unwrap();
+        assert!(req.to_ascii_lowercase().starts_with("post /v1/responses"));
+        assert!(req.contains(r#""store":false"#));
+    }
+
+    #[tokio::test]
+    async fn refused_replayed_reasoning_is_dropped_and_the_round_asked_again() {
+        let call = json!({"status": "completed", "output": [
+            {"type": "message", "content": [{"type": "output_text", "text": "好了"}]}
+        ]});
+        let (url, server) = crate::test_http::sequence_server(vec![
+            (
+                "400 Bad Request",
+                json!({"error": {"message": "The encrypted content for item rs_1 could not be verified."}}),
+            ),
+            ("200 OK", call),
+        ])
+        .await;
+        let planner = responses_planner(&url);
+        let intent = intent("记一下 x");
+        let available = specs();
+        let (_, prefix) = crate::responses::build(
+            &planner.cfg,
+            &Conversation {
+                system: SYSTEM_PROMPT,
+                intent: &intent,
+                history: &[],
+                available: &available,
+            },
+            true,
+        );
+        let history = [crate::Round {
+            text: None,
+            calls: vec![Step {
+                id: "call_1".into(),
+                capability: CapabilityName::new("notes.append"),
+                args: json!({"text": "x"}),
+            }],
+            results: vec![crate::ToolResult {
+                id: "call_1".into(),
+                ok: true,
+                content: "{}".into(),
+            }],
+            turn: Some(crate::ModelTurn {
+                content: vec![
+                    json!({"id": "rs_1", "type": "reasoning", "encrypted_content": "e"}),
+                    json!({"type": "function_call", "call_id": "call_1", "name": "notes__append", "arguments": "{\"text\":\"x\"}"}),
+                ],
+                prefix,
+            }),
+        }];
+        let plan = planner
+            .plan_turn(&Conversation {
+                system: SYSTEM_PROMPT,
+                intent: &intent,
+                history: &history,
+                available: &available,
+            })
+            .await;
+        assert_eq!(plan.reply.as_deref(), Some("好了"));
+        let seen = server.await.unwrap();
+        assert!(seen[0].contains("encrypted_content"));
+        assert!(!seen[1].contains(r#""type":"reasoning""#));
+        assert!(
+            seen[1].contains("call_1"),
+            "the calls themselves still go back"
+        );
     }
 
     #[tokio::test]

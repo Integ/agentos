@@ -133,12 +133,17 @@ fn make_planner(choice: Option<String>) -> io::Result<Models> {
         let planner = OpenAiPlanner::new(cfg.clone()).map_err(io::Error::other)?;
         let text = OpenAiPlanner::new(cfg).map_err(io::Error::other)?;
         let label = format!(
-            "OpenAI 兼容规划器（{} @ {}）",
+            "OpenAI 兼容规划器（{} @ {} · {}）",
             planner.model(),
-            planner.base_url()
+            planner.base_url(),
+            planner.api().label()
         );
         Ok((Box::new(planner), Some(Arc::new(text)), label))
     };
+    // A mistyped OPENAI_API must not quietly pick the other format.
+    if choice.as_deref() != Some("rule") && choice.as_deref() != Some("claude") {
+        OpenAiConfig::api_from_env().map_err(|message| error(&message))?;
+    }
     match choice.as_deref() {
         Some("rule") => Ok(rule()),
         Some("claude") => claude(
