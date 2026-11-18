@@ -68,31 +68,6 @@ pub fn build_turn_request(cfg: &ClaudeConfig, conv: &Conversation<'_>) -> Value 
     build(cfg, conv, true).0
 }
 
-/// Identifies a system prompt and tool list. Kept with each recorded turn so
-/// the turn is replayed only while both are unchanged. Hashed in memory
-/// only: turns are never persisted, so the hash need not be stable across
-/// builds.
-fn prefix_of(system: &str, tools: &[Value]) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    system.hash(&mut hasher);
-    serde_json::to_string(tools)
-        .unwrap_or_default()
-        .hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
-/// The first round from which recorded turns are sent back verbatim: the
-/// trailing run of rounds produced under the current prefix. Earlier rounds
-/// go back rebuilt without their reasoning; dropping a leading run of
-/// reasoning blocks is allowed, editing what lies before a kept one is not.
-fn replay_from(history: &[crate::Round], prefix: &str) -> usize {
-    history
-        .iter()
-        .rposition(|round| round.turn.as_ref().is_none_or(|turn| turn.prefix != prefix))
-        .map_or(0, |last_stale| last_stale + 1)
-}
-
 /// The body, and the prefix it was built under. With `replay` off, every
 /// round is rebuilt without reasoning, which the service always accepts.
 fn build(cfg: &ClaudeConfig, conv: &Conversation<'_>, replay: bool) -> (Value, String) {
@@ -115,9 +90,9 @@ fn build(cfg: &ClaudeConfig, conv: &Conversation<'_>, replay: bool) -> (Value, S
         "role": "user",
         "content": [{ "type": "text", "text": user }],
     })];
-    let prefix = prefix_of(conv.system, &tools);
+    let prefix = crate::prefix_of(conv.system, &tools);
     let verbatim_from = if replay {
-        replay_from(conv.history, &prefix)
+        crate::replay_from(conv.history, &prefix)
     } else {
         conv.history.len()
     };
@@ -767,7 +742,7 @@ mod tests {
             results: vec![result("1"), result("2")],
             turn: Some(ModelTurn {
                 content,
-                prefix: prefix_of(system, &tools),
+                prefix: crate::prefix_of(system, &tools),
             }),
         }
     }

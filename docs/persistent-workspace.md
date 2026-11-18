@@ -195,7 +195,7 @@ cargo run -p agentos-taskd -- --planner openai
 | 规划器 | 配置 |
 | --- | --- |
 | Claude | `ANTHROPIC_API_KEY`；可选 `AGENTOS_MODEL`、`ANTHROPIC_BASE_URL` |
-| OpenAI 兼容 | `OPENAI_MODEL`，以及 `OPENAI_API_KEY` 或 `OPENAI_BASE_URL`；本地兼容服务可不设 key |
+| OpenAI 兼容 | `OPENAI_MODEL`，以及 `OPENAI_API_KEY` 或 `OPENAI_BASE_URL`；本地兼容服务可不设 key。OpenAI 自己的地址用 Responses API，其他地址用 Chat Completions；`OPENAI_API=responses\|chat` 可以指定 |
 | Rule | 无需配置，支持上面的笔记和时间示例 |
 
 规划是多轮的：模型每轮返回一组工具调用，执行结果交还给它，由它决定下一轮或给出回答，最多 8 轮。所有调用仍经过运行时校验与策略。网络失败、截断或畸形工具响应使任务失败，不执行半个计划。

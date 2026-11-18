@@ -158,6 +158,8 @@ cargo run -p agentos-taskd -- --state-dir /tmp/agentos-dev --planner rule  # 强
 
 任何兼容 OpenAI Chat Completions 的服务都可以（OpenAI、DeepSeek、通义千问、Moonshot，或本地的 Ollama、vLLM、LM Studio），需要支持 function calling。
 
+接口地址是 OpenAI 自己（`https://api.openai.com/v1`，也是不设 `OPENAI_BASE_URL` 时的默认）时，规划器用 Responses API：OpenAI 较新的模型只有在这里才能一边推理一边调用工具，推理内容以加密形式随下一轮交回，不在 OpenAI 那边保存（`store: false`）。其他地址用 Chat Completions。用 `OPENAI_API=responses` 或 `OPENAI_API=chat` 可以指定。
+
 ```sh
 # 云端服务
 export OPENAI_API_KEY=...
