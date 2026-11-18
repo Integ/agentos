@@ -62,7 +62,7 @@ pub const GENERATOR_PROMPT: &str = r#"你是 AgentOS 的能力工程师。AgentO
 - 插件是一个独立的 python3 脚本（只能用标准库，不能 pip 安装）。也可以用 POSIX sh。
 - 从 stdin 读取一个 JSON 对象作为参数（符合你给出的 input_schema）。
 - 向 stdout 输出一个 JSON 对象，必须包含字符串字段 "message"：给用户看的结果，使用用户的语言，简洁。可以附带其他结构化字段。
-- 失败时向 stderr 写原因并以非零状态退出。
+- 失败时（包括输入无效、算不出结果）向 stderr 写原因并以非零状态退出。不要把错误写进 stdout 再以 0 退出：系统会把 stdout 里带 "error" 字段的输出当作失败，以 0 退出的结果会被当成成功的答案交给用户。
 - 运行在沙箱里：系统目录只读，没有用户主目录；只有 permissions.network 为 true 才能联网；只有 permissions.storage 为 true 才有一个可写的持久目录，路径在环境变量 AGENTOS_DATA；/tmp 可写但不持久。每次调用最多 10 秒。
 - 只申请需求真正需要的权限。不要读取或修改沙箱外的任何东西，不要调用其他程序去绕过沙箱。
 
@@ -74,7 +74,7 @@ pub const GENERATOR_PROMPT: &str = r#"你是 AgentOS 的能力工程师。AgentO
 
 名字 name 用 "命名空间.动作" 形式，小写字母、数字和下划线，例如 "weather.today"、"unit.convert"。不要使用命名空间 evolve、system、policy、audit，不要与已有能力重名（升级已有插件时除外，此时必须保持原名）。
 
-自测 tests：给出 1 到 5 个用例，每个用例包含 args（参数对象）和可选的 expect_contains（输出的 message 必须包含的文字）。用例必须在沙箱和所申请的权限下可以通过，结果要确定（不要断言当前时间、随机数或网络上会变化的具体数值）。
+自测 tests：给出 1 到 5 个用例，每个用例包含 args（参数对象）和可选的 expect_contains（输出的 message 必须包含的文字）。插件会拒绝某些输入时，至少写一个无效输入的用例并加上 "expect_failure": true（这时插件必须以非零状态退出，expect_contains 改为在失败原因里查找）。用例里的期望值要按需求独立算出，不要照抄代码的输出。用例必须在沙箱和所申请的权限下可以通过，结果要确定（不要断言当前时间、随机数或网络上会变化的具体数值）。
 
 只输出一个 JSON 对象，不要任何其他文字或代码块标记，字段如下：
 {
@@ -85,7 +85,7 @@ pub const GENERATOR_PROMPT: &str = r#"你是 AgentOS 的能力工程师。AgentO
   "permissions": {"network": false, "storage": false},
   "runtime": "python3",
   "summary": "用用户的语言向用户说明代码做了什么、申请了哪些权限以及原因",
-  "tests": [{"args": {...}, "expect_contains": "..."}],
+  "tests": [{"args": {...}, "expect_contains": "..."}, {"args": {...}, "expect_failure": true}],
   "source": "完整的脚本源码"
 }"#;
 
@@ -480,9 +480,11 @@ impl Capability for EvolveList {
         } else {
             list.iter()
                 .map(|p| {
-                    let state = p
-                        .current
-                        .map_or("已停用".to_string(), |v| format!("v{v} 启用中"));
+                    let state = match (&p.problem, p.current) {
+                        (Some(problem), _) => format!("已损坏：{problem}"),
+                        (None, Some(v)) => format!("v{v} 启用中"),
+                        (None, None) => "已停用".to_string(),
+                    };
                     let vs: Vec<String> = p.versions.iter().map(|v| format!("v{v}")).collect();
                     format!(
                         "- {}：{}（{state}；版本 {}；{}）",

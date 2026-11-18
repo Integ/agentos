@@ -58,7 +58,11 @@
 
 状态目录默认是 `~/.local/state/agentos`，可用 `--state-dir` 或环境变量 `AGENTOS_STATE_DIR` 指定。
 
-调用协议：参数以一个 JSON 对象写入 stdin；插件向 stdout 输出一个 JSON 对象，`message` 字段是给用户看的结果；非零退出码表示失败，stderr 是原因。插件输出中的 `follow_up` 字段会被丢弃，只有内置能力可以串联下一步。
+调用协议：参数以一个 JSON 对象写入 stdin；插件向 stdout 输出一个 JSON 对象，`message` 字段是给用户看的结果；非零退出码表示失败，stderr 是原因。输出里带非空 `error` 字段（不是 `null` 或 `false`）也算失败，即使退出码是 0：生成的代码常这样报告无效输入，不能让任务因此显示成功。插件输出中的 `follow_up` 字段会被丢弃，只有内置能力可以串联下一步。
+
+自测用例是 `{"args": …, "expect_contains": "…"}`；加上 `"expect_failure": true` 表示这个输入必须被拒绝（插件以非零状态退出），这时 `expect_contains` 在失败原因里查找。
+
+`current` 指向不存在或读不出的版本时，插件不会被加载，但仍出现在 `evolve.list` 里，标为“已损坏”并写明可以回滚到哪个版本；任务服务启动时也会在日志里报告。`evolve.rollback` 会跳过读不出的版本，切到最近一个能用的。
 
 ## 资源限制
 

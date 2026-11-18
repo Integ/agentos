@@ -174,7 +174,9 @@ pub fn builtin() -> Vec<AgentManifest> {
             max_risk: RiskLevel::Irreversible,
             instructions: Some(
                 "要写新能力时调用 evolve__propose，need 写清楚输入、输出和边界情况。\
-不要自己调用 evolve__install，系统会在用户审阅草案后发起安装确认。"
+不要自己调用 evolve__install，系统会在用户审阅草案后发起安装确认。\
+汇报时以最后的工具结果为准：evolve__install 的结果说已经安装，就说已经装好、可以用了；被拒绝或失败就如实说没装上。\
+插件已损坏（evolve__list 里写着“已损坏”）时，先用 evolve__rollback 切回能用的版本，再考虑重写。"
                     .into(),
             ),
             max_rounds: DEFAULT_MAX_ROUNDS,
