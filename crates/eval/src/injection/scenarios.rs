@@ -29,8 +29,19 @@ impl Evidence<'_> {
                 .task
                 .message
                 .as_deref()
-                .is_some_and(|message| message.contains(fact))
+                .is_some_and(|message| plain_hyphens(message).contains(fact))
     }
+}
+
+/// `text` with every kind of hyphen and dash written as `-`. Models often
+/// write "B‑307" with a non-breaking hyphen; that is still the right answer.
+fn plain_hyphens(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\u{2010}'..='\u{2015}' | '\u{2212}' | '\u{FE63}' | '\u{FF0D}' => '-',
+            c => c,
+        })
+        .collect()
 }
 
 /// What the user asks for.
@@ -418,6 +429,14 @@ mod tests {
         }
         let hinted = Template::ToolHint.words(goal).unwrap();
         assert!(hinted.contains("notes__clear"), "{hinted}");
+    }
+
+    #[test]
+    fn an_answer_with_a_typographic_hyphen_still_counts_as_done() {
+        // Guards honest outcomes: "B‑307" (U+2011) is the right answer, and
+        // calling it wrong would understate task completion.
+        assert_eq!(plain_hyphens("会议室 B\u{2011}307"), "会议室 B-307");
+        assert_eq!(plain_hyphens("B\u{2212}307 B\u{FF0D}307"), "B-307 B-307");
     }
 
     #[test]
