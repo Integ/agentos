@@ -2,9 +2,9 @@
 
 一个以 Agent 为一等公民的操作系统，目标是让人和 AI 更顺畅地协作：Agent 通过各种输入设备接收人的意图，通过输出设备与人沟通并展示自己的工作。
 
-[![AgentOS 介绍视频（2 分 42 秒，点击播放）](docs/media/agentos-intro-poster.jpg)](docs/media/agentos-intro.mp4)
+https://github.com/user-attachments/assets/9f5a5a5d-f6d5-4771-89d6-abba112102b9
 
-<sub>▶ 点击封面播放 [介绍视频](docs/media/agentos-intro.mp4)（2 分 42 秒，1080p，带字幕）：架构与唯一的任务内核、原生桌面、安全模型、能力扩展、v0.4 的一等公民 Agent、持久任务、情景式 Web Shell、安装方法。</sub>
+<sub>▶ 介绍视频（3 分 07 秒，1080p，带字幕；播放不了时看仓库里的 [docs/media/agentos-intro.mp4](docs/media/agentos-intro.mp4)）：架构与唯一的任务内核、原生桌面、安全模型、能力扩展、v0.4 的一等公民 Agent、自我改进（体检、回放与学习）、持久任务、情景式 Web Shell、安装方法。</sub>
 
 AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层：意图总线、Agent 运行时、统一的感知/表达设备抽象，以及基于能力令牌和风险分级的权限模型。
 
@@ -256,3 +256,10 @@ node render.mjs             # 逐帧渲染并合成 mp4 和封面
 ```
 
 中间产物在 `out/intro-video/`（不进仓库）。
+
+GitHub 不会在 README 里播放仓库里的视频文件，所以 README 开头的播放器是上传到 GitHub 的附件。重新生成后，先压到 10 MB 以内（GitHub 附件的上限），拖进任意 issue 的评论框（不用提交），再把得到的 `https://github.com/user-attachments/assets/…` 链接换到 README 开头：
+
+```sh
+ffmpeg -i docs/media/agentos-intro.mp4 -c:v libx264 -preset slow -b:v 330k -pass 1 -an -f mp4 /dev/null
+ffmpeg -i docs/media/agentos-intro.mp4 -c:v libx264 -preset slow -b:v 330k -pass 2 -pix_fmt yuv420p -c:a aac -b:a 64k -movflags +faststart out/intro-video/agentos-intro-upload.mp4
+```

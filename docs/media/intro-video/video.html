@@ -118,6 +118,14 @@
   .cap p { font-size: 14.5px; color: var(--dim); line-height: 1.5; }
   .cap .chips { margin-top: 14px; }
 
+  /* ---------- improve ---------- */
+  .loop { position: absolute; left: 72px; width: 520px; height: 100px; display: flex; align-items: center; gap: 18px; padding: 0 22px; }
+  .loop .ic { width: 44px; height: 44px; border-radius: 12px; flex: none; display: grid; place-items: center; background: color-mix(in srgb, var(--c) 22%, transparent); border: 1px solid color-mix(in srgb, var(--c) 50%, transparent); }
+  .loop .ic svg { width: 22px; height: 22px; fill: none; stroke: var(--c); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .loop h3 { font-size: 19px; font-weight: 650; margin-bottom: 5px; }
+  .loop p { font-size: 13.5px; line-height: 1.45; color: var(--dim); }
+  .loop code { font: 12.5px var(--mono); color: var(--c); }
+
   /* ---------- taskd ---------- */
   .client { position: absolute; top: 160px; width: 160px; height: 60px; display: grid; place-items: center; font-size: 15px; font-weight: 600; border-radius: 14px; }
   .wire { position: absolute; top: 220px; width: 2px; height: 38px; background: linear-gradient(var(--indigo), rgba(140,158,255,.25)); }
@@ -256,9 +264,36 @@
   </div>
 </section>
 
+<!-- ============ self-improvement ============ -->
+<section class="scene" id="improve">
+  <div class="kicker a fade">06 · 自我改进</div>
+  <div class="title a" data-at="@0.1">从自己的历史里变得更好</div>
+
+  <div class="loop glass a left" data-at="1+0.4" style="top:152px;--c:var(--teal)">
+    <div class="ic"><svg viewBox="0 0 24 24"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg></div>
+    <div><h3>体检报告 <code>improve.report</code></h3><p>无法处理的要求、反复失败的能力、超出预算、被拒绝的确认。只读，不调用模型。</p></div>
+  </div>
+  <div class="loop glass a left" data-at="2" style="top:268px;--c:var(--indigo)">
+    <div class="ic"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4h4"/><path d="M12 8v4l3 2"/></svg></div>
+    <div><h3>回放 <code>--replay</code></h3><p>每个能力换成替身，只按录像返回当时的结果；退化时退出码为 1，可当回归检查。</p></div>
+  </div>
+  <div class="loop glass a left" data-at="3" style="top:384px;--c:var(--pink)">
+    <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-3.5 10.9V17h7v-3.1A6 6 0 0 0 12 3zM9.5 20.5h5"/></svg></div>
+    <div><h3>空闲时学习</h3><p>经验写进管家的提示，重复的调用顺序写成技能；各回放 3 次，零退化才采用。</p></div>
+  </div>
+
+  <div class="term a pop" data-at="@0.5" style="left:632px;top:152px;width:576px;height:332px">
+    <header><i></i><i></i><i></i>agentos — 自我改进</header>
+<pre style="font-size:13px"><div class="a type" data-at="1+0.6"><span class="p">$</span> agentos read improve.report '{"days":7}'</div><div class="a fade" data-at="1+2.2">任务 42 个：成功 35（83%），无法处理 4，失败 3</div><div class="a fade mut" data-at="1+2.8">- “把 PDF 转成 Word” × 2（task-31、task-38）</div><div class="a type" data-at="2+0.4"><span class="p">$</span> agentos-taskd --replay --limit 20</div><div class="a fade" data-at="2+2.0">回放 16 个任务，跳过 4（读过外部内容 3，…）。</div><div class="a fade" data-at="2+2.6"><span class="mut">[相同]</span> task-12 “看看笔记”：成功 → 成功</div><div class="a fade" data-at="2+3.2"><span class="ok">[变好]</span> task-27 “记一下…”：失败 → 成功</div><div> </div><div class="a fade mut" data-at="3+0.8"># 空闲 · 学习 · 回放评测</div><div class="a fade" data-at="3+2.6"><span class="ok">lesson-3  已采用</span>  <span class="mut">2 个用例稳定变好 · 0 退化</span></div><div class="a fade" data-at="3+4.6"><span style="color:var(--red)">skill-1   已撤回</span>  <span class="mut">采用后成功率下降</span></div></pre>
+  </div>
+
+  <div class="guard glass a" data-at="4" style="top:508px;left:72px;width:520px"><i class="dot" style="--c:var(--amber)"></i><b>改不了权限</b><span>授权、风险等级、策略都不变；L2 照样每次问人</span></div>
+  <div class="guard glass a" data-at="4+1.0" style="top:508px;left:632px;width:576px"><i class="dot" style="--c:var(--green)"></i><b>随时撤销</b><span>「你学到了什么」「撤回 lesson-3」· 写进审计</span></div>
+</section>
+
 <!-- ============ taskd ============ -->
 <section class="scene" id="taskd">
-  <div class="kicker a fade">06 · 一个任务内核</div>
+  <div class="kicker a fade">07 · 一个任务内核</div>
   <div class="title a" data-at="@0.1">任务归后台所有</div>
 
   <div class="client glass a" data-at="1+0.6" style="left:72px;width:118px">原生桌面</div>
@@ -289,7 +324,7 @@
 
 <!-- ============ web shell ============ -->
 <section class="scene" id="webshell">
-  <div class="kicker a fade">07 · 情景式 Web Shell</div>
+  <div class="kicker a fade">08 · 情景式 Web Shell</div>
   <div class="title a" data-at="@0.1">语音优先的情景式 Web Shell</div>
   <div class="frame a pop" data-at="@0.2" style="left:72px;top:150px;width:744px;height:465px">
     <img src="../../../out/intro-video/shots/web-now.png">
@@ -303,7 +338,7 @@
 
 <!-- ============ install ============ -->
 <section class="scene" id="install">
-  <div class="kicker a fade">08 · 上手</div>
+  <div class="kicker a fade">09 · 上手</div>
   <div class="title a" data-at="@0.1">写进 U 盘，启动就能用</div>
   <div class="frame a pop" data-at="@0.2" style="left:72px;top:156px;width:568px;height:355px"><img class="zoom" src="../../../out/intro-video/shots/setup.png" style="--zoom:1.2;transform-origin:50% 50%"></div>
   <div class="abs glass a" data-at="@0.8" style="left:72px;top:530px;width:568px;height:44px;display:flex;align-items:center;gap:12px;padding:0 18px;font-size:13.5px;border-radius:12px"><i class="dot" style="--c:var(--green)"></i><b>最新镜像 v0.4.0</b><span class="dim">Debian 13 / Ubuntu 24.04 · x86-64 · UEFI</span></div>
