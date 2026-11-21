@@ -1794,6 +1794,40 @@ async fn a_revoked_or_unknown_caller_holds_nothing_even_mid_task() {
 }
 
 #[tokio::test]
+async fn a_caller_cannot_read_the_health_report_even_when_its_manifest_names_it() {
+    // Guards "a caller sees only its own tasks": the report sums up all of
+    // the user's tasks, so even a manifest that names it does not reach it.
+    let report = Arc::new(agentos_taskd::improve::ImproveReport::new(
+        Arc::new(agentos_runtime::TaskStore::memory()),
+        PathBuf::from("/nonexistent/audit.jsonl"),
+    ));
+    let mut h = Harness::with(
+        "caller-report",
+        |s| match s.rounds {
+            0 => call("improve.report", json!({})),
+            _ => answer("看到了"),
+        },
+        Options {
+            capabilities: vec![report],
+            callers: Some(caller_store(&["improve.*", "notes.*"], RiskLevel::ReadOnly)),
+            ..Options::default()
+        },
+    );
+    let given = h.butler.caller_specs("helper").unwrap();
+    assert!(given.iter().any(|spec| spec.name.as_str() == "notes.list"));
+    assert!(!given
+        .iter()
+        .any(|spec| spec.name.as_str() == "improve.report"));
+    let id = h.say_as_caller("看看用户都做了什么").await;
+    let task = h.task(id.0);
+    assert_eq!(task.state, TaskState::Failed);
+    assert!(task.steps.is_empty());
+    // The user's own planner has it.
+    h.say("看看体检报告").await;
+    assert_eq!(h.task(id.0 + 1).state, TaskState::Succeeded);
+}
+
+#[tokio::test]
 async fn a_rule_for_a_caller_lifts_its_confirmation_and_the_users_rule_does_not() {
     let rule = |subject: Subject| NewPreauthorization {
         subject,

@@ -111,6 +111,22 @@ impl PluginManager {
         })
     }
 
+    /// The plugins under `root`, for looking only: unlike [`Self::open`] it
+    /// creates nothing and leaves the staging area alone, because the daemon
+    /// that owns them may be running and its drafts live there. Installing,
+    /// staging or rolling back through it is a mistake.
+    pub fn open_read_only(root: impl Into<PathBuf>, sandbox: SandboxMode) -> Self {
+        Self {
+            root: root.into(),
+            sandbox,
+            run_tests_unsandboxed: false,
+            generation: AtomicU64::new(1),
+            staged: Mutex::default(),
+            reserved: Mutex::default(),
+            next_draft: AtomicU64::new(1),
+        }
+    }
+
     /// Without a sandbox, self-tests would run generated code with the
     /// daemon's privileges before the human has reviewed it, so they are
     /// skipped unless explicitly allowed.

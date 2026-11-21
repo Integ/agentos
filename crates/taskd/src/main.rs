@@ -11,7 +11,7 @@ use agentos_planner::llm::TextModel;
 use agentos_planner::openai::{OpenAiConfig, OpenAiPlanner};
 use agentos_planner::{Planner, RulePlanner};
 use agentos_policy::PolicyEngine;
-use agentos_runtime::TaskStore;
+use agentos_runtime::{TaskId, TaskStore};
 use agentos_services::agents::AgentDirectory;
 use agentos_services::blackboard::{self, Blackboard};
 use agentos_services::evolve::{self, LlmGenerator, NoGenerator, PluginGenerator};
@@ -27,8 +27,10 @@ use agentos_taskd::builtin;
 use agentos_taskd::butler::{grant_manifest, Budget, Butler};
 use agentos_taskd::callers::CallerStore;
 use agentos_taskd::crash;
+use agentos_taskd::improve::ImproveReport;
 use agentos_taskd::migrate;
 use agentos_taskd::preauth::PreauthStore;
+use agentos_taskd::replay::{self, Pick, Replayer, Summary};
 use agentos_taskd::service::Service;
 use agentos_taskd::voice::{SpeechOutput, Voice, VoiceConfig};
 
@@ -42,6 +44,12 @@ const HELP: &str = "\
   --set-pin                     设置不可逆操作的 PIN，然后退出
   --clear-pin                   取消 PIN，然后退出
   --verify-audit                校验审计日志的哈希链，然后退出
+  --replay                      把最近的任务重新交给现在的系统，和当时的结局比较，然后退出；
+                                能力一律用当时记录的结果代替，不执行任何真实操作；
+                                有任务以前成功、现在不成功时退出码为 1
+    --limit N                   回放最近 N 个可以回放的任务（默认 20）
+    --tasks task-1,task-5       只回放这些任务
+                                回放默认用离线规则规划器；用模型要写明 --planner（会消耗 token）
   --help, -h                    查看帮助
   --version, -V                 查看版本
 
@@ -58,6 +66,7 @@ enum Mode {
     SetPin,
     ClearPin,
     VerifyAudit,
+    Replay,
 }
 
 #[derive(Default, Debug)]
@@ -67,6 +76,8 @@ struct Options {
     state_dir: Option<PathBuf>,
     socket: Option<PathBuf>,
     mode: Mode,
+    limit: Option<usize>,
+    tasks: Vec<TaskId>,
 }
 
 /// `Ok(Err(text))` is text to print before exiting successfully.
@@ -87,7 +98,8 @@ fn options(args: impl IntoIterator<Item = String>) -> io::Result<Result<Options,
             "--set-pin" => options.mode = Mode::SetPin,
             "--clear-pin" => options.mode = Mode::ClearPin,
             "--verify-audit" => options.mode = Mode::VerifyAudit,
-            "--planner" | "--audit" | "--state-dir" | "--socket" => {
+            "--replay" => options.mode = Mode::Replay,
+            "--planner" | "--audit" | "--state-dir" | "--socket" | "--limit" | "--tasks" => {
                 let value = args
                     .next()
                     .filter(|s| !s.is_empty() && !s.starts_with("--"))
@@ -98,6 +110,26 @@ fn options(args: impl IntoIterator<Item = String>) -> io::Result<Result<Options,
                     "--planner" => options.planner = Some(value),
                     "--audit" => options.audit = Some(value.into()),
                     "--state-dir" => options.state_dir = Some(value.into()),
+                    "--limit" => {
+                        let limit = value.parse().ok().filter(|n| *n > 0).ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("--limit 需要一个正整数，不是 {value}"),
+                            )
+                        })?;
+                        options.limit = Some(limit);
+                    }
+                    "--tasks" => {
+                        for item in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                            let id = item.parse().map_err(|_| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidInput,
+                                    format!("--tasks 里的 {item} 不是任务编号（例如 task-3）"),
+                                )
+                            })?;
+                            options.tasks.push(id);
+                        }
+                    }
                     _ => options.socket = Some(value.into()),
                 }
             }
@@ -251,6 +283,91 @@ fn verify_audit(path: &Path) -> io::Result<()> {
     }
 }
 
+const DEFAULT_REPLAY_LIMIT: usize = 20;
+
+/// Put recent tasks to the system as it is now and compare outcomes. It
+/// reads the history without the daemon's lock and writes nothing of the
+/// daemon's, so it may run beside a running service. The capabilities are
+/// the ones that exist without the network or outside programs (built-ins,
+/// the blackboard, plugins); a task that used anything else is skipped.
+async fn replay(state_dir: &Path, planner: Option<String>, pick: Pick) -> io::Result<()> {
+    // Model tokens cost money; a replay spends them only when asked to by
+    // name, never because an API key happens to be in the environment.
+    let choice = planner
+        .or_else(|| std::env::var("AGENTOS_PLANNER").ok())
+        .unwrap_or_else(|| "rule".into());
+    let (planner, _, label) = make_planner(Some(choice))?;
+    let tasks = state_file(
+        "任务记录",
+        &state_dir.join("tasks.json"),
+        TaskStore::read_tasks(state_dir),
+    )?;
+
+    let mut registry = CapabilityRegistry::new();
+    builtin::register_all(&mut registry);
+    blackboard::register_all(&mut registry, Blackboard::in_memory());
+    let plugins = Arc::new(PluginManager::open_read_only(
+        state_dir.join("evolve"),
+        SandboxMode::detect(),
+    ));
+    evolve::register_all(&mut registry, plugins.clone(), Arc::new(NoGenerator));
+    for plugin in plugins.active() {
+        // As in the service: a plugin never shadows a built-in.
+        if registry.get(&plugin.spec().name).is_none() {
+            registry.register(plugin);
+        }
+    }
+    let capabilities = registry
+        .specs()
+        .into_iter()
+        .filter_map(|spec| registry.get(&spec.name).cloned())
+        .collect();
+    let mut agents = AgentDirectory::with_builtin();
+    for note in agents.load_dir(&state_dir.join("agents")) {
+        eprintln!("{note}");
+    }
+    let budget = task_budget(|name| std::env::var(name).ok())
+        .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+    let scratch = std::env::temp_dir().join(format!("agentos-replay-{}", std::process::id()));
+    agentos_runtime::create_private_dir(&scratch)?;
+    let replayer = Replayer::new(
+        capabilities,
+        agents,
+        budget,
+        Arc::from(planner),
+        scratch.clone(),
+    );
+
+    let (cases, skipped) = replay::cases(&tasks, &|name| replayer.offers(name), &pick);
+    eprintln!("用{label}回放 {} 个任务，不执行任何真实操作……", cases.len());
+    let mut summary = Summary {
+        cases: Vec::with_capacity(cases.len()),
+        skipped,
+    };
+    let mut failure = None;
+    for case in &cases {
+        match replayer.run(case).await {
+            Ok(result) => summary.cases.push(result),
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    if let Some(error) = failure {
+        return Err(io::Error::new(
+            error.kind(),
+            format!("回放没有完成：{error}"),
+        ));
+    }
+    println!("{}", replay::render(&summary, &label));
+    if summary.regressed() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 /// Name the state file a startup failure came from and what to do about
 /// it. A damaged file is never repaired or replaced automatically (it may be
 /// the only copy of the user's data), so the person reading the log, or
@@ -305,6 +422,11 @@ async fn serve() -> io::Result<()> {
         })
         .unwrap_or_else(|| state_dir.join("audit.jsonl"));
     let pin_path = state_dir.join("pin.json");
+    let pick = if options.tasks.is_empty() {
+        Pick::Latest(options.limit.unwrap_or(DEFAULT_REPLAY_LIMIT))
+    } else {
+        Pick::Tasks(options.tasks.clone())
+    };
     match options.mode {
         Mode::Serve => {}
         Mode::SetPin => {
@@ -313,6 +435,7 @@ async fn serve() -> io::Result<()> {
         }
         Mode::ClearPin => return clear_pin(&pin_path),
         Mode::VerifyAudit => return verify_audit(&audit_path),
+        Mode::Replay => return replay(&state_dir, options.planner, pick).await,
     }
     if !explicit_state_dir {
         if let Some(legacy) = migrate::legacy_dir(|name| std::env::var(name).ok()) {
@@ -372,6 +495,12 @@ async fn serve() -> io::Result<()> {
         &notes_path,
         builtin::register_persistent(&mut registry, &notes_path),
     )?;
+    // Stage 0 of self-improvement: a read-only report on the system's own
+    // history. It reads the tasks and the audit log, never writes them.
+    registry.register(Arc::new(ImproveReport::new(
+        tasks.clone(),
+        audit.path().to_path_buf(),
+    )));
     let board_path = state_dir.join("blackboard.json");
     let board = state_file("黑板", &board_path, Blackboard::open(&board_path))?;
     blackboard::register_all(&mut registry, board.clone());
@@ -589,11 +718,20 @@ mod tests {
             parse(&["--verify-audit"]).unwrap().unwrap().mode,
             Mode::VerifyAudit
         );
+        let replay = parse(&["--replay", "--tasks", "task-3, 7", "--limit", "5"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.mode, Mode::Replay);
+        assert_eq!(replay.tasks, [TaskId(3), TaskId(7)]);
+        assert_eq!(replay.limit, Some(5));
         for args in [
             vec!["--plannr", "rule"],
             vec!["--state-dir"],
             vec!["--socket", "--planner"],
             vec!["serve"],
+            vec!["--replay", "--limit", "0"],
+            vec!["--replay", "--limit", "many"],
+            vec!["--replay", "--tasks", "first"],
         ] {
             assert!(parse(&args).is_err(), "{args:?}");
         }

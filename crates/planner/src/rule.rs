@@ -124,6 +124,10 @@ impl Planner for RulePlanner {
         if offered("board.read") && mentions(&["黑板", "board"]) {
             return step("board.read", json!({}));
         }
+        if offered("improve.report") && mentions(&["体检", "health report", "哪里可以改进"])
+        {
+            return step("improve.report", json!({}));
+        }
         if offered("evolve.list") && mentions(&["插件", "plugins", "新能力"]) {
             return step("evolve.list", json!({}));
         }
@@ -194,6 +198,7 @@ mod tests {
         "evolve.rollback",
         "evolve.disable",
         "evolve.list",
+        "improve.report",
         "home.list",
         "agent.notes",
     ];
@@ -333,6 +338,7 @@ mod tests {
             ("恢复 unit.convert", "evolve.rollback"),
             ("停用 unit.convert", "evolve.disable"),
             ("看看插件", "evolve.list"),
+            ("看看体检报告", "improve.report"),
             ("家里的设备有哪些", "home.list"),
             ("@notes 记一下 买牛奶", "agent.notes"),
         ] {

@@ -363,17 +363,9 @@ impl TaskStore {
         let directory = directory.as_ref().to_path_buf();
         create_private_dir(&directory)?;
         let lock = exclusive_lock(&directory.join(".lock"))?;
-        let mut state = match fs::read(directory.join(STATE_FILE)) {
-            Ok(bytes) => {
-                let snapshot = serde_json::from_slice(&bytes).map_err(invalid_data)?;
-                State::from_snapshot(snapshot)?
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => State::default(),
-            Err(error) => return Err(error),
-        };
         // Nothing is written until both files have read back cleanly, so a
         // damaged store is left exactly as it was found.
-        replay_journal(&directory, &mut state)?;
+        let mut state = load(&directory)?;
         let recovered_at = now_ms();
         let mut recovered = false;
         for task in state.tasks.values_mut() {
@@ -406,6 +398,31 @@ impl TaskStore {
             _lock: Some(lock),
             changes: broadcast::channel(256).0,
         })
+    }
+
+    /// The tasks stored in `directory`, read without taking the lock and
+    /// without writing anything, for tools that look at history while the
+    /// daemon keeps running (the replay check). What comes back may be a
+    /// moment behind the daemon, and unfinished tasks are as they were left,
+    /// not marked interrupted.
+    ///
+    /// The daemon may fold the journal into the snapshot while this reads:
+    /// reading the snapshot first and the journal second is safe against a
+    /// fold, except when the journal was emptied and written again in
+    /// between, which shows up as a gap in revisions. That is read again.
+    pub fn read_tasks(directory: impl AsRef<Path>) -> io::Result<Vec<Task>> {
+        let directory = directory.as_ref();
+        let mut attempt = 0;
+        loop {
+            match load(directory) {
+                Ok(state) => return Ok(state.tasks.into_values().collect()),
+                Err(error) if error.kind() == io::ErrorKind::InvalidData && attempt < 3 => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// An ephemeral store, intended for deterministic tests and embedding.
@@ -972,6 +989,20 @@ fn validate_task(task: &Task, next_id: u64, is_root: impl Fn(TaskId) -> bool) ->
 }
 
 /// Apply the journal's changes above the snapshot's revision to `state`.
+/// The snapshot with the journal applied, read only.
+fn load(directory: &Path) -> io::Result<State> {
+    let mut state = match fs::read(directory.join(STATE_FILE)) {
+        Ok(bytes) => {
+            let snapshot = serde_json::from_slice(&bytes).map_err(invalid_data)?;
+            State::from_snapshot(snapshot)?
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => State::default(),
+        Err(error) => return Err(error),
+    };
+    replay_journal(directory, &mut state)?;
+    Ok(state)
+}
+
 fn replay_journal(directory: &Path, state: &mut State) -> io::Result<()> {
     let bytes = match fs::read(directory.join(JOURNAL_FILE)) {
         Ok(bytes) => bytes,
@@ -1175,6 +1206,43 @@ mod tests {
             fs::copy(from.join(file), copy.0.join(file)).unwrap();
         }
         copy
+    }
+
+    #[test]
+    fn history_can_be_read_while_the_store_is_open_without_touching_it() {
+        // Guards the daemon's files against tools that only look: reading
+        // takes no lock, writes nothing, and leaves unfinished tasks as they
+        // are instead of marking them interrupted.
+        let dir = TempDir::new();
+        let store = TaskStore::open(&dir.0).unwrap();
+        let done = store.create(intent()).unwrap();
+        store
+            .update(done.id, |task| {
+                task.state = TaskState::Succeeded;
+                task.steps.push(step(StepState::Succeeded));
+            })
+            .unwrap();
+        let open = store.create(intent()).unwrap();
+        let before: Vec<Vec<u8>> = [STATE_FILE, JOURNAL_FILE]
+            .iter()
+            .map(|file| fs::read(dir.0.join(file)).unwrap())
+            .collect();
+        let tasks = TaskStore::read_tasks(&dir.0).unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].state, TaskState::Succeeded);
+        assert_eq!(tasks[0].steps.len(), 1);
+        assert_eq!(tasks[1].id, open.id);
+        assert_eq!(tasks[1].state, TaskState::Queued);
+        let after: Vec<Vec<u8>> = [STATE_FILE, JOURNAL_FILE]
+            .iter()
+            .map(|file| fs::read(dir.0.join(file)).unwrap())
+            .collect();
+        assert_eq!(before, after);
+        // The store is still the one holding the lock and still works.
+        store
+            .update(open.id, |task| task.state = TaskState::Failed)
+            .unwrap();
+        assert!(TaskStore::read_tasks(&TempDir::new().0).unwrap().is_empty());
     }
 
     #[test]

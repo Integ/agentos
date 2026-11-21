@@ -246,6 +246,18 @@ impl Frame {
     }
 }
 
+/// Capabilities an outside caller never gets, whatever its manifest says.
+/// The blackboard is the user's shared memory, and the health report sums up
+/// every task, while a caller may only see its own.
+const CALLER_EXCLUDED: &[&str] = &["board.write", crate::improve::REPORT_CAPABILITY];
+
+/// Words the butler puts in a failed task's message for why it stopped. The
+/// health report (`improve.rs`) tells kinds of failure apart by them, so they
+/// are named once here rather than matched as loose text elsewhere.
+pub const OVER_BUDGET: &str = "超出预算";
+pub const GOING_IN_CIRCLES: &str = "规划陷入了重复";
+pub const INVALID_PLAN: &str = "计划无效";
+
 enum Flow {
     Continue,
     /// The top frame is done; its answer, if any.
@@ -478,7 +490,7 @@ impl Butler {
                 caller.wants(spec.name.as_str())
                     && spec.risk <= caller.max_risk
                     && kernel.policy.is_granted(&self.id, &spec.name)
-                    && spec.name.as_str() != "board.write"
+                    && !CALLER_EXCLUDED.contains(&spec.name.as_str())
             })
             .collect();
         // Asking back is how it learns what it was not told; the answer is
@@ -1069,7 +1081,8 @@ impl Butler {
                     // Not a partial success: the task did not get done. What
                     // it did do stays on it; whatever was still open (a
                     // delegation in progress) is closed as not finished.
-                    let message = format!("超出预算：{limit}。任务没有做完，已完成的步骤保留。");
+                    let message =
+                        format!("{OVER_BUDGET}：{limit}。任务没有做完，已完成的步骤保留。");
                     self.tasks.update(id, |t| {
                         if t.state.is_terminal() {
                             return;
@@ -1361,7 +1374,7 @@ impl Butler {
             };
             if let Some(capability) = invalid {
                 return Ok(Flow::Failed(format!(
-                    "计划无效：{capability} 未授权、不存在或参数不是对象"
+                    "{INVALID_PLAN}：{capability} 未授权、不存在或参数不是对象"
                 )));
             }
             self.audit.append(AuditEvent::PlanCreated {
@@ -1388,9 +1401,9 @@ impl Butler {
             // and tokens it would burn, and keeps it from repeating a side
             // effect; the outcome says so instead of passing for success.
             if repeats_without_progress(&frame.history, &plan.steps) {
-                return Ok(Flow::Failed(
-                    "同样的调用连续两轮得到同样的结果，没有再执行第三次：规划陷入了重复。".into(),
-                ));
+                return Ok(Flow::Failed(format!(
+                    "同样的调用连续两轮得到同样的结果，没有再执行第三次：{GOING_IN_CIRCLES}。"
+                )));
             }
             frame.tainted |= plan.tainted;
             let keys: Vec<String> = plan.steps.iter().map(|_| self.next_call()).collect();
