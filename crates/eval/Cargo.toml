@@ -1,0 +1,24 @@
+[package]
+name = "agentos-eval"
+description = "AgentOS evaluations: a prompt-injection benchmark for the policy engine, taint, approvals and the judge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "agentos-eval"
+path = "src/main.rs"
+
+[dependencies]
+agentos-audit.workspace = true
+agentos-core.workspace = true
+agentos-planner.workspace = true
+agentos-policy.workspace = true
+agentos-runtime.workspace = true
+agentos-services.workspace = true
+agentos-taskd = { path = "../taskd" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

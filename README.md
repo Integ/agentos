@@ -39,7 +39,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 - **MCP 工具**：`mcp.json` 里配置的 MCP server，工具自动成为管家的能力。见 [docs/mcp.md](docs/mcp.md)。
 - **自我进化**：让 AgentOS 给自己写新能力，以沙箱插件形式安装，可回滚。见 [docs/self-evolution.md](docs/self-evolution.md)。
 - **自我改进**：体检报告指出哪里做得不好；回放把过去的任务交给现在的系统、对比结局，可以当回归检查；打开后在空闲时从自己的历史里学经验和技能，回放证明明显变好才自动采用，变差就自动撤回，随时可以撤销。学到的东西改不了权限。见 [docs/self-improvement-research.md](docs/self-improvement-research.md) 和 [架构](docs/architecture.md#自我改进体检回放与学习)。
-- **安全模型**：能力令牌 + 风险分级确认（L0–L3）；污点追踪（网络插件、MCP 输出会让后续有影响的操作都要确认）；L3 操作必须设置 PIN 并在批准时输入；批准只在屏幕上进行，说话不能批准；审计日志带 SHA-256 哈希链，可校验；插件有 bubblewrap 沙箱和资源上限（内存 1 GiB、CPU 10 秒等）。
+- **安全模型**：能力令牌 + 风险分级确认（L0–L3）；污点追踪（网络插件、MCP 输出会让后续有影响的操作都要确认）；L3 操作必须设置 PIN 并在批准时输入；批准只在屏幕上进行，说话不能批准；审计日志带 SHA-256 哈希链，可校验；插件有 bubblewrap 沙箱和资源上限（内存 1 GiB、CPU 10 秒等）。能挡住多少提示注入、要多确认几次，见[提示注入评测](docs/injection-eval.md)。
 - **一等公民的 Agent（v0.4）**：任务并行执行（默认同时 4 个）；会话线程让你接着上一句话说；缺信息时 Agent 用 `ask.user` 停下来问你；每个任务有规划轮数、token 和执行时长预算，用量写进任务和审计；`agentos preauthorize` 事先许可一类 L1/L2 调用；`agentos mcp --caller …` 让别的 Agent 通过 MCP 使用 AgentOS。见 [docs/v0.4-design.md](docs/v0.4-design.md)。
 - **持久任务与多个界面（v0.3）**：`agentos-taskd` 把任务放在后台服务里，命令行、终端工作台、浏览器和原生桌面通过同一个 Unix socket 协议连接；关掉界面任务照常进行，历史可分页，变更实时通知，批准绑定到具体任务的具体步骤。见 [docs/persistent-workspace.md](docs/persistent-workspace.md)。
 - **情景式 Web Shell（v0.3）**：语音优先的浏览器界面，模型根据真实任务和笔记组织画面（只能选组件、顺序和宽度）；WebRTC 实时语音可连续对话、开口打断，但语音不能代替批准。见 [docs/ambient-shell.md](docs/ambient-shell.md)。
@@ -50,6 +50,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 - 设计草案：[AgentOS 架构设计草案](https://claude.ai/artifact/RzRDjHkBbJVbnyFDRSZ4BN)
 - 架构：[docs/architecture.md](docs/architecture.md)，[Unix socket 协议 v1](docs/protocol-v1.md)
 - 自我改进：[docs/self-improvement-research.md](docs/self-improvement-research.md)
+- 提示注入评测：[docs/injection-eval.md](docs/injection-eval.md)
 - 任务服务、命令行与工作台：[docs/persistent-workspace.md](docs/persistent-workspace.md)
 - 历史设计：[docs/v0.3-design.md](docs/v0.3-design.md)、[docs/v0.2-design.md](docs/v0.2-design.md)
 - 安装：[docs/install.md](docs/install.md)，在线更新：[docs/update.md](docs/update.md)
@@ -91,6 +92,7 @@ crates/
   cli/       agentos 命令与终端任务工作台
   web-shell/ 浏览器界面 agentos-web-shell：情景布局与连续实时语音
   shell/     原生桌面 agentos-shell：玻璃风格桌面与设置助理
+  eval/      评测 agentos-eval：提示注入评测（替身能力、脚本化的最坏情况与真实模型）
 image/       可启动磁盘镜像：构建脚本、系统集成文件（设置助理、会话脚本、agentos-update）、OTA 更新包、QEMU 冒烟测试
 docs/        各部分的文档；docs/media/intro-video/ 是介绍视频的源文件
 ```
@@ -239,6 +241,8 @@ node --test crates/web-shell/assets/*.test.mjs   # Web Shell 前端测试，不�
 ```sh
 cargo test -p agentos-taskd -p agentos-web-shell -p agentos-cli -p agentos-ipc -p agentos-runtime -p agentos-audit -p agentos-planner -p agentos-core -p agentos-policy
 ```
+
+提示注入评测的脚本化部分不需要模型密钥，`cargo run --release -p agentos-eval` 半分钟跑完；用真实模型要写明 `--planner claude|openai`，会消耗 token，见 [docs/injection-eval.md](docs/injection-eval.md#运行)。
 
 CI 每次提交都会跑上面全部检查，其中这一组在 macOS 和 Rust 1.88 上各跑一遍。`cargo deny check` 另外每周一再跑一次（配置见 [deny.toml](deny.toml)），新披露的依赖漏洞会让 CI 变红。
 
