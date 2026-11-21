@@ -129,9 +129,15 @@ impl Service {
     /// A service around a butler the caller has configured. `pins` must be
     /// the vault the butler was given, so a PIN checked here vouches for the
     /// approval the butler then carries out.
-    pub fn with_butler(butler: Butler, audit: Arc<AuditLog>, pins: Option<Arc<PinVault>>) -> Self {
+    /// The butler may be shared, for work beside the service that needs to
+    /// see what it can do (the self-improvement cycle).
+    pub fn with_butler(
+        butler: impl Into<Arc<Butler>>,
+        audit: Arc<AuditLog>,
+        pins: Option<Arc<PinVault>>,
+    ) -> Self {
         let (work_tx, work_rx) = mpsc::unbounded_channel();
-        let butler = Arc::new(butler);
+        let butler = butler.into();
         Self {
             controller: Arc::new(Controller {
                 butler: butler.clone(),

@@ -100,6 +100,16 @@ impl Planner for RulePlanner {
                 }
             }
         }
+        // What the system learned has ids like lesson-3; undoing one is a
+        // complete command naming it.
+        if offered("improve.rollback") {
+            if let Some(rest) = strip_any(t, &["撤回改进", "撤回"]) {
+                let id = rest.trim();
+                if !id.is_empty() && !id.contains(char::is_whitespace) {
+                    return step("improve.rollback", json!({ "id": id }));
+                }
+            }
+        }
         if offered("evolve.disable") {
             if let Some(rest) = strip_any(t, &["停用", "disable "]) {
                 if !rest.trim().is_empty() {
@@ -123,6 +133,9 @@ impl Planner for RulePlanner {
         // Read-only lookups may match on a keyword: nothing can be changed.
         if offered("board.read") && mentions(&["黑板", "board"]) {
             return step("board.read", json!({}));
+        }
+        if offered("improve.learned") && mentions(&["学到", "learned"]) {
+            return step("improve.learned", json!({}));
         }
         if offered("improve.report") && mentions(&["体检", "health report", "哪里可以改进"])
         {
@@ -199,6 +212,8 @@ mod tests {
         "evolve.disable",
         "evolve.list",
         "improve.report",
+        "improve.learned",
+        "improve.rollback",
         "home.list",
         "agent.notes",
     ];
@@ -339,6 +354,8 @@ mod tests {
             ("停用 unit.convert", "evolve.disable"),
             ("看看插件", "evolve.list"),
             ("看看体检报告", "improve.report"),
+            ("你学到了什么", "improve.learned"),
+            ("撤回 lesson-3", "improve.rollback"),
             ("家里的设备有哪些", "home.list"),
             ("@notes 记一下 买牛奶", "agent.notes"),
         ] {

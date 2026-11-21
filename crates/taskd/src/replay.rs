@@ -17,7 +17,7 @@
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use agentos_audit::AuditLog;
 use agentos_core::{AgentId, Capability, CapabilityError, CapabilityName, CapabilitySpec, Intent};
@@ -33,6 +33,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::butler::{grant_manifest, Budget, Butler, ASK_USER};
+use crate::learned::{Learned, LearnedStore};
 
 /// The PIN of a replay's own throwaway vault, so irreversible steps are
 /// approved like any other. It guards nothing: the vault is deleted with the
@@ -384,11 +385,16 @@ pub struct Replayer {
     budget: Budget,
     planner: Arc<dyn Planner>,
     scratch: PathBuf,
+    learned: Learned,
+    /// One throwaway vault for every case: deriving a PIN hash is slow on
+    /// purpose, and a replay may run hundreds of cases.
+    pins: OnceLock<Arc<PinVault>>,
 }
 
 impl Replayer {
-    /// `scratch` holds each case's throwaway audit log and PIN vault while it
-    /// runs; it must not be a directory anything else uses.
+    /// `scratch` holds each case's throwaway audit log, and one PIN vault for
+    /// all of them, while it runs; it must not be a directory anything else
+    /// uses.
     pub fn new(
         capabilities: Vec<Arc<dyn Capability>>,
         agents: AgentDirectory,
@@ -402,11 +408,31 @@ impl Replayer {
             budget,
             planner,
             scratch,
+            learned: Learned::default(),
+            pins: OnceLock::new(),
         }
+    }
+
+    fn pins(&self) -> io::Result<Arc<PinVault>> {
+        if let Some(pins) = self.pins.get() {
+            return Ok(pins.clone());
+        }
+        agentos_runtime::create_private_dir(&self.scratch)?;
+        let pins = Arc::new(PinVault::open(self.scratch.join("pin.json"))?);
+        pins.set(REPLAY_PIN)?;
+        Ok(self.pins.get_or_init(|| pins).clone())
+    }
+
+    /// Replay with these lessons and skills in effect, as the system has
+    /// them now.
+    pub fn with_learned(mut self, learned: Learned) -> Self {
+        self.learned = learned;
+        self
     }
 
     /// Whether a recorded call to `name` could be answered in a replay.
     pub fn offers(&self, name: &str) -> bool {
+        let learned_skill = |id: &str| self.learned.skills().iter().any(|m| m.id == id);
         name == ASK_USER
             || self
                 .capabilities
@@ -414,20 +440,33 @@ impl Replayer {
                 .any(|capability| capability.spec().name.as_str() == name)
             || name
                 .strip_prefix(DELEGATE_PREFIX)
-                .is_some_and(|id| self.agents.get(id).is_some())
+                .is_some_and(|id| self.agents.get(id).is_some() || learned_skill(id))
     }
 
     pub async fn run(&self, case: &Case) -> io::Result<CaseResult> {
-        let dir = self.scratch.join(format!("case-{}", case.task.0));
+        self.run_with(case, &self.learned).await
+    }
+
+    /// Replay with `learned` in effect instead: how a candidate lesson or
+    /// skill is tried without adopting it.
+    pub async fn run_with(&self, case: &Case, learned: &Learned) -> io::Result<CaseResult> {
+        static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = self.scratch.join(format!("case-{}-{run}", case.task.0));
         agentos_runtime::create_private_dir(&dir)?;
-        let result = self.run_in(case, &dir).await;
+        let result = self.run_in(case, &dir, learned).await;
         // The scratch log holds the replayed conversation's calls; it is not
         // a record of anything that happened and must not linger.
         let _ = std::fs::remove_dir_all(&dir);
         result
     }
 
-    async fn run_in(&self, case: &Case, dir: &std::path::Path) -> io::Result<CaseResult> {
+    async fn run_in(
+        &self,
+        case: &Case,
+        dir: &std::path::Path,
+        learned: &Learned,
+    ) -> io::Result<CaseResult> {
         let tape = Arc::new(Mutex::new(Tape {
             recordings: case.tape.clone(),
             missing: Vec::new(),
@@ -444,8 +483,10 @@ impl Replayer {
         let names: Vec<CapabilityName> = registry.specs().into_iter().map(|s| s.name).collect();
         grant_manifest(&mut policy, &butler_id, &names);
         let audit = Arc::new(AuditLog::open(dir.join("audit.jsonl"))?);
-        let pins = Arc::new(PinVault::open(dir.join("pin.json"))?);
-        pins.set(REPLAY_PIN)?;
+        // Shared, so a grant for this case's task must not outlive it: it is
+        // made right before the approval that uses it, and runs are one at
+        // a time.
+        let pins = self.pins()?;
         let butler = Butler::new(
             butler_id,
             registry,
@@ -455,6 +496,7 @@ impl Replayer {
             ExpressionHub::new(audit),
         )
         .with_agents(self.agents.clone())
+        .with_learned(Arc::new(LearnedStore::memory(learned.clone())))
         .with_pin_vault(pins.clone())
         .with_budget(self.budget);
 

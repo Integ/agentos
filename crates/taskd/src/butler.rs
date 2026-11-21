@@ -50,6 +50,7 @@ use agentos_services::plugin_store::PluginManager;
 use agentos_services::registry::CapabilityRegistry;
 
 use crate::callers::CallerStore;
+use crate::learned::LearnedStore;
 use crate::preauth::PreauthStore;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
@@ -247,9 +248,13 @@ impl Frame {
 }
 
 /// Capabilities an outside caller never gets, whatever its manifest says.
-/// The blackboard is the user's shared memory, and the health report sums up
-/// every task, while a caller may only see its own.
-const CALLER_EXCLUDED: &[&str] = &["board.write", crate::improve::REPORT_CAPABILITY];
+/// The blackboard is the user's shared memory; the self-improvement
+/// capabilities sum up or are learned from every task of the user's, and
+/// undoing what was learned is the user's decision, while a caller may only
+/// see its own tasks.
+fn caller_excluded(name: &str) -> bool {
+    name == "board.write" || name.starts_with("improve.")
+}
 
 /// Words the butler puts in a failed task's message for why it stopped. The
 /// health report (`improve.rs`) tells kinds of failure apart by them, so they
@@ -284,11 +289,16 @@ struct Kernel {
     policy: PolicyEngine,
     plugin_generation: u64,
     plugin_names: Vec<CapabilityName>,
+    /// Agents the butler may delegate to: the configured ones plus the
+    /// skills it learned, which come and go like plugins.
+    agents: AgentDirectory,
+    learned_generation: u64,
+    skill_names: Vec<String>,
 }
 
 impl Kernel {
     /// What `agent` may currently use, including agents it can delegate to.
-    fn capabilities(&self, agent: &AgentId, agents: &AgentDirectory) -> Vec<CapabilitySpec> {
+    fn capabilities(&self, agent: &AgentId) -> Vec<CapabilitySpec> {
         let mut specs: Vec<_> = self
             .registry
             .specs()
@@ -296,7 +306,7 @@ impl Kernel {
             .filter(|spec| self.policy.is_granted(agent, &spec.name))
             .collect();
         specs.extend(
-            agents
+            self.agents
                 .all()
                 .map(AgentManifest::delegate_spec)
                 .chain([ask_spec()])
@@ -319,10 +329,10 @@ pub struct Butler {
     audit: Arc<AuditLog>,
     expr: ExpressionHub,
     tasks: Arc<TaskStore>,
-    agents: AgentDirectory,
     board: Option<Blackboard>,
     judge: Option<Arc<dyn Judge>>,
     pins: Option<Arc<PinVault>>,
+    learned: Option<Arc<LearnedStore>>,
     plugins: Option<Arc<PluginManager>>,
     view: Arc<Mutex<CapabilityView>>,
     slots: Mutex<HashMap<TaskId, Slot>>,
@@ -374,12 +384,15 @@ impl Butler {
                 policy,
                 plugin_generation: 0,
                 plugin_names: Vec::new(),
+                agents: AgentDirectory::new(),
+                learned_generation: 0,
+                skill_names: Vec::new(),
             }),
             planner,
             audit,
             expr,
             tasks,
-            agents: AgentDirectory::new(),
+            learned: None,
             board: None,
             judge: None,
             pins: None,
@@ -408,7 +421,7 @@ impl Butler {
     }
 
     fn publish(&self, kernel: &Kernel) {
-        let specs = kernel.capabilities(&self.id, &self.agents);
+        let specs = kernel.capabilities(&self.id);
         let readable = specs
             .iter()
             .filter(|spec| spec.risk == RiskLevel::ReadOnly)
@@ -427,8 +440,72 @@ impl Butler {
         for manifest in agents.all() {
             kernel.policy.grant(&id, &manifest.delegate_name());
         }
-        self.agents = agents;
+        kernel.agents = agents;
         self
+    }
+
+    /// Lessons and skills the system learned and adopted. Lessons are read
+    /// into the planner's context; skills become agents. Changes to the
+    /// store (an adoption, a rollback) take effect for the next task.
+    pub fn with_learned(mut self, learned: Arc<LearnedStore>) -> Self {
+        self.learned = Some(learned);
+        self.kernel_mut().learned_generation = u64::MAX;
+        self.sync_learned();
+        self
+    }
+
+    /// The agents as configured, without the learned skills: a replay adds
+    /// the skills it is trying itself.
+    pub fn configured_agents(&self) -> AgentDirectory {
+        let kernel = self.kernel();
+        let mut agents = kernel.agents.clone();
+        for id in &kernel.skill_names {
+            agents.remove(id);
+        }
+        agents
+    }
+
+    /// Every capability as registered now, plugins included.
+    pub fn capability_handles(&self) -> Vec<Arc<dyn Capability>> {
+        let kernel = self.kernel();
+        kernel
+            .registry
+            .specs()
+            .into_iter()
+            .filter_map(|spec| kernel.registry.get(&spec.name).cloned())
+            .collect()
+    }
+
+    /// Bring the learned skills in line with the store. A skill never
+    /// replaces an agent that was configured by hand.
+    fn sync_learned(&self) {
+        let Some(learned) = &self.learned else {
+            return;
+        };
+        let (generation, current) = learned.current();
+        let mut guard = self.kernel();
+        let kernel = &mut *guard;
+        if generation == kernel.learned_generation {
+            return;
+        }
+        kernel.learned_generation = generation;
+        for id in kernel.skill_names.drain(..) {
+            if let Some(manifest) = kernel.agents.remove(&id) {
+                kernel.policy.revoke(&self.id, &manifest.delegate_name());
+            }
+        }
+        for manifest in current.skills() {
+            if kernel.agents.get(&manifest.id).is_some() {
+                continue;
+            }
+            let name = manifest.delegate_name();
+            let id = manifest.id.clone();
+            if kernel.agents.add(manifest).is_ok() {
+                kernel.policy.grant(&self.id, &name);
+                kernel.skill_names.push(id);
+            }
+        }
+        self.publish(kernel);
     }
 
     /// The shared blackboard; its content is part of every agent's context.
@@ -490,7 +567,7 @@ impl Butler {
                 caller.wants(spec.name.as_str())
                     && spec.risk <= caller.max_risk
                     && kernel.policy.is_granted(&self.id, &spec.name)
-                    && !CALLER_EXCLUDED.contains(&spec.name.as_str())
+                    && !caller_excluded(spec.name.as_str())
             })
             .collect();
         // Asking back is how it learns what it was not told; the answer is
@@ -547,7 +624,7 @@ impl Butler {
 
     /// What the butler may currently use, including agents it can delegate to.
     pub fn capabilities(&self) -> Vec<CapabilitySpec> {
-        self.kernel().capabilities(&self.id, &self.agents)
+        self.kernel().capabilities(&self.id)
     }
 
     pub fn awaiting_confirmation(&self) -> bool {
@@ -767,6 +844,22 @@ impl Butler {
             }
             return (text, tainted);
         }
+        // Learned from the user's own untainted tasks and checked by replay;
+        // a caller's task is not told them, as it is told nothing else of
+        // the user's history.
+        if let Some(learned) = &self.learned {
+            let (_, learned) = learned.current();
+            let lessons = learned.lessons();
+            if !lessons.is_empty() {
+                text.push_str(
+                    "\n\n从过去的任务里总结、经回放验证过的经验（系统自己学到的，用户可以撤回）：",
+                );
+                for lesson in lessons {
+                    text.push_str("\n- ");
+                    text.push_str(lesson);
+                }
+            }
+        }
         let thread = self.tasks.thread_of(current);
         // Only what each task was about and how it ended is used below.
         let (recent, _, _) = self.tasks.page_as(
@@ -848,6 +941,7 @@ impl Butler {
             return Ok(());
         }
         self.sync_plugins();
+        self.sync_learned();
         let caller = caller_of(&task.intent).map(str::to_string);
         let (agent, specs) = match &caller {
             Some(caller) => {
@@ -1316,6 +1410,7 @@ impl Butler {
                 return Ok(Flow::OverBudget(limit));
             }
             self.sync_plugins();
+            self.sync_learned();
             if frame.is_butler() {
                 frame.specs = match &frame.caller {
                     // Revoked meanwhile: nothing is offered any more.
@@ -1492,7 +1587,11 @@ impl Butler {
             return Ok(Flow::Continue);
         }
 
-        let delegate = self.agents.by_capability(&step.capability).cloned();
+        let delegate = self
+            .kernel()
+            .agents
+            .by_capability(&step.capability)
+            .cloned();
         let capability = self.kernel().registry.get(&step.capability).cloned();
         let asking = step.capability.as_str() == ASK_USER;
         let spec = match (&delegate, &capability) {
@@ -1927,7 +2026,7 @@ impl Butler {
         let mut out = Vec::new();
         for (step, key) in plan.steps.iter().zip(&frame.keys).skip(frame.next + 1) {
             if step.capability.as_str() == ASK_USER
-                || self.agents.by_capability(&step.capability).is_some()
+                || kernel.agents.by_capability(&step.capability).is_some()
                 || !frame.specs.iter().any(|spec| spec.name == step.capability)
             {
                 break;

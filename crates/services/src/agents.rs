@@ -210,6 +210,10 @@ impl AgentDirectory {
         Ok(())
     }
 
+    pub fn remove(&mut self, id: &str) -> Option<AgentManifest> {
+        self.agents.remove(id)
+    }
+
     pub fn get(&self, id: &str) -> Option<&AgentManifest> {
         self.agents.get(id)
     }
