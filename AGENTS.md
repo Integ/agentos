@@ -32,6 +32,7 @@ node --test crates/web-shell/assets/*.test.mjs
 | 审计事件 | `crates/audit/` |
 | 终端、浏览器、原生桌面 | `crates/cli/`、`crates/web-shell/`、`crates/shell/` |
 | 按住说话、朗读、崩溃报告、旧数据迁移 | `crates/taskd/src/voice.rs`、`crash.rs`、`migrate.rs` |
+| 自我改进：体检报告、回放评测、学习与自动采用 | `crates/taskd/src/improve.rs`、`replay.rs`、`learn.rs`、`learned.rs` |
 
 只有一个守护进程 `agentos-taskd`。旧的 `agentosd` 已删除；镜像里的 `image/rootfs/usr/local/bin/agentosd` 只是给 v0.4 及更早版本的 `agentos-update` 自检用的垫片，不要往里加功能，下一个版本删除它。
 

@@ -11,7 +11,7 @@ use agentos_planner::llm::TextModel;
 use agentos_planner::openai::{OpenAiConfig, OpenAiPlanner};
 use agentos_planner::{Planner, RulePlanner};
 use agentos_policy::PolicyEngine;
-use agentos_runtime::TaskStore;
+use agentos_runtime::{TaskId, TaskStore};
 use agentos_services::agents::AgentDirectory;
 use agentos_services::blackboard::{self, Blackboard};
 use agentos_services::evolve::{self, LlmGenerator, NoGenerator, PluginGenerator};
@@ -27,8 +27,12 @@ use agentos_taskd::builtin;
 use agentos_taskd::butler::{grant_manifest, Budget, Butler};
 use agentos_taskd::callers::CallerStore;
 use agentos_taskd::crash;
+use agentos_taskd::improve::ImproveReport;
+use agentos_taskd::learn::{Config as LearnConfig, Improver, LearnedList, Rollback};
+use agentos_taskd::learned::{self, LearnedStore};
 use agentos_taskd::migrate;
 use agentos_taskd::preauth::PreauthStore;
+use agentos_taskd::replay::{self, Pick, Replayer, Summary};
 use agentos_taskd::service::Service;
 use agentos_taskd::voice::{SpeechOutput, Voice, VoiceConfig};
 
@@ -42,11 +46,19 @@ const HELP: &str = "\
   --set-pin                     设置不可逆操作的 PIN，然后退出
   --clear-pin                   取消 PIN，然后退出
   --verify-audit                校验审计日志的哈希链，然后退出
+  --replay                      把最近的任务重新交给现在的系统，和当时的结局比较，然后退出；
+                                能力一律用当时记录的结果代替，不执行任何真实操作；
+                                有任务以前成功、现在不成功时退出码为 1
+    --limit N                   回放最近 N 个可以回放的任务（默认 20）
+    --tasks task-1,task-5       只回放这些任务
+                                回放默认用离线规则规划器；用模型要写明 --planner（会消耗 token）
   --help, -h                    查看帮助
   --version, -V                 查看版本
 
 状态目录里的可选配置：mcp.json（MCP server）、agents/*.json（自定义子 Agent）。
-环境变量：HASS_URL 与 HASS_TOKEN 接入 Home Assistant；AGENTOS_JUDGE=1 启用裁判。
+环境变量：HASS_URL 与 HASS_TOKEN 接入 Home Assistant；AGENTOS_JUDGE=1 启用裁判；
+AGENTOS_IMPROVE=1 在空闲时从历史里学习，评测明显变好就自动采用（需要模型，会消耗 token；
+AGENTOS_IMPROVE_AUTO=0 只评测不采用）。
 
 在另一终端运行 agentos workbench 连接工作台。
 服务不读取 stdin；客户端退出后任务继续。SIGINT/SIGTERM 停止服务。";
@@ -58,6 +70,7 @@ enum Mode {
     SetPin,
     ClearPin,
     VerifyAudit,
+    Replay,
 }
 
 #[derive(Default, Debug)]
@@ -67,6 +80,8 @@ struct Options {
     state_dir: Option<PathBuf>,
     socket: Option<PathBuf>,
     mode: Mode,
+    limit: Option<usize>,
+    tasks: Vec<TaskId>,
 }
 
 /// `Ok(Err(text))` is text to print before exiting successfully.
@@ -87,7 +102,8 @@ fn options(args: impl IntoIterator<Item = String>) -> io::Result<Result<Options,
             "--set-pin" => options.mode = Mode::SetPin,
             "--clear-pin" => options.mode = Mode::ClearPin,
             "--verify-audit" => options.mode = Mode::VerifyAudit,
-            "--planner" | "--audit" | "--state-dir" | "--socket" => {
+            "--replay" => options.mode = Mode::Replay,
+            "--planner" | "--audit" | "--state-dir" | "--socket" | "--limit" | "--tasks" => {
                 let value = args
                     .next()
                     .filter(|s| !s.is_empty() && !s.starts_with("--"))
@@ -98,6 +114,26 @@ fn options(args: impl IntoIterator<Item = String>) -> io::Result<Result<Options,
                     "--planner" => options.planner = Some(value),
                     "--audit" => options.audit = Some(value.into()),
                     "--state-dir" => options.state_dir = Some(value.into()),
+                    "--limit" => {
+                        let limit = value.parse().ok().filter(|n| *n > 0).ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("--limit 需要一个正整数，不是 {value}"),
+                            )
+                        })?;
+                        options.limit = Some(limit);
+                    }
+                    "--tasks" => {
+                        for item in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                            let id = item.parse().map_err(|_| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidInput,
+                                    format!("--tasks 里的 {item} 不是任务编号（例如 task-3）"),
+                                )
+                            })?;
+                            options.tasks.push(id);
+                        }
+                    }
                     _ => options.socket = Some(value.into()),
                 }
             }
@@ -251,6 +287,99 @@ fn verify_audit(path: &Path) -> io::Result<()> {
     }
 }
 
+const DEFAULT_REPLAY_LIMIT: usize = 20;
+
+/// Put recent tasks to the system as it is now and compare outcomes. It
+/// reads the history without the daemon's lock and writes nothing of the
+/// daemon's, so it may run beside a running service. The capabilities are
+/// the ones that exist without the network or outside programs (built-ins,
+/// the blackboard, plugins); a task that used anything else is skipped.
+async fn replay(state_dir: &Path, planner: Option<String>, pick: Pick) -> io::Result<()> {
+    // Model tokens cost money; a replay spends them only when asked to by
+    // name, never because an API key happens to be in the environment.
+    let choice = planner
+        .or_else(|| std::env::var("AGENTOS_PLANNER").ok())
+        .unwrap_or_else(|| "rule".into());
+    let (planner, _, label) = make_planner(Some(choice))?;
+    let tasks = state_file(
+        "任务记录",
+        &state_dir.join("tasks.json"),
+        TaskStore::read_tasks(state_dir),
+    )?;
+
+    let mut registry = CapabilityRegistry::new();
+    builtin::register_all(&mut registry);
+    blackboard::register_all(&mut registry, Blackboard::in_memory());
+    let plugins = Arc::new(PluginManager::open_read_only(
+        state_dir.join("evolve"),
+        SandboxMode::detect(),
+    ));
+    evolve::register_all(&mut registry, plugins.clone(), Arc::new(NoGenerator));
+    for plugin in plugins.active() {
+        // As in the service: a plugin never shadows a built-in.
+        if registry.get(&plugin.spec().name).is_none() {
+            registry.register(plugin);
+        }
+    }
+    let capabilities = registry
+        .specs()
+        .into_iter()
+        .filter_map(|spec| registry.get(&spec.name).cloned())
+        .collect();
+    let mut agents = AgentDirectory::with_builtin();
+    for note in agents.load_dir(&state_dir.join("agents")) {
+        eprintln!("{note}");
+    }
+    let budget = task_budget(|name| std::env::var(name).ok())
+        .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+    let scratch = std::env::temp_dir().join(format!("agentos-replay-{}", std::process::id()));
+    agentos_runtime::create_private_dir(&scratch)?;
+    // What the system learned is part of the system as it is now.
+    let improve_dir = state_dir.join("improve");
+    let learned = state_file(
+        "学到的经验和技能",
+        &improve_dir.join(learned::FILE),
+        LearnedStore::open(&improve_dir),
+    )?;
+    let replayer = Replayer::new(
+        capabilities,
+        agents,
+        budget,
+        Arc::from(planner),
+        scratch.clone(),
+    )
+    .with_learned((*learned.current().1).clone());
+
+    let (cases, skipped) = replay::cases(&tasks, &|name| replayer.offers(name), &pick);
+    eprintln!("用{label}回放 {} 个任务，不执行任何真实操作……", cases.len());
+    let mut summary = Summary {
+        cases: Vec::with_capacity(cases.len()),
+        skipped,
+    };
+    let mut failure = None;
+    for case in &cases {
+        match replayer.run(case).await {
+            Ok(result) => summary.cases.push(result),
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    if let Some(error) = failure {
+        return Err(io::Error::new(
+            error.kind(),
+            format!("回放没有完成：{error}"),
+        ));
+    }
+    println!("{}", replay::render(&summary, &label));
+    if summary.regressed() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 /// Name the state file a startup failure came from and what to do about
 /// it. A damaged file is never repaired or replaced automatically (it may be
 /// the only copy of the user's data), so the person reading the log, or
@@ -305,6 +434,11 @@ async fn serve() -> io::Result<()> {
         })
         .unwrap_or_else(|| state_dir.join("audit.jsonl"));
     let pin_path = state_dir.join("pin.json");
+    let pick = if options.tasks.is_empty() {
+        Pick::Latest(options.limit.unwrap_or(DEFAULT_REPLAY_LIMIT))
+    } else {
+        Pick::Tasks(options.tasks.clone())
+    };
     match options.mode {
         Mode::Serve => {}
         Mode::SetPin => {
@@ -313,6 +447,7 @@ async fn serve() -> io::Result<()> {
         }
         Mode::ClearPin => return clear_pin(&pin_path),
         Mode::VerifyAudit => return verify_audit(&audit_path),
+        Mode::Replay => return replay(&state_dir, options.planner, pick).await,
     }
     if !explicit_state_dir {
         if let Some(legacy) = migrate::legacy_dir(|name| std::env::var(name).ok()) {
@@ -335,6 +470,7 @@ async fn serve() -> io::Result<()> {
     }
     // From here on a panic is reported and ends the service; see crash.rs.
     crash::install(&state_dir);
+    let planner_choice = options.planner.clone();
     let (planner, text_model, label) = make_planner(options.planner)?;
     let socket = options
         .socket
@@ -372,6 +508,20 @@ async fn serve() -> io::Result<()> {
         &notes_path,
         builtin::register_persistent(&mut registry, &notes_path),
     )?;
+    // Self-improvement: a read-only report on the system's own history,
+    // and what it learned from it, with the user's undo.
+    registry.register(Arc::new(ImproveReport::new(
+        tasks.clone(),
+        audit.path().to_path_buf(),
+    )));
+    let improve_dir = state_dir.join("improve");
+    let learned = Arc::new(state_file(
+        "学到的经验和技能",
+        &improve_dir.join(learned::FILE),
+        LearnedStore::open(&improve_dir),
+    )?);
+    registry.register(Arc::new(LearnedList::new(learned.clone())));
+    registry.register(Arc::new(Rollback::new(learned.clone(), audit.clone())));
     let board_path = state_dir.join("blackboard.json");
     let board = state_file("黑板", &board_path, Blackboard::open(&board_path))?;
     blackboard::register_all(&mut registry, board.clone());
@@ -445,6 +595,7 @@ async fn serve() -> io::Result<()> {
     }
     let preauth_path = state_dir.join("preauthorizations.json");
     let callers_path = state_dir.join("callers.json");
+    let tasks_handle = tasks.clone();
     let mut butler = Butler::with_store(
         butler_id,
         registry,
@@ -468,7 +619,8 @@ async fn serve() -> io::Result<()> {
         "外部调用方",
         &callers_path,
         CallerStore::open(&callers_path),
-    )?));
+    )?))
+    .with_learned(learned.clone());
     // AGENTOS_JUDGE=1: a model reviews allowed L1+ steps before they run.
     let judge_on = std::env::var("AGENTOS_JUDGE").is_ok_and(|v| v == "1" || v == "on");
     let judge = match (&text_model, judge_on) {
@@ -483,6 +635,41 @@ async fn serve() -> io::Result<()> {
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let voice_label = voice_label(&voice.status());
+    let butler = Arc::new(butler);
+    let improve = match improve_settings(|name| std::env::var(name).ok())
+        .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?
+    {
+        None => "未启用（AGENTOS_IMPROVE=1 开启，会消耗 token）".to_string(),
+        Some(settings) => match (make_planner(planner_choice)?, text_model.clone()) {
+            ((_, None, _), _) | (_, None) => "需要模型规划器，未启用".to_string(),
+            ((planner, Some(_), planner_label), Some(model)) => {
+                let label = format!(
+                    "已启用，空闲 {} 秒后每 {} 秒一轮，{}",
+                    settings.idle.as_secs(),
+                    settings.interval.as_secs(),
+                    if settings.config.auto {
+                        "通过评测即自动生效"
+                    } else {
+                        "只评测不生效（AGENTOS_IMPROVE_AUTO=0）"
+                    }
+                );
+                let improver = Improver::new(
+                    tasks_handle.clone(),
+                    audit.clone(),
+                    learned.clone(),
+                    butler.clone(),
+                    model,
+                    Arc::from(planner),
+                    planner_label,
+                    budget,
+                    settings.config.clone(),
+                    state_dir.join("improve").join("scratch"),
+                );
+                tokio::spawn(improve_loop(improver, tasks_handle.clone(), settings));
+                label
+            }
+        },
+    };
     let server = Service::with_butler(butler, audit, Some(pins.clone()))
         .with_voice(voice)
         .bind(&socket)
@@ -494,7 +681,7 @@ async fn serve() -> io::Result<()> {
         server.path().display()
     );
     println!(
-        "子 Agent：{}\n插件：{}\n智能家居：{home}\n语音：{voice_label}\n裁判：{judge}\n每个任务的预算：{}\nPIN：{}",
+        "子 Agent：{}\n插件：{}\n智能家居：{home}\n语音：{voice_label}\n裁判：{judge}\n自我改进：{improve}\n每个任务的预算：{}\nPIN：{}",
         agent_names.join("、"),
         sandbox.label(),
         budget_label(budget),
@@ -510,6 +697,69 @@ async fn serve() -> io::Result<()> {
             tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {} }
         })
         .await
+}
+
+/// When and how the self-improvement cycle runs.
+#[derive(Debug, Clone, PartialEq)]
+struct ImproveSettings {
+    config: LearnConfig,
+    /// How long nothing of the user's may have happened before a cycle.
+    idle: std::time::Duration,
+    /// Time between cycles.
+    interval: std::time::Duration,
+}
+
+/// `AGENTOS_IMPROVE=1` turns the cycle on; off by default, because every
+/// cycle spends model tokens. `AGENTOS_IMPROVE_IDLE` and
+/// `AGENTOS_IMPROVE_INTERVAL` are seconds.
+fn improve_settings(
+    var: impl Fn(&str) -> Option<String>,
+) -> Result<Option<ImproveSettings>, String> {
+    match var("AGENTOS_IMPROVE").as_deref().map(str::trim) {
+        None | Some("") | Some("0") | Some("off") => return Ok(None),
+        Some("1") | Some("on") => {}
+        Some(other) => return Err(format!("AGENTOS_IMPROVE 只能是 1 或 0，不是 {other}")),
+    }
+    let seconds = |name: &str, default: u64| -> Result<std::time::Duration, String> {
+        match var(name) {
+            None => Ok(std::time::Duration::from_secs(default)),
+            Some(value) => value
+                .trim()
+                .parse()
+                .map(std::time::Duration::from_secs)
+                .map_err(|_| format!("{name} 必须是秒数，不是 {value}")),
+        }
+    };
+    Ok(Some(ImproveSettings {
+        config: LearnConfig::from_env(&var)?,
+        idle: seconds("AGENTOS_IMPROVE_IDLE", 600)?,
+        interval: seconds("AGENTOS_IMPROVE_INTERVAL", 1800)?.max(std::time::Duration::from_secs(1)),
+    }))
+}
+
+/// Run a cycle whenever the machine has been idle long enough: nothing of
+/// the user's queued or running, and nothing changed for `idle`. The cycle
+/// itself stops when the user comes back.
+async fn improve_loop(improver: Improver, tasks: Arc<TaskStore>, settings: ImproveSettings) {
+    loop {
+        tokio::time::sleep(settings.interval).await;
+        let now = agentos_core::now_ms();
+        let quiet_since = tasks
+            .list()
+            .iter()
+            .map(|t| t.updated_at_ms)
+            .max()
+            .unwrap_or(0);
+        let idle = tasks.unfinished().is_empty()
+            && now.saturating_sub(quiet_since) >= settings.idle.as_millis() as u64;
+        if !idle {
+            continue;
+        }
+        match improver.cycle().await {
+            Ok(outcome) => eprintln!("{}", outcome.describe()),
+            Err(error) => eprintln!("自我改进这一轮出错，下次再试：{error}"),
+        }
+    }
 }
 
 /// The console line for voice: what recognizes and reads, and where audio goes.
@@ -589,14 +839,50 @@ mod tests {
             parse(&["--verify-audit"]).unwrap().unwrap().mode,
             Mode::VerifyAudit
         );
+        let replay = parse(&["--replay", "--tasks", "task-3, 7", "--limit", "5"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.mode, Mode::Replay);
+        assert_eq!(replay.tasks, [TaskId(3), TaskId(7)]);
+        assert_eq!(replay.limit, Some(5));
         for args in [
             vec!["--plannr", "rule"],
             vec!["--state-dir"],
             vec!["--socket", "--planner"],
             vec!["serve"],
+            vec!["--replay", "--limit", "0"],
+            vec!["--replay", "--limit", "many"],
+            vec!["--replay", "--tasks", "first"],
         ] {
             assert!(parse(&args).is_err(), "{args:?}");
         }
+    }
+
+    #[test]
+    fn self_improvement_is_off_unless_asked_for_and_typos_are_errors() {
+        let from = |pairs: &'static [(&'static str, &'static str)]| {
+            improve_settings(move |name| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+            })
+        };
+        // Off by default: every cycle spends model tokens.
+        assert_eq!(from(&[]).unwrap(), None);
+        assert_eq!(from(&[("AGENTOS_IMPROVE", "0")]).unwrap(), None);
+        let on = from(&[
+            ("AGENTOS_IMPROVE", "1"),
+            ("AGENTOS_IMPROVE_IDLE", "5"),
+            ("AGENTOS_IMPROVE_INTERVAL", "0"),
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(on.idle, std::time::Duration::from_secs(5));
+        assert_eq!(on.interval, std::time::Duration::from_secs(1));
+        assert!(on.config.auto);
+        assert!(from(&[("AGENTOS_IMPROVE", "yes")]).is_err());
+        assert!(from(&[("AGENTOS_IMPROVE", "1"), ("AGENTOS_IMPROVE_IDLE", "soon")]).is_err());
     }
 
     #[test]

@@ -28,7 +28,7 @@
 
 信封还可以带一个可选的 `caller`，表示以某个已注册的外部调用方的身份发出请求；见“外部调用方”。
 
-`version` 是协议版本，与程序的语义版本号分开。v0.3 和 v0.4 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法；请求信封的 `caller`、`preauthorize` 的 `caller`，以及 `register_caller`、`callers`、`revoke_caller` 方法；`activity`、`voice`、`listen`、`speech` 方法，`watch` 的 `voice`，`submit` 和 `reply` 的 `spoken`，以及语音事件 `voice_state`、`voice_level`、`transcript`、`voice_notice`（只发给声明了 `voice` 的订阅）。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
+`version` 是协议版本，与程序的语义版本号分开。v0.3 和 v0.4 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法；请求信封的 `caller`、`preauthorize` 的 `caller`，以及 `register_caller`、`callers`、`revoke_caller` 方法；`activity`、`voice`、`listen`、`speech` 方法，`activity` 的 `improvement` 条目，`watch` 的 `voice`，`submit` 和 `reply` 的 `spoken`，以及语音事件 `voice_state`、`voice_level`、`transcript`、`voice_notice`（只发给声明了 `voice` 的订阅）。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
 
 `id` 是客户端选择的无符号整数，仅用于关联响应，**不是幂等键**。重复发送同一个 `submit` 请求编号仍可能创建第二个任务。收到完整响应前连接断开时，结果可能已经落盘；客户端必须查询任务，不能自动重发变更请求。
 
@@ -147,7 +147,7 @@ Agent 缺少只有用户知道的信息时可以提问。提问是任务的一�
 - **比用户更严。** L0 自动执行；L1 及以上默认都要用户批准（用户自己的 L1 是自动执行的）。批准只能由用户做，调用方不能批准自己的请求；任务的提问 `ask.user` 可以由调用方或用户回答。
 - **预授权要专门给它。** `preauthorize` 带 `caller` 时，规则只适用于这个调用方，能力必须在它的清单内；给用户自己的预授权不适用于它。
 - **上下文隔离。** 规划时不会附上用户的其他任务；清单里有 `board.read` 才会附上黑板。它的任务也不会出现在用户任务的上下文里。
-- **不能委派子 Agent，不能写黑板，** 即使清单里写了 `agent.*` 或 `board.*`。
+- **不能委派子 Agent，不能写黑板，不能用任何 `improve.*` 能力，** 即使清单里写了 `agent.*`、`board.*` 或 `improve.*`：体检报告和学到的经验都来自用户的全部任务，而调用方只能看到自己的任务；撤回学到的东西是用户的决定。
 - **撤销立即生效。** 调用方被撤销后，它进行中的任务的下一次调用就被拒绝，它的预授权一并撤销；重新注册同名调用方不会恢复它们。
 
 `max_risk` 取 `read_only`、`reversible`、`external`、`irreversible`。`id` 只能用小写字母、数字、`-` 和 `_`，最长 32 个字符；`capabilities` 的每一项是能力名或以 `*` 结尾的前缀，单独一个 `*` 不被接受；最多 32 个调用方。设置了 PIN 时，注册必须带 `pin`。注册和撤销各有一条审计记录，并且是变更请求：连接中断后先用 `callers` 查询，不要重发。
@@ -300,7 +300,7 @@ PIN 由服务端核对，不保存、不写入任务或审计；核对通过只�
 
 ## 最近活动
 
-`activity` 给桌面的“最近活动”面板用：每一项有 `seq`、`at_ms`、`kind` 和 `ok`，按 `kind` 另带字段——`invoked`（能力调用）和 `confirmation`（人工确认）带 `capability`，`device`（麦克风）带 `device` 和 `detail`，`crash` 带 `summary`。服务崩溃时把报告写进状态目录的 `crash.txt` 并退出，用户服务把它重新拉起；新的一次运行把报告的第一行记为审计事件 `daemon_crashed`，这里就能看到。只读日志末尾的一段，更早的活动不会出现。
+`activity` 给桌面的“最近活动”面板用：每一项有 `seq`、`at_ms`、`kind` 和 `ok`，按 `kind` 另带字段——`invoked`（能力调用）和 `confirmation`（人工确认）带 `capability`，`device`（麦克风）带 `device` 和 `detail`，`crash` 带 `summary`，`improvement`（系统自己采用或撤回了一条经验、一个技能）带 `id` 和 `summary`，`ok` 为 `false` 表示撤回。服务崩溃时把报告写进状态目录的 `crash.txt` 并退出，用户服务把它重新拉起；新的一次运行把报告的第一行记为审计事件 `daemon_crashed`，这里就能看到。只读日志末尾的一段，更早的活动不会出现。
 
 ## 资源界限与背压
 

@@ -194,6 +194,25 @@ pub enum AuditEvent {
         action: String,
         detail: Value,
     },
+    /// The system adopted something it learned from its own history (a
+    /// lesson, a skill) because replaying past tasks showed it clearly
+    /// better. No one approved it; this record, the activity feed and
+    /// `improve.rollback` are how the user sees and undoes it.
+    ImprovementApplied {
+        id: String,
+        kind: String,
+        /// What was adopted, in full.
+        content: Value,
+        /// The replay that justified it.
+        evidence: Value,
+    },
+    /// An adopted improvement was withdrawn: by the user, or automatically
+    /// because the tasks after it did worse than the tasks before it.
+    ImprovementRolledBack {
+        id: String,
+        by: String,
+        reason: String,
+    },
     /// The previous run of the daemon crashed; `summary` is the first line
     /// of its crash report (program, message and source location).
     DaemonCrashed {
@@ -592,12 +611,25 @@ impl AuditLog {
     }
 }
 
+/// One line on what an adopted improvement was, for the activity feed.
+fn improvement_summary(content: &Value) -> String {
+    if let Some(text) = content.get("text").and_then(Value::as_str) {
+        return format!("学会了一条经验：{text}");
+    }
+    let name = content
+        .get("name")
+        .or_else(|| content.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or("新技能");
+    format!("学会了一个技能：{name}")
+}
+
 /// The last `n` capability calls, confirmations, device uses and crashes,
 /// oldest first, for a person glancing at what the system has been doing.
 /// Each item has `seq`, `at_ms`, `kind` (`invoked`, `confirmation`,
-/// `device`, `crash`) and `ok`, plus `capability`, `device` and `detail`, or
-/// `summary`, by kind. A damaged line (a crash mid-write) is skipped rather
-/// than blanking the list.
+/// `device`, `crash`, `improvement`) and `ok`, plus `capability`, `device` and
+/// `detail`, or `summary` (and `id` for an improvement), by kind. A damaged
+/// line (a crash mid-write) is skipped rather than blanking the list.
 ///
 /// Only the end of the log is read: it is append-only and grows without
 /// bound, and this is asked for whenever a desktop connects. Older activity
@@ -657,6 +689,22 @@ pub fn recent_activity(path: impl AsRef<Path>, n: usize) -> Vec<serde_json::Valu
                 "detail": detail,
                 "ok": true,
             })),
+            AuditEvent::ImprovementApplied { id, content, .. } => Some(json!({
+                "seq": e.seq,
+                "at_ms": e.at_ms,
+                "kind": "improvement",
+                "id": id,
+                "summary": improvement_summary(&content),
+                "ok": true,
+            })),
+            AuditEvent::ImprovementRolledBack { id, reason, .. } => Some(json!({
+                "seq": e.seq,
+                "at_ms": e.at_ms,
+                "kind": "improvement",
+                "id": id,
+                "summary": format!("撤回了 {id}：{reason}"),
+                "ok": false,
+            })),
             AuditEvent::DaemonCrashed { summary } => Some(json!({
                 "seq": e.seq,
                 "at_ms": e.at_ms,
@@ -674,6 +722,47 @@ pub fn recent_activity(path: impl AsRef<Path>, n: usize) -> Vec<serde_json::Valu
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn adopted_and_withdrawn_improvements_show_in_recent_activity() {
+        // Adoption needs no approval, so the feed is where the user sees it.
+        let dir = std::env::temp_dir().join(format!(
+            "agentos-activity-improve-{}-{}",
+            std::process::id(),
+            agentos_core::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("audit.jsonl");
+        let log = AuditLog::open(&path).unwrap();
+        log.append(AuditEvent::ImprovementApplied {
+            id: "lesson-1".into(),
+            kind: "lesson".into(),
+            content: serde_json::json!({"kind": "lesson", "text": "先确认城市"}),
+            evidence: serde_json::json!({}),
+        })
+        .unwrap();
+        log.append(AuditEvent::ImprovementApplied {
+            id: "skill-2".into(),
+            kind: "skill".into(),
+            content: serde_json::json!({"kind": "skill", "id": "trip", "name": "出差准备"}),
+            evidence: serde_json::json!({}),
+        })
+        .unwrap();
+        log.append(AuditEvent::ImprovementRolledBack {
+            id: "lesson-1".into(),
+            by: "user".into(),
+            reason: "用户撤回".into(),
+        })
+        .unwrap();
+        let items = recent_activity(&path, 20);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["kind"], "improvement");
+        assert_eq!(items[0]["summary"], "学会了一条经验：先确认城市");
+        assert_eq!(items[1]["summary"], "学会了一个技能：出差准备");
+        assert_eq!(items[2]["ok"], false);
+        assert_eq!(items[2]["id"], "lesson-1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn recent_activity_shows_crashes_and_skips_a_torn_line() {

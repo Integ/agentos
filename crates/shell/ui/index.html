@@ -628,6 +628,15 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
         li.append(el("span", "dot wait"), box);
         return li;
       }
+      if (a.kind === "improvement") {
+        // Adopted without approval, so the feed is where the user sees it;
+        // improve.rollback (or "撤回 <id>") undoes it.
+        const box = el("div"), meta = el("div", "meta");
+        meta.append(el("span", "mono", a.id || ""), document.createTextNode(" · " + relTime(a.at_ms)));
+        box.append(el("div", null, a.summary || ""), meta);
+        li.append(el("span", "dot" + (a.ok ? "" : " wait")), box);
+        return li;
+      }
       if (a.kind === "crash") {
         const box = el("div"), meta = el("div", "meta");
         meta.append(el("span", "mono", "agentos-taskd"), document.createTextNode(" · " + relTime(a.at_ms)));
