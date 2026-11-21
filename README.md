@@ -38,6 +38,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 - **智能家居**：接入 Home Assistant，开灯、调空调是 L1，场景脚本是 L2，开锁、撤防、开车库门是 L3。见 [docs/smart-home.md](docs/smart-home.md)。
 - **MCP 工具**：`mcp.json` 里配置的 MCP server，工具自动成为管家的能力。见 [docs/mcp.md](docs/mcp.md)。
 - **自我进化**：让 AgentOS 给自己写新能力，以沙箱插件形式安装，可回滚。见 [docs/self-evolution.md](docs/self-evolution.md)。
+- **自我改进**：体检报告指出哪里做得不好；回放把过去的任务交给现在的系统、对比结局，可以当回归检查；打开后在空闲时从自己的历史里学经验和技能，回放证明明显变好才自动采用，变差就自动撤回，随时可以撤销。学到的东西改不了权限。见 [docs/self-improvement-research.md](docs/self-improvement-research.md) 和 [架构](docs/architecture.md#自我改进体检回放与学习)。
 - **安全模型**：能力令牌 + 风险分级确认（L0–L3）；污点追踪（网络插件、MCP 输出会让后续有影响的操作都要确认）；L3 操作必须设置 PIN 并在批准时输入；批准只在屏幕上进行，说话不能批准；审计日志带 SHA-256 哈希链，可校验；插件有 bubblewrap 沙箱和资源上限（内存 1 GiB、CPU 10 秒等）。
 - **一等公民的 Agent（v0.4）**：任务并行执行（默认同时 4 个）；会话线程让你接着上一句话说；缺信息时 Agent 用 `ask.user` 停下来问你；每个任务有规划轮数、token 和执行时长预算，用量写进任务和审计；`agentos preauthorize` 事先许可一类 L1/L2 调用；`agentos mcp --caller …` 让别的 Agent 通过 MCP 使用 AgentOS。见 [docs/v0.4-design.md](docs/v0.4-design.md)。
 - **持久任务与多个界面（v0.3）**：`agentos-taskd` 把任务放在后台服务里，命令行、终端工作台、浏览器和原生桌面通过同一个 Unix socket 协议连接；关掉界面任务照常进行，历史可分页，变更实时通知，批准绑定到具体任务的具体步骤。见 [docs/persistent-workspace.md](docs/persistent-workspace.md)。
@@ -48,6 +49,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 - 设计草案：[AgentOS 架构设计草案](https://claude.ai/artifact/RzRDjHkBbJVbnyFDRSZ4BN)
 - 架构：[docs/architecture.md](docs/architecture.md)，[Unix socket 协议 v1](docs/protocol-v1.md)
+- 自我改进：[docs/self-improvement-research.md](docs/self-improvement-research.md)
 - 任务服务、命令行与工作台：[docs/persistent-workspace.md](docs/persistent-workspace.md)
 - 历史设计：[docs/v0.3-design.md](docs/v0.3-design.md)、[docs/v0.2-design.md](docs/v0.2-design.md)
 - 安装：[docs/install.md](docs/install.md)，在线更新：[docs/update.md](docs/update.md)
@@ -85,7 +87,7 @@ crates/
   audit/     只追加审计日志：同步落盘、单一写入者、哈希链
   planner/   规划契约、离线规则规划器、Claude 与 OpenAI 兼容规划器
   services/  能力注册表、子 Agent、黑板、裁判、PIN、MCP、插件与自我进化、智能家居
-  taskd/     任务内核 agentos-taskd：管家循环、内置能力、控制服务
+  taskd/     任务内核 agentos-taskd：管家循环、内置能力、控制服务、自我改进（体检、回放、学习）
   cli/       agentos 命令与终端任务工作台
   web-shell/ 浏览器界面 agentos-web-shell：情景布局与连续实时语音
   shell/     原生桌面 agentos-shell：玻璃风格桌面与设置助理
@@ -186,6 +188,18 @@ OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_MODEL=qwen3 cargo run -p agento
 ```
 
 插件在 bubblewrap 沙箱中运行（`apt install bubblewrap python3`），存放在状态目录的 `evolve/`。详见 [docs/self-evolution.md](docs/self-evolution.md)。
+
+### 自我改进
+
+```sh
+agentos read improve.report '{"days":7}'   # 体检报告：无法处理的要求、反复失败的能力、失败原因……
+agentos-taskd --replay                     # 回放最近 20 个任务，对比当时的结局；有退化时退出码为 1
+agentos-taskd --replay --tasks task-3,task-7 --planner claude   # 用模型回放指定任务（消耗 token）
+```
+
+回放不执行任何真实操作：能力一律用当时记录的结果代替，记录里没有的调用不执行。默认用离线规则规划器，守护进程运行时也能跑。
+
+设置 `AGENTOS_IMPROVE=1`（需要模型规划器，会消耗 token）后，任务服务在空闲时从失败的任务里总结经验、把反复出现的调用顺序写成技能，用回放比较有它和没有它的结局；没有任何退化、明显变好才采用，不需要批准，并显示在桌面“最近活动”里。之后任务成功率明显下降会自动撤回。说“你学到了什么”查看，“撤回 lesson-3”撤销；`AGENTOS_IMPROVE_AUTO=0` 只评测不采用，`AGENTOS_IMPROVE_TOKENS` 限制每轮的 token。插件和代码改动仍然要人批准。
 
 状态目录默认是 `~/.local/state/agentos`（`--state-dir` 或 `AGENTOS_STATE_DIR` 可改），笔记保存在其中的 `notes.json`，重启后还在。审计日志默认写到状态目录里的 `audit.jsonl`，可用 `--audit <路径>` 或环境变量 `AGENTOS_TASK_AUDIT` 指定。每条记录都带上一条的 SHA-256（哈希链），`agentos-taskd --verify-audit` 可以检查中间有没有记录被改过、删过或插入过；想防止整段重写或截掉末尾，可以把它输出的“链头”另外记下来。
 
