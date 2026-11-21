@@ -324,6 +324,13 @@ pub fn rate(tasks: &[Task], from_ms: u64, to_ms: u64) -> Rate {
     rate
 }
 
+/// The user's success rate over the tasks numbered after `last`: the ones
+/// that ran with an improvement in effect.
+pub fn rate_after(tasks: &[Task], last: u64) -> Rate {
+    let after: Vec<Task> = tasks.iter().filter(|t| t.id.0 > last).cloned().collect();
+    rate(&after, 0, u64::MAX)
+}
+
 fn clip(text: &str, max: usize) -> String {
     let text = text.trim();
     if text.chars().count() <= max {
@@ -449,7 +456,7 @@ fn recurring(tasks: &[&Task], specs: &[CapabilitySpec]) -> Vec<(Vec<String>, Vec
         .into_iter()
         .filter(|(_, ids)| ids.len() >= 3)
         .collect();
-    groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    groups.sort_by_key(|(_, ids)| std::cmp::Reverse(ids.len()));
     groups
 }
 
@@ -613,6 +620,7 @@ impl Improver {
 
     fn item(&self, candidate: &Candidate, now: u64, evidence: Value) -> Item {
         let tasks = self.tasks.list();
+        let last_task = tasks.iter().map(|t| t.id.0).max().unwrap_or(0);
         Item {
             id: String::new(),
             content: candidate.content.clone(),
@@ -622,6 +630,7 @@ impl Improver {
             evidence,
             applied_at_ms: now,
             baseline: rate(&tasks, now.saturating_sub(30 * DAY_MS), now),
+            last_task,
             settled_at_ms: None,
             rolled_back_at_ms: None,
             reason: None,
@@ -658,7 +667,7 @@ impl Improver {
             return Ok(None);
         };
         let tasks = self.tasks.list();
-        let after = rate(&tasks, item.applied_at_ms, now);
+        let after = rate_after(&tasks, item.last_task);
         let worse = match (item.baseline.value(), after.value()) {
             (Some(before), Some(since)) if after.tasks >= self.config.observe_tasks => {
                 (since < before - self.config.max_drop).then_some((before, since))
@@ -801,7 +810,7 @@ impl Improver {
             .iter()
             .filter(|t| t.state == TaskState::Failed && speaks_for_user(t) && fresh(t))
             .collect();
-        failed.sort_by(|a, b| b.id.cmp(&a.id));
+        failed.sort_by_key(|t| std::cmp::Reverse(t.id));
         for task in failed {
             if replayable(vec![task.id]).is_empty() {
                 continue;
@@ -1589,6 +1598,7 @@ mod tests {
             evidence: json!({}),
             applied_at_ms: 0,
             baseline: Rate::default(),
+            last_task: 0,
             settled_at_ms: None,
             rolled_back_at_ms: None,
             reason: None,

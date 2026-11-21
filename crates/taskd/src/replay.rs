@@ -190,7 +190,7 @@ pub fn cases(tasks: &[Task], offers: &dyn Fn(&str) -> bool, pick: &Pick) -> (Vec
     match pick {
         Pick::Latest(limit) => {
             let mut latest: Vec<&Task> = tasks.iter().collect();
-            latest.sort_by(|a, b| b.id.cmp(&a.id));
+            latest.sort_by_key(|t| std::cmp::Reverse(t.id));
             for task in latest {
                 if chosen.len() == *limit {
                     break;

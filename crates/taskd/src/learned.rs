@@ -151,6 +151,11 @@ pub struct Item {
     pub applied_at_ms: u64,
     /// The success rate of the user's tasks before it, to compare against.
     pub baseline: Rate,
+    /// The newest task when it was adopted; the watch looks at tasks after
+    /// this one. Task numbers only grow, while two tasks may share a
+    /// millisecond with the adoption.
+    #[serde(default)]
+    pub last_task: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -467,6 +472,7 @@ mod tests {
             evidence: json!({}),
             applied_at_ms: 1,
             baseline: Rate::default(),
+            last_task: 0,
             settled_at_ms: None,
             rolled_back_at_ms: None,
             reason: None,

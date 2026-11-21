@@ -233,7 +233,7 @@ fn ranked(tallies: BTreeMap<String, Tally>) -> Vec<Count> {
         })
         .collect();
     // Stable sort keeps names in order among equal counts.
-    counts.sort_by(|a, b| b.count.cmp(&a.count));
+    counts.sort_by_key(|c| std::cmp::Reverse(c.count));
     counts.truncate(LIMIT);
     counts
 }
@@ -343,7 +343,7 @@ pub fn build(tasks: &[Task], audit: &[AuditEntry], since_ms: u64, days: u64) -> 
             tasks: task_names(&tally.tasks),
         })
         .collect();
-    groups.sort_by(|a, b| b.count.cmp(&a.count));
+    groups.sort_by_key(|g| std::cmp::Reverse(g.count));
     groups.truncate(LIMIT);
     report.unhandled = groups;
 
@@ -356,7 +356,7 @@ pub fn build(tasks: &[Task], audit: &[AuditEntry], since_ms: u64, days: u64) -> 
             last_error,
         })
         .collect();
-    failing.sort_by(|a, b| b.failures.cmp(&a.failures));
+    failing.sort_by_key(|f| std::cmp::Reverse(f.failures));
     failing.truncate(LIMIT);
     report.failing_capabilities = failing;
     report.failure_kinds = ranked(kinds);
@@ -401,7 +401,7 @@ pub fn build(tasks: &[Task], audit: &[AuditEntry], since_ms: u64, days: u64) -> 
                     intent: quotable(task).then(|| clip(&task.intent.text, MAX_QUOTE_CHARS)),
                 })
                 .collect();
-            expensive.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+            expensive.sort_by_key(|t| std::cmp::Reverse(t.tokens));
             expensive.truncate(LIMIT);
             report.expensive.tasks = expensive;
         }
