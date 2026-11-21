@@ -17,7 +17,7 @@ use agentos_runtime::{StepState, TaskId, TaskState, TaskStore};
 use agentos_services::expression::ExpressionHub;
 use agentos_services::registry::CapabilityRegistry;
 use agentos_taskd::builtin::{self, NoteStore};
-use agentos_taskd::butler::{grant_manifest, Butler};
+use agentos_taskd::butler::{grant_manifest, Budget, Butler};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::Notify;
@@ -474,6 +474,136 @@ async fn a_call_that_is_not_abortable_is_never_dropped_by_cancellation() {
     let task = tasks.get(TaskId(1)).unwrap();
     assert_eq!(task.state, TaskState::Cancelled);
     assert_eq!(task.steps[0].state, StepState::Running);
+}
+
+/// The per-call limit used by the tests below: short, but long enough for
+/// the durable writes before a call on a slow CI runner.
+const CALL_LIMIT: Duration = Duration::from_millis(300);
+
+fn with_call_limit(butler: Butler) -> Butler {
+    butler.with_budget(Budget {
+        call: Some(CALL_LIMIT),
+        ..Budget::default()
+    })
+}
+
+#[tokio::test]
+async fn an_abortable_call_past_the_call_limit_is_abandoned_and_the_task_fails() {
+    let dir = TempDir::new("call-limit-abortable");
+    let tasks = Arc::new(TaskStore::open(dir.0.join("runtime")).unwrap());
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let mut registry = CapabilityRegistry::new();
+    registry.register(Arc::new(HangingCapability {
+        spec: capability_spec("test.hanging"),
+        abortable: true,
+        entered: Arc::new(Notify::new()),
+        dropped: dropped.clone(),
+    }));
+    let planner = FixedPlanner(Plan {
+        steps: vec![step("test.hanging")],
+        ..Plan::default()
+    });
+    let runner = with_call_limit(butler(&dir.0, registry, Box::new(planner), tasks.clone()));
+    // Guards "every call has a limit": no cancel, no task deadline, and the
+    // call never returns, yet the worker is free again.
+    timeout(WAIT_LIMIT, runner.handle(intent("hang")))
+        .await
+        .unwrap();
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    let task = tasks.get(TaskId(1)).unwrap();
+    // Guards honest outcomes: the task did not get done, and says why.
+    assert_eq!(task.state, TaskState::Failed);
+    assert!(task
+        .message
+        .as_deref()
+        .is_some_and(|text| text.contains("单次调用时长")));
+    assert_eq!(task.steps[0].state, StepState::Failed);
+    assert!(task.steps[0]
+        .result
+        .as_ref()
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.contains("超过时限") && text.contains("未知")));
+    let entries = AuditLog::replay(dir.0.join("audit.jsonl")).unwrap();
+    assert!(entries
+        .iter()
+        .any(|entry| matches!(entry.event, AuditEvent::CapabilityInterrupted { .. })));
+    assert!(!entries
+        .iter()
+        .any(|entry| matches!(entry.event, AuditEvent::CapabilityInvoked { .. })));
+}
+
+#[tokio::test]
+async fn a_call_past_the_call_limit_that_cannot_be_abandoned_finishes_in_the_background() {
+    let dir = TempDir::new("call-limit-let-go");
+    let tasks = Arc::new(TaskStore::open(dir.0.join("runtime")).unwrap());
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = CapabilityRegistry::new();
+    // Reversible, so not abortable: dropping it midway could leave things
+    // half done.
+    registry.register(Arc::new(GatedCapability {
+        spec: capability_spec("test.slow"),
+        entered: entered.clone(),
+        release: release.clone(),
+        calls: calls.clone(),
+    }));
+    let planner = FixedPlanner(Plan {
+        steps: vec![step("test.slow")],
+        ..Plan::default()
+    });
+    let runner = with_call_limit(butler(&dir.0, registry, Box::new(planner), tasks.clone()));
+    // Guards "every call has a limit": the call is still running, but it no
+    // longer holds the worker.
+    timeout(WAIT_LIMIT, runner.handle(intent("slow")))
+        .await
+        .unwrap();
+    timeout(WAIT_LIMIT, entered.notified()).await.unwrap();
+    let task = tasks.get(TaskId(1)).unwrap();
+    assert_eq!(task.state, TaskState::Failed);
+    assert!(task
+        .message
+        .as_deref()
+        .is_some_and(|text| text.contains("单次调用时长")));
+    assert_eq!(task.steps[0].state, StepState::Failed);
+    assert!(task.steps[0]
+        .result
+        .as_ref()
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.contains("后台") && text.contains("未知")));
+
+    // Guards side effects and the audit trail: the call was let go, not
+    // dropped, so it gets to finish; and what it did is recorded.
+    release.notify_one();
+    let late = timeout(WAIT_LIMIT, async {
+        loop {
+            let entries = AuditLog::replay(dir.0.join("audit.jsonl")).unwrap();
+            if let Some(event) = entries.into_iter().find_map(|entry| match entry.event {
+                event @ AuditEvent::CapabilityFinishedLate { .. } => Some(event),
+                _ => None,
+            }) {
+                return event;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let AuditEvent::CapabilityFinishedLate {
+        capability,
+        ok,
+        result,
+        ..
+    } = late
+    else {
+        unreachable!()
+    };
+    assert_eq!(capability.as_str(), "test.slow");
+    assert!(ok);
+    assert_eq!(result["performed"], true);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // The task stays as it was: it stopped, and nothing ran after the call.
+    assert_eq!(tasks.get(TaskId(1)).unwrap().state, TaskState::Failed);
 }
 
 #[tokio::test]

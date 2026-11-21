@@ -15,7 +15,7 @@ node --test crates/web-shell/assets/*.test.mjs
 
 - 最低 Rust 版本是 1.88，CI 会用它编译；不要用更新版本才有的标准库 API。
 - 改了依赖要提交 `Cargo.lock`，CI 用 `--locked`。
-- `agentos-services` 里插件沙箱的测试需要 Linux 和 bubblewrap。在 macOS 上有 7 个测试会因为无法启动插件而失败，这是环境原因；其余测试必须通过。
+- `agentos-services` 里插件沙箱和 MCP 沙箱的测试需要 Linux 和 bubblewrap。在 macOS 上有 10 个插件测试会因为无法启动插件而失败（设置资源上限时报 `Invalid argument`），这是环境原因。真正启动 MCP 沙箱的测试在没有 bubblewrap 时会跳过，但在设置了 `CI` 的环境里必须能跑。其余测试必须通过。
 - `agentos-shell` 在 Linux 上需要 `libwebkit2gtk-4.1-dev` 和 `libgtk-3-dev`。
 - 用临时状态目录运行，不要动 `~/.local/state/agentos`：`cargo run -p agentos-taskd -- --planner rule --state-dir /tmp/agentos-dev`。自定义 socket 的父目录必须归自己所有且不可被他人写入。
 - 运行守护进程前确认环境里没有不想用的 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`；有密钥时会自动选用模型规划器并发起真实请求。
@@ -36,9 +36,31 @@ node --test crates/web-shell/assets/*.test.mjs
 
 只有一个守护进程 `agentos-taskd`。旧的 `agentosd` 已删除；镜像里的 `image/rootfs/usr/local/bin/agentosd` 只是给 v0.4 及更早版本的 `agentos-update` 自检用的垫片，不要往里加功能，下一个版本删除它。
 
+## 当前重点与冻结
+
+v0.4.0 之后，开发集中在任务内核本身：
+- 安全：沙箱、调用时限、污点；
+- 能力：定时任务、文件、网页、聊天渠道，全部经过策略引擎和审计；
+- 不装镜像也能单独安装。
+
+下面这些部分已冻结：只修 bug 和安全问题，必要时跟着协议做适配，不加新功能。
+
+| 冻结的部分 | 位置 |
+| --- | --- |
+| Web Shell | `crates/web-shell/` |
+| 原生桌面和设置助理 | `crates/shell/`、`image/rootfs/usr/local/bin/agentos-setup` |
+| 按住说话、朗读、录音指示灯 | `crates/taskd/src/voice.rs`、`mic_led.rs` |
+| 智能家居 | `crates/services/src/homeassistant.rs` |
+| 自我改进：体检、回放、学习。不做研究草案的第 4–6 阶段（插件自修复、提示与配置优化、代码补丁） | `crates/taskd/src/improve.rs`、`replay.rs`、`learn.rs`、`learned.rs` |
+| 镜像：只随版本发布，修启动和更新问题，不加新的系统功能 | `image/` |
+
+终端的 `agentos` 命令和工作台是内核的参考客户端，不在冻结范围内。确实需要给冻结的部分加功能时，先在 issue 里说明理由，不要顺手加。
+
 ## 不能破坏的约定
 
 - **能力不做权限判断。** 每次调用都由管家经过策略引擎和审计日志。新能力要如实声明风险等级；输出来自用户控制之外的（网页、邮件、外部工具）要让 `untrusted_output()` 返回 `true`。
+- **别人写的代码在沙箱里跑。** 插件和 MCP server 在 bubblewrap 里运行，看不到状态目录和控制 socket，否则它们能改写策略文件，或者自己批准自己引出的步骤。没有可用的沙箱时不能照常运行：插件每次调用都要人确认；MCP server 只有用户在 `mcp.json` 里写了 `"sandbox": false` 才启动。新增会启动外部程序的能力也照此办理。
+- **每个调用都有时限。** 能中止的调用超时就放弃；不能中止的调用转到后台运行完，不能让它一直占着执行名额，它最后的结果写进审计。
 - **结局如实。** `succeeded` 只用于真的做成了或回答了。没有办法处理是 `unhandled`，规划失败是 `failed`。不要为了让界面好看把失败写成成功。
 - **界面不替用户说话。** 展示数据用协议的 `read`，不要提交一条固定文字的意图。
 - **变更请求不自动重发。** 提交、取消、批准在连接中断后结果未知；客户端只能查询，不能重试。

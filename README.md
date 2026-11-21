@@ -14,7 +14,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 - **版本**：最新发布版是 **v0.4.0**（2026-11-13），[Releases](https://github.com/Integ/agentos/releases/tag/v0.4.0) 里有 Debian 和 Ubuntu 两种镜像和在线更新包，内容见[更新日志](CHANGELOG.md)。v0.3.0 没有单独发布，它的内容包含在 v0.4.0 里。`main` 分支在 v0.4.0 之上还有尚未发布的合并（见更新日志的“未发布”）。
 - **一个任务内核**：`agentos-taskd` 是唯一的后台服务：持久任务、多轮规划、子 Agent、黑板、MCP、插件、智能家居、PIN、哈希链审计、按住说话和朗读都在这里。镜像里它作为桌面用户的服务随登录启动；图形桌面 `agentos-shell`、终端工作台 `agentos`、Web Shell 和 `agentos mcp` 都通过同一个协议连接它。旧的 `agentosd` 已删除，它在 `~/.local/share/agentos` 里的笔记、PIN、插件、黑板和配置会在任务服务第一次启动时迁到 `~/.local/state/agentos`；见[架构](docs/architecture.md)。给写代码的 Agent 的说明在 [AGENTS.md](AGENTS.md)。
-
+- **当前重点**：任务内核的安全、能力和单独安装。Web Shell、原生桌面、语音、智能家居、自我改进和镜像已冻结，只修 bug 和安全问题，不加新功能（见 [AGENTS.md](AGENTS.md#当前重点与冻结)）。
 - **CI 覆盖**：Ubuntu 上的格式、Clippy、全部测试和在线更新模拟测试；macOS 和 Rust 1.88 上任务内核一侧的测试；Web Shell 的前端测试；cargo-deny。
 - **还没有验证**：
   - 合并 `agentosd` 之后（尚未发布）：任务服务上的按住说话和朗读只用脚本化的录音、识别和播放命令测过，没有接真实麦克风、扬声器和语音接口；桌面窗口没有实际打开看过；从 v0.4.0 在线升级只在模拟的安装根目录里测过；没有跑镜像构建和 QEMU 冒烟测试。
@@ -23,10 +23,9 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 已知缺口：
 
-- 调用没有超时：不可中止的调用挂住时会一直占着一个执行名额。除插件在 bubblewrap 沙箱里以外，能力与服务同进程运行，没有进程隔离。见[架构](docs/architecture.md#其他边界)。
+- 内置能力与服务同进程运行，没有进程隔离；插件和 MCP server 在 bubblewrap 沙箱里（没有可用沙箱的机器上，MCP server 要你在配置里明确允许才会启动）。不能中止的调用超过时限后转到后台运行完，在后台运行的调用没有数量上限。见[架构](docs/architecture.md#其他边界)。
 - 没有本机唤醒词，没有定时任务（见 [docs/agents.md](docs/agents.md#尚未实现)）。
 - Web Shell 是浏览器里的本地界面，不是桌面合成器；实时语音会把音频发给模型服务，不是全本地语音。
-- 仓库里还没有 LICENSE 文件，使用和分发条款尚未声明。
 
 ## 现在能做什么
 
@@ -36,10 +35,10 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 - **图形设置助理**：首次进入桌面时出现 Liquid Glass 风格的设置助理，一页一件事：Wi‑Fi、模型接口（带 DeepSeek/通义千问/Ollama 预设）、语音、Home Assistant（可当场测试连接）、PIN、安装到硬盘。系统菜单「网络和 AI 设置…」可随时重新打开。见 [docs/shell.md](docs/shell.md#设置助理)。
 - **语音输入与朗读**：按住麦克风按钮或 **Caps Lock** 说话，松开发送，Caps Lock 指示灯就是录音灯；回复可以读出来。只在按住时录音，没有唤醒词。见 [docs/voice.md](docs/voice.md)。
 - **智能家居**：接入 Home Assistant，开灯、调空调是 L1，场景脚本是 L2，开锁、撤防、开车库门是 L3。见 [docs/smart-home.md](docs/smart-home.md)。
-- **MCP 工具**：`mcp.json` 里配置的 MCP server，工具自动成为管家的能力。见 [docs/mcp.md](docs/mcp.md)。
+- **MCP 工具**：`mcp.json` 里配置的 MCP server，工具自动成为管家的能力；server 在 bubblewrap 沙箱里运行。见 [docs/mcp.md](docs/mcp.md)。
 - **自我进化**：让 AgentOS 给自己写新能力，以沙箱插件形式安装，可回滚。见 [docs/self-evolution.md](docs/self-evolution.md)。
 - **自我改进**：体检报告指出哪里做得不好；回放把过去的任务交给现在的系统、对比结局，可以当回归检查；打开后在空闲时从自己的历史里学经验和技能，回放证明明显变好才自动采用，变差就自动撤回，随时可以撤销。学到的东西改不了权限。见 [docs/self-improvement-research.md](docs/self-improvement-research.md) 和 [架构](docs/architecture.md#自我改进体检回放与学习)。
-- **安全模型**：能力令牌 + 风险分级确认（L0–L3）；污点追踪（网络插件、MCP 输出会让后续有影响的操作都要确认）；L3 操作必须设置 PIN 并在批准时输入；批准只在屏幕上进行，说话不能批准；审计日志带 SHA-256 哈希链，可校验；插件有 bubblewrap 沙箱和资源上限（内存 1 GiB、CPU 10 秒等）。
+- **安全模型**：能力令牌 + 风险分级确认（L0–L3）；污点追踪（网络插件、MCP 输出会让后续有影响的操作都要确认）；L3 操作必须设置 PIN 并在批准时输入；批准只在屏幕上进行，说话不能批准；审计日志带 SHA-256 哈希链，可校验；插件有 bubblewrap 沙箱和资源上限（内存 1 GiB、CPU 10 秒等）；MCP server 也在 bubblewrap 沙箱里，有自己的私有主目录，看不到你的主目录和 AgentOS 自己的文件；每个能力调用都有时限。
 - **一等公民的 Agent（v0.4）**：任务并行执行（默认同时 4 个）；会话线程让你接着上一句话说；缺信息时 Agent 用 `ask.user` 停下来问你；每个任务有规划轮数、token 和执行时长预算，用量写进任务和审计；`agentos preauthorize` 事先许可一类 L1/L2 调用；`agentos mcp --caller …` 让别的 Agent 通过 MCP 使用 AgentOS。见 [docs/v0.4-design.md](docs/v0.4-design.md)。
 - **持久任务与多个界面（v0.3）**：`agentos-taskd` 把任务放在后台服务里，命令行、终端工作台、浏览器和原生桌面通过同一个 Unix socket 协议连接；关掉界面任务照常进行，历史可分页，变更实时通知，批准绑定到具体任务的具体步骤。见 [docs/persistent-workspace.md](docs/persistent-workspace.md)。
 - **情景式 Web Shell（v0.3）**：语音优先的浏览器界面，模型根据真实任务和笔记组织画面（只能选组件、顺序和宽度）；WebRTC 实时语音可连续对话、开口打断，但语音不能代替批准。见 [docs/ambient-shell.md](docs/ambient-shell.md)。
@@ -209,7 +208,7 @@ agentos-taskd --replay --tasks task-3,task-7 --planner claude   # 用模型回�
 
 ### MCP 工具
 
-在状态目录放一个 `mcp.json`（格式同 Claude Desktop 的 `mcpServers`），MCP server 的工具就会成为管家的能力。没有特别设置时，每次调用都要确认，结果也当作不可信。
+在状态目录放一个 `mcp.json`（格式同 Claude Desktop 的 `mcpServers`），MCP server 的工具就会成为管家的能力。没有特别设置时，每次调用都要确认，结果也当作不可信。server 默认在 bubblewrap 沙箱里运行：只看得到系统目录、自己的私有主目录和你在 `sandbox` 里开放的路径，看不到你的主目录和 AgentOS 的状态目录；没有可用的沙箱时，只有写了 `"sandbox": false` 的 server 才会启动。
 
 反过来，AgentOS 也可以作为 MCP server 给别的 Agent 用：`agentos caller add <id> --name … --allow …` 注册调用方，`agentos mcp --caller <id>` 在标准输入输出上提供服务。调用方只能用清单里的能力，只看得到自己的任务，有副作用的步骤要你批准。详见 [docs/mcp.md](docs/mcp.md)。
 
@@ -263,3 +262,7 @@ GitHub 不会在 README 里播放仓库里的视频文件，所以 README 开头
 ffmpeg -i docs/media/agentos-intro.mp4 -c:v libx264 -preset slow -b:v 330k -pass 1 -an -f mp4 /dev/null
 ffmpeg -i docs/media/agentos-intro.mp4 -c:v libx264 -preset slow -b:v 330k -pass 2 -pix_fmt yuv420p -c:a aac -b:a 64k -movflags +faststart out/intro-video/agentos-intro-upload.mp4
 ```
+
+## 许可证
+
+[Apache License 2.0](LICENSE)。除非另有声明，你有意提交给本项目的贡献也按这个许可证授权（见许可证第 5 条）。

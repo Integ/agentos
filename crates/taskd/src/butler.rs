@@ -24,6 +24,7 @@
 //! worker at a time; its [`Slot`] enforces that.
 
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::io::{self, Read};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -99,6 +100,14 @@ pub struct Budget {
     /// Time spent working, not counting waits for the human. `None` is no
     /// limit.
     pub active: Option<Duration>,
+    /// How long one capability call may run, so that no call holds a worker
+    /// for ever. An abortable call is abandoned; one that is not safe to
+    /// abandon is let go to finish in the background, and what it did is
+    /// audited when it ends. Either way the task stops. Above every limit
+    /// the capabilities set themselves (a model request may take ten
+    /// minutes), so it only catches calls that would otherwise hang. `None`
+    /// is no limit.
+    pub call: Option<Duration>,
 }
 
 impl Default for Budget {
@@ -107,8 +116,14 @@ impl Default for Budget {
             rounds: BUTLER_MAX_ROUNDS,
             tokens: Some(2_000_000),
             active: Some(Duration::from_secs(30 * 60)),
+            call: Some(Duration::from_secs(15 * 60)),
         }
     }
+}
+
+/// What a task that hit [`Budget::call`] says it ran out of.
+fn call_limit(limit: Duration) -> String {
+    format!("单次调用时长（上限 {} 秒）", limit.as_secs())
 }
 
 /// One stretch of work on a task, for the time budget: when it began and
@@ -1941,8 +1956,11 @@ impl Butler {
         if started.state.is_terminal() {
             return Ok(Flow::Stop);
         }
-        // Why an abortable call was abandoned: cancelled, or out of time.
+        // Why the calls were abandoned: cancelled, out of time, or past the
+        // limit of a single call; and whether one was let go still running.
         let mut over_budget = None;
+        let mut why = "执行中被取消打断";
+        let mut let_go = false;
         let results = if capability.abortable() {
             tokio::select! {
                 biased;
@@ -1950,23 +1968,44 @@ impl Butler {
                 () = self.stopped(id) => None,
                 limit = self.out_of_time(stretch) => {
                     over_budget = Some(limit);
+                    why = "超出执行时长预算被打断";
+                    None
+                }
+                limit = self.call_too_long() => {
+                    over_budget = Some(limit);
+                    why = "调用超过时限被打断";
                     None
                 }
             }
         } else {
             // Not safe to abandon: wait for it, and record what it did even
             // though the task may have been cancelled or run out of time
-            // meanwhile. The budget stops the task at the next round.
-            Some(vec![capability.invoke(step.args.clone()).await])
+            // meanwhile; the budget stops the task at the next round. Only a
+            // call past its own limit is let go, and never dropped midway: it
+            // goes on in the background and is audited when it ends, so a
+            // call that hangs cannot hold a worker for ever.
+            let mut call = {
+                let capability = capability.clone();
+                let args = step.args.clone();
+                Box::pin(async move { capability.invoke(args).await })
+            };
+            match self.budget.call {
+                None => Some(vec![call.await]),
+                Some(limit) => match tokio::time::timeout(limit, &mut call).await {
+                    Ok(result) => Some(vec![result]),
+                    Err(_) => {
+                        self.finish_in_background(call, task.intent.id, &frame.agent, &step);
+                        over_budget = Some(call_limit(limit));
+                        why = "调用超过时限，已转到后台继续运行";
+                        let_go = true;
+                        None
+                    }
+                },
+            }
         };
         let Some(results) = results else {
             // The start markers must not be left open, and must not be
             // closed with a result nobody saw.
-            let why = if over_budget.is_some() {
-                "超出执行时长预算被打断"
-            } else {
-                "执行中被取消打断"
-            };
             for (index, (call, call_key, _)) in calls.iter().enumerate() {
                 self.audit.append(AuditEvent::CapabilityInterrupted {
                     intent: task.intent.id,
@@ -1975,7 +2014,9 @@ impl Butler {
                     args: call.args.clone(),
                 })?;
                 // Only the first call may have effects; the others are reads.
-                let message = if index > 0 || spec.risk == RiskLevel::ReadOnly {
+                let message = if let_go {
+                    format!("{why}；是否已经生效未知，它结束时会记入审计日志。")
+                } else if index > 0 || spec.risk == RiskLevel::ReadOnly {
                     format!("{why}，没有返回结果。")
                 } else {
                     format!("{why}，没有返回结果；是否已经生效未知。")
@@ -2225,6 +2266,51 @@ impl Butler {
         let used = Duration::from_millis(stretch.active_ms());
         tokio::time::sleep(limit.saturating_sub(used)).await;
         format!("执行时长（上限 {} 秒）", limit.as_secs())
+    }
+
+    /// Resolves when a call has run for the limit of a single call, with the
+    /// reason; never, without that limit.
+    async fn call_too_long(&self) -> String {
+        let Some(limit) = self.budget.call else {
+            return std::future::pending().await;
+        };
+        tokio::time::sleep(limit).await;
+        call_limit(limit)
+    }
+
+    /// Let a call that is not safe to abandon run to its end on its own task.
+    /// Its step has already been closed as unknown and its task stopped; when
+    /// it does end, the audit log says what it did after all. Writing that
+    /// can still fail (a full disk): then the log keeps the interruption as
+    /// the last word on the call, and the error goes to the service log.
+    fn finish_in_background(
+        &self,
+        call: impl Future<Output = Result<Value, CapabilityError>> + Send + 'static,
+        intent: IntentId,
+        agent: &AgentId,
+        step: &Step,
+    ) {
+        let audit = self.audit.clone();
+        let agent = agent.clone();
+        let capability = step.capability.clone();
+        let args = step.args.clone();
+        tokio::spawn(async move {
+            let (ok, result) = match call.await {
+                Ok(value) => (true, value),
+                Err(e) => (false, Value::String(e.to_string())),
+            };
+            let late = AuditEvent::CapabilityFinishedLate {
+                intent,
+                agent,
+                capability: capability.clone(),
+                args,
+                ok,
+                result,
+            };
+            if let Err(e) = audit.append(late) {
+                eprintln!("超过时限的调用 {capability} 后来结束了，但无法写入审计日志：{e}");
+            }
+        });
     }
 
     fn exhausted(&self, task: &Task, stretch: &Stretch) -> Option<String> {

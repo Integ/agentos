@@ -4,6 +4,7 @@ description = "AgentOS system services shared by every daemon: capability regist
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

@@ -128,51 +128,8 @@ impl PluginManifest {
     }
 }
 
-/// How plugin processes are isolated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SandboxMode {
-    /// bubblewrap: new namespaces, read-only system, no home, optional network.
-    Bubblewrap,
-    /// No isolation beyond a cleared environment and a timeout.
-    None,
-}
-
-impl SandboxMode {
-    /// `AGENTOS_SANDBOX=none` forces no sandbox; otherwise use bubblewrap if it
-    /// actually works here (it can be installed yet blocked by the kernel).
-    pub fn detect() -> Self {
-        if std::env::var("AGENTOS_SANDBOX").as_deref() == Ok("none") {
-            return Self::None;
-        }
-        let ok = std::process::Command::new("bwrap")
-            .args([
-                "--ro-bind",
-                "/",
-                "/",
-                "--unshare-all",
-                "--die-with-parent",
-                "true",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        if ok {
-            Self::Bubblewrap
-        } else {
-            Self::None
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Bubblewrap => "bubblewrap 沙箱",
-            Self::None => "无沙箱",
-        }
-    }
-}
+/// How plugin processes are isolated; shared with MCP servers.
+pub use crate::sandbox::SandboxMode;
 
 /// The risk the policy engine will actually use: the declared risk, raised to
 /// what the permissions imply. Without a sandbox nothing is contained, so
@@ -198,28 +155,7 @@ pub fn risk_label(r: RiskLevel) -> &'static str {
 }
 
 fn bwrap_command(code_dir: &Path, data_dir: Option<&Path>, net: bool) -> Command {
-    let mut c = Command::new("bwrap");
-    c.args(["--die-with-parent", "--new-session", "--unshare-all"]);
-    if net {
-        c.arg("--share-net");
-    }
-    for dir in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32"] {
-        c.args(["--ro-bind-try", dir, dir]);
-    }
-    // Only what DNS, TLS, time zones and interpreter alternatives need.
-    for f in [
-        "/etc/alternatives",
-        "/etc/ssl",
-        "/etc/ca-certificates",
-        "/etc/resolv.conf",
-        "/etc/hosts",
-        "/etc/nsswitch.conf",
-        "/etc/localtime",
-        "/etc/ld.so.cache",
-    ] {
-        c.args(["--ro-bind-try", f, f]);
-    }
-    c.args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]);
+    let mut c = crate::sandbox::bwrap_base(net);
     c.arg("--ro-bind").arg(code_dir).arg("/plugin");
     c.args([
         "--clearenv",

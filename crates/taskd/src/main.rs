@@ -546,10 +546,19 @@ async fn serve() -> io::Result<()> {
     };
     evolve::register_all(&mut registry, plugins.clone(), generator);
 
-    // <state>/mcp.json: tools from MCP servers.
+    // <state>/mcp.json: tools from MCP servers, each in its own sandbox. What
+    // a server must never see: everything of AgentOS's own, wherever it is.
+    let mut private = vec![socket.clone(), audit.path().to_path_buf()];
+    private.extend(migrate::legacy_dir(|name| std::env::var(name).ok()));
+    let containment = mcp::Containment::new(
+        sandbox,
+        std::env::var_os("HOME").map(PathBuf::from),
+        &state_dir,
+        &private,
+    );
     match McpConfig::load(&state_dir.join("mcp.json")) {
         Ok(config) => {
-            for note in mcp::register_all(&mut registry, &config).await {
+            for note in mcp::register_all(&mut registry, &config, &containment).await {
                 eprintln!("{note}");
             }
         }
@@ -775,9 +784,10 @@ fn voice_label(status: &agentos_ipc::VoiceStatus) -> String {
     format!("{input}；{output}")
 }
 
-/// What a task may consume, from the environment: `AGENTOS_TASK_TOKENS` and
-/// `AGENTOS_TASK_SECONDS`. Unset keeps the default; `0` removes the limit. A
-/// value that is not a number is an error rather than silently no limit.
+/// What a task may consume, from the environment: `AGENTOS_TASK_TOKENS`,
+/// `AGENTOS_TASK_SECONDS` and, for a single call, `AGENTOS_CALL_SECONDS`.
+/// Unset keeps the default; `0` removes the limit. A value that is not a
+/// number is an error rather than silently no limit.
 fn task_budget(var: impl Fn(&str) -> Option<String>) -> Result<Budget, String> {
     let limit = |name: &str| -> Result<Option<Option<u64>>, String> {
         match var(name).as_deref().map(str::trim) {
@@ -795,16 +805,20 @@ fn task_budget(var: impl Fn(&str) -> Option<String>) -> Result<Budget, String> {
     if let Some(seconds) = limit("AGENTOS_TASK_SECONDS")? {
         budget.active = seconds.map(std::time::Duration::from_secs);
     }
+    if let Some(seconds) = limit("AGENTOS_CALL_SECONDS")? {
+        budget.call = seconds.map(std::time::Duration::from_secs);
+    }
     Ok(budget)
 }
 
 fn budget_label(budget: Budget) -> String {
     let limit = |value: Option<String>| value.unwrap_or_else(|| "不限".into());
     format!(
-        "{} 轮 · token {} · 执行时长 {}",
+        "{} 轮 · token {} · 执行时长 {} · 单次调用 {}",
         budget.rounds,
         limit(budget.tokens.map(|tokens| tokens.to_string())),
         limit(budget.active.map(|time| format!("{} 秒", time.as_secs()))),
+        limit(budget.call.map(|time| format!("{} 秒", time.as_secs()))),
     )
 }
 
@@ -899,13 +913,22 @@ mod tests {
         let set = from(&[
             ("AGENTOS_TASK_TOKENS", "5000"),
             ("AGENTOS_TASK_SECONDS", " 90 "),
+            ("AGENTOS_CALL_SECONDS", "60"),
         ])
         .unwrap();
         assert_eq!(set.tokens, Some(5000));
         assert_eq!(set.active, Some(std::time::Duration::from_secs(90)));
-        let unlimited =
-            from(&[("AGENTOS_TASK_TOKENS", "0"), ("AGENTOS_TASK_SECONDS", "0")]).unwrap();
-        assert_eq!((unlimited.tokens, unlimited.active), (None, None));
+        assert_eq!(set.call, Some(std::time::Duration::from_secs(60)));
+        let unlimited = from(&[
+            ("AGENTOS_TASK_TOKENS", "0"),
+            ("AGENTOS_TASK_SECONDS", "0"),
+            ("AGENTOS_CALL_SECONDS", "0"),
+        ])
+        .unwrap();
+        assert_eq!(
+            (unlimited.tokens, unlimited.active, unlimited.call),
+            (None, None, None)
+        );
         for bad in ["many", "-1", "1e6"] {
             let pairs: &'static [(&str, &str)] = Box::leak(
                 vec![(
