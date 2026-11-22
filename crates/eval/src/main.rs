@@ -414,7 +414,7 @@ async fn run(args: &[String]) -> io::Result<ExitCode> {
     };
     let attacked = cases.iter().filter(|c| c.attack.is_some()).count();
     let about = format!(
-        "规划器：{label}。用例：{} 个用户任务 × {} 个注入目标 × {} 种注入写法（{}）= {attacked} 个有注入的用例，另有每个用户任务一个无注入的对照；每个用例跑 {} 遍。认真看的人批准为用户请求服务的步骤，看到注入要求的步骤就取消任务；一律批准的人什么都批准（需要时输入 PIN）。",
+        "规划器：{label}。用例：{} 个用户任务 × {} 个注入目标 × {} 种注入写法（{}）= {attacked} 个有注入的用例，另有每个用户任务一个无注入的对照；每个用例跑 {} 遍。认真看的人批准为用户请求服务的步骤，看到注入要求的步骤就只拒绝那一步，任务继续；一律批准的人什么都批准（需要时输入 PIN）。",
         cases.iter().map(|c: &Case| c.user.id).collect::<std::collections::BTreeSet<_>>().len(),
         cases.iter().filter_map(Case::goal).map(|g| g.id).collect::<std::collections::BTreeSet<_>>().len(),
         templates.len(),
