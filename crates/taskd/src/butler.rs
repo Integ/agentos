@@ -145,10 +145,11 @@ fn caller_agent(id: &str) -> AgentId {
     AgentId::new(format!("{}{id}", agentos_ipc::CALLER_SOURCE_PREFIX))
 }
 
-/// What lets a paused task go on: the step the human approved, or the step
-/// that asked and what the human answered.
+/// What lets a paused task go on: the step the human approved, the step the
+/// human refused, or the step that asked and what the human answered.
 enum Resume {
     Approved(String),
+    Rejected(String),
     Answered(String, String),
 }
 
@@ -262,6 +263,11 @@ fn caller_excluded(name: &str) -> bool {
 pub const OVER_BUDGET: &str = "超出预算";
 pub const GOING_IN_CIRCLES: &str = "规划陷入了重复";
 pub const INVALID_PLAN: &str = "计划无效";
+/// The result of a step the human refused at its confirmation. The planner
+/// reads it as that step's failure, so it is worded for the planner as much
+/// as for the person: it must not be mistaken for an error worth retrying.
+pub const REFUSED_BY_USER: &str =
+    "用户拒绝了这一步，没有执行。不要再请求同样的调用；换别的办法完成用户的请求，或者如实说明没有做这一步。";
 
 enum Flow {
     Continue,
@@ -999,6 +1005,23 @@ impl Butler {
         }
     }
 
+    /// Refuse the step a task is waiting to have approved. Bound exactly like
+    /// an approval (task, step, token, who submitted it, the expiry); the
+    /// step fails without running and the planner goes on from there.
+    /// Unlike approving an irreversible step, refusing needs no PIN: it makes
+    /// nothing happen.
+    pub async fn reject_with_token(
+        &self,
+        id: TaskId,
+        step: usize,
+        responder: &Intent,
+        token: &str,
+    ) {
+        if let Err(e) = self.reject_inner(id, step, responder, token).await {
+            self.storage_error(id, e).await;
+        }
+    }
+
     /// Take over a paused task for the one request that `matching` accepts.
     /// It is checked before waiting for the slot, so a request that matches
     /// nothing never waits behind a running task, and again once the slot is
@@ -1066,6 +1089,47 @@ impl Butler {
         let task = self.transition(id, TaskState::Running, None)?;
         if task.state != TaskState::Cancelled {
             self.drive(id, stack, Some(Resume::Approved(key)), &mut held)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn reject_inner(
+        &self,
+        id: TaskId,
+        step: usize,
+        responder: &Intent,
+        token: &str,
+    ) -> io::Result<()> {
+        let claimed = self
+            .claim(id, |task| {
+                crate::control::approval_matches_with_token(task, step, responder, now_ms(), token)
+            })
+            .await;
+        let Some((task, mut held)) = claimed else {
+            if let Some(task) = self.tasks.get(id) {
+                self.say(
+                    &task,
+                    ExpressionKind::Error,
+                    "拒绝无效：请核对任务、步骤、输入来源和五分钟有效期",
+                )
+                .await;
+            }
+            return Ok(());
+        };
+        let Some(stack) = self.paused_stack(id, &mut held).await? else {
+            return Ok(());
+        };
+        // The refusal is on record before the task acts on it.
+        self.audit.append(AuditEvent::HumanConfirmation {
+            intent: task.intent.id,
+            capability: task.steps[step].capability.clone(),
+            approved: false,
+        })?;
+        let key = task.steps[step].id.clone();
+        let task = self.transition(id, TaskState::Running, None)?;
+        if task.state != TaskState::Cancelled {
+            self.drive(id, stack, Some(Resume::Rejected(key)), &mut held)
                 .await?;
         }
         Ok(())
@@ -1586,6 +1650,21 @@ impl Butler {
             self.skip_rest(id, frame)?;
             return Ok(Flow::Continue);
         }
+        // The human refused this very step: it fails here, before policy,
+        // the judge or the capability is consulted, and like any failure it
+        // skips the rest of its round. The planner reads the refusal next.
+        if matches!(resume, Some(Resume::Rejected(refused)) if *refused == key) {
+            *resume = None;
+            let task = self.fail_step(id, frame, REFUSED_BY_USER)?;
+            self.say_for(
+                &task,
+                frame,
+                ExpressionKind::Report,
+                format!("你拒绝了 {}，这一步没有执行。", step.capability),
+            )
+            .await;
+            return Ok(Flow::Continue);
+        }
 
         let delegate = self
             .kernel()
@@ -1769,7 +1848,7 @@ impl Butler {
                         frame,
                         ExpressionKind::AskConfirm,
                         format!(
-                            "步骤 {number}：{} {}。原因：{reason}。{identity}五分钟内输入 /approve {id} {number} 批准，或 /cancel {id} 取消。可继续提交其他任务。",
+                            "步骤 {number}：{} {}。原因：{reason}。{identity}五分钟内输入 /approve {id} {number} 批准，/reject {id} {number} 只拒绝这一步，或 /cancel {id} 取消整个任务。可继续提交其他任务。",
                             step.capability, step.args,
                         ),
                     )

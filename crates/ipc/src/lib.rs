@@ -118,6 +118,19 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pin: Option<String>,
     },
+    /// Refuse the step a task is waiting to have approved, and only that
+    /// step: it fails without running and the planner is told the user
+    /// refused it, so the rest of the task can go on another way. Bound
+    /// exactly like `Approve`. It needs no PIN even for an irreversible step:
+    /// refusing makes nothing happen, and the same client could cancel the
+    /// whole task without one.
+    Reject {
+        id: TaskId,
+        /// Human-facing, one-based step number.
+        step: usize,
+        /// Exact token received with this task's concrete confirmation prompt.
+        confirmation: String,
+    },
     /// Answer the question a task in `awaiting_input` is waiting on.
     Reply {
         id: TaskId,
@@ -360,6 +373,12 @@ pub enum Reply {
         value: Value,
     },
     ApprovalQueued {
+        id: TaskId,
+        step: usize,
+    },
+    /// The refusal matched the task's current confirmation and was queued.
+    /// It does not say what the task did next.
+    RejectionQueued {
         id: TaskId,
         step: usize,
     },
@@ -671,6 +690,7 @@ mod tests {
             json!({"method":"get","id":1}),
             json!({"method":"cancel","id":1}),
             json!({"method":"approve","id":1,"step":1,"confirmation":"nonce"}),
+            json!({"method":"reject","id":1,"step":1,"confirmation":"nonce"}),
             json!({"method":"read","capability":"notes.list"}),
             json!({"method":"read","capability":"notes.list","args":{}}),
             json!({"method":"watch"}),
@@ -699,6 +719,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_rejection_names_its_confirmation_and_carries_nothing_else() {
+        // Guards binding: a refusal is bound to one concrete prompt like an
+        // approval, so the token is required; and it never takes a PIN, so a
+        // PIN sent with one is refused instead of travelling anywhere.
+        let command: Command = serde_json::from_value(
+            json!({"method":"reject","id":4,"step":2,"confirmation":"nonce"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            &command,
+            Command::Reject { id: TaskId(4), step: 2, confirmation } if confirmation == "nonce"
+        ));
+        assert_eq!(
+            serde_json::to_value(&command).unwrap(),
+            json!({"method":"reject","id":4,"step":2,"confirmation":"nonce"})
+        );
+        for invalid in [
+            json!({"method":"reject","id":4,"step":2}),
+            json!({"method":"reject","id":4,"step":2,"confirmation":"nonce","pin":"1234"}),
+        ] {
+            assert!(serde_json::from_value::<Command>(invalid).is_err());
+        }
+        let wire = serde_json::to_value(Response::ok(
+            3,
+            Reply::RejectionQueued {
+                id: TaskId(4),
+                step: 2,
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            wire["body"]["data"],
+            json!({"type":"rejection_queued","id":4,"step":2})
+        );
     }
 
     #[test]

@@ -28,7 +28,7 @@
 
 信封还可以带一个可选的 `caller`，表示以某个已注册的外部调用方的身份发出请求；见“外部调用方”。
 
-`version` 是协议版本，与程序的语义版本号分开。v0.3 和 v0.4 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段，`question` 的 `tainted`；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法；请求信封的 `caller`、`preauthorize` 的 `caller`，以及 `register_caller`、`callers`、`revoke_caller` 方法；`activity`、`voice`、`listen`、`speech` 方法，`activity` 的 `improvement` 条目，`watch` 的 `voice`，`submit` 和 `reply` 的 `spoken`，以及语音事件 `voice_state`、`voice_level`、`transcript`、`voice_notice`（只发给声明了 `voice` 的订阅）。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
+`version` 是协议版本，与程序的语义版本号分开。v0.3 和 v0.4 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段，`question` 的 `tainted`；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法；请求信封的 `caller`、`preauthorize` 的 `caller`，以及 `register_caller`、`callers`、`revoke_caller` 方法；`activity`、`voice`、`listen`、`speech` 方法，`activity` 的 `improvement` 条目，`watch` 的 `voice`，`submit` 和 `reply` 的 `spoken`，以及语音事件 `voice_state`、`voice_level`、`transcript`、`voice_notice`（只发给声明了 `voice` 的订阅）；`reject` 方法和它的回复 `rejection_queued`。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、`reject`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；客户端遇到旧服务拒绝 `reject` 时，只能退回 `cancel`（取消整个任务），不能改发 `approve`；不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
 
 `id` 是客户端选择的无符号整数，仅用于关联响应，**不是幂等键**。重复发送同一个 `submit` 请求编号仍可能创建第二个任务。收到完整响应前连接断开时，结果可能已经落盘；客户端必须查询任务，不能自动重发变更请求。
 
@@ -44,6 +44,7 @@
 | `get` | `id: integer` | `task` | 完整意图、计划、步骤、结果、状态和确认请求 |
 | `cancel` | `id: integer` | `task` | 停止后续步骤，打断正在等待的模型请求和可中止的调用，返回持久任务 |
 | `approve` | `id: integer`、`step: integer`、`confirmation: string`，可选 `pin: string` | `approval_queued` | 校验当前具体确认请求（不可逆步骤还要核对 PIN）后，将批准排入执行队列 |
+| `reject` | `id: integer`、`step: integer`、`confirmation: string` | `rejection_queued` | 校验方式与 `approve` 相同（不需要 PIN），将“只拒绝这一步”排入执行队列：这一步不执行、记为失败，任务接着规划 |
 | `reply` | `id: integer`、`step: integer`、`text: string`，可选 `spoken: boolean` | `reply_queued` | 回答任务当前正在等待的那个提问，将回答排入执行队列 |
 | `preauthorize` | `capability: string`，可选 `args: array`、`other_args: boolean`、`expires_in_seconds: integer`、`pin: string` | `preauthorized` | 创建一条预授权：符合规则的调用不再逐次确认 |
 | `preauthorizations` | 无 | `preauthorizations` | 仍然有效的预授权 |
@@ -59,7 +60,7 @@
 | `listen` | `action: "start"/"stop"/"cancel"` | `listening` | 按住说话：开始录音、停止并识别、停止并丢弃；返回这次录音的编号 |
 | `speech` | 可选 `mode: "auto"/"always"/"off"`、`stop: boolean` | `voice` | 设置何时朗读回复，或停止正在朗读的内容 |
 
-`accepted` 表示任务已保存并接收执行；不表示任务已经成功。`approval_queued` 同样只表示批准请求已入队，执行 worker 仍会再次检查 token、来源、期限与 grant。`reply_queued` 只表示回答已入队，不表示任务拿它做了什么。
+`accepted` 表示任务已保存并接收执行；不表示任务已经成功。`approval_queued` 同样只表示批准请求已入队，执行 worker 仍会再次检查 token、来源、期限与 grant。`rejection_queued` 也只表示拒绝已入队，执行时会再核对一次；它不说明任务之后做成了没有。`reply_queued` 只表示回答已入队，不表示任务拿它做了什么。
 
 ### 提交与读取
 
@@ -138,7 +139,7 @@ Agent 缺少只有用户知道的信息时可以提问。提问是任务的一�
 
 带 `caller` 的请求：
 
-- **能用的方法：** `ping`、`submit`、`list`、`get`、`cancel`、`reply`、`capabilities`、`read`。其余返回 `forbidden`：`approve`、预授权的三个方法、调用方的三个方法和 `watch`。
+- **能用的方法：** `ping`、`submit`、`list`、`get`、`cancel`、`reply`、`capabilities`、`read`。其余返回 `forbidden`：`approve`、`reject`、预授权的三个方法、调用方的三个方法和 `watch`。
 - **只看得到自己的任务。** `list` 只列出它提交的任务；对别人的任务 `get`、`cancel`、`reply` 返回 `not_found`；它只能接着自己开启的线程说。
 - **`capabilities` 和 `read` 只覆盖清单。** 清单之外的能力对它不存在。
 - **拿不到批准令牌。** 返回给它的任务里，`confirmation.token` 是空字符串。
@@ -256,6 +257,23 @@ token 每次确认请求重新生成，客户端应将它视为不透明字符�
 
 PIN 由服务端核对，不保存、不写入任务或审计；核对通过只为这个任务的这一次批准作证，一分钟内有效。没有带 `pin` 得到 `identity_required`，PIN 不对或已锁定得到 `identity_rejected`（消息说明还能试几次或要等多久），这两种情况下确认请求仍然有效，可以重试。服务没有设置 PIN 时，L3 步骤不会进入等待确认，而是直接失败。
 
+### 只拒绝这一步
+
+不想让这一步执行、但任务的其余部分还要做时（例如读到的邮件里藏着指令，让它给陌生地址发信），用 `reject` 代替 `cancel`：
+
+```json
+{"version":1,"id":7,"command":{"method":"reject","id":1,"step":1,"confirmation":"opaque-token-from-task"}}
+```
+
+```json
+{"version":1,"id":7,"body":{"status":"ok","data":{"type":"rejection_queued","id":1,"step":1}}}
+```
+
+- **绑定和批准完全一样**：当前任务、步骤、token、原输入来源和说话者、五分钟有效期，入队和执行时各检查一次；对不上得到 `invalid_confirmation`，任务原样等待。确认请求只能回答一次：拒绝之后，同一个 token 既不能再拒绝，也不能再批准。外部调用方不能拒绝（`forbidden`），确认永远由人来做。
+- **不需要 PIN**，即使是 L3 步骤：拒绝什么也不会执行，而同一个客户端本来就能不带 PIN 取消整个任务。请求里带 `pin` 会因未知字段被拒绝。
+- **结果**：这一步记为 `failed`，结果是“用户拒绝了这一步，没有执行……”；同一轮里排在它后面的步骤记为 `skipped`，和其他失败一样。规划器在下一轮看到这条拒绝，可以换别的办法完成请求，或者如实结束。拒绝之后直接结束的任务是 `failed`（最后尝试的一步没有做成），只有之后另有成功的步骤、再给出回答时才可能是 `succeeded`。审计记一条 `human_confirmation`，`approved: false`。
+- **不会自动重发**：连接在回复前断开时，结果未知；客户端应 `get` 任务查看，而不是再发一次。
+
 ## Revision 与实时事件
 
 任务存储为每次成功提交的变更分配递增 `revision`，并将其和任务 snapshot 一起持久化。写失败不增加 revision、不发布事件。重启恢复若把未完成任务改为 `interrupted`，也会推进 revision。v0.2 snapshot 自动迁移后可继续分配稳定任务 ID。
@@ -281,7 +299,7 @@ PIN 由服务端核对，不保存、不写入任务或审计；核对通过只�
 
 `after` 只表达客户端已知的 revision，**不请求持久事件回放**。订阅时服务端先建立接收器，再读取当前 revision；若 `after` 不等于当前值（包括缺省），在 `watching` 后发送 `resync_required`。刚好相等则只发送后续变更。慢消费者落后超过有界通知缓冲后，同样得到重新同步通知。
 
-可靠客户端可以先建立 watch，再读取页面与 revision，并持续处理后续通知。重新连接时刷新权威页面；不要为了补齐通知去重放 `submit`、`cancel`、`approve` 或 `reply`。终端工作台遵循这一原则，断线后清除已展示的批准请求，重新展示详情后才允许批准。
+可靠客户端可以先建立 watch，再读取页面与 revision，并持续处理后续通知。重新连接时刷新权威页面；不要为了补齐通知去重放 `submit`、`cancel`、`approve`、`reject` 或 `reply`。终端工作台遵循这一原则，断线后清除已展示的批准请求，重新展示详情后才允许批准。
 
 ## 语音
 

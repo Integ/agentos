@@ -166,18 +166,22 @@ pub fn task_detail(task: &Task, include_token: bool) -> String {
         } else {
             lines.push(format!("  此步骤等待明确批准 · 剩余 {remaining} 秒"));
             if include_token {
+                let token = one_line(&confirmation.token, 256);
                 lines.push(format!(
-                    "  agentos approve {} {} --confirmation {}",
+                    "  agentos approve {} {} --confirmation {token}",
                     task.id,
                     confirmation.step + 1,
-                    one_line(&confirmation.token, 256)
+                ));
+                lines.push(format!(
+                    "  只拒绝这一步：agentos reject {} {} --confirmation {token}",
+                    task.id,
+                    confirmation.step + 1,
                 ));
             } else if confirmation_visible(task) {
                 lines.push(format!(
-                    "  批准 /approve {} {}    取消 /cancel {}",
-                    task.id,
-                    confirmation.step + 1,
-                    task.id
+                    "  批准 /approve {id} {step}    只拒绝这一步 /reject {id} {step}    取消整个任务 /cancel {id}",
+                    id = task.id,
+                    step = confirmation.step + 1,
                 ));
             }
         }
@@ -436,6 +440,9 @@ pub fn reply_text(reply: &Reply) -> String {
         Reply::ApprovalQueued { id, step } => {
             format!("{id} 第 {step} 步的批准请求已排队；执行前仍会校验权限与有效期。")
         }
+        Reply::RejectionQueued { id, step } => {
+            format!("{id} 第 {step} 步已拒绝，不会执行；任务会换别的办法继续，或说明没有做成。")
+        }
         Reply::ReplyQueued { id, step } => {
             format!("{id} 第 {step} 步的回答已收到；任务会接着进行。")
         }
@@ -493,7 +500,7 @@ pub fn wait_text(outcome: &WaitOutcome) -> String {
     let note = match outcome {
         WaitOutcome::Settled(_) => return detail,
         WaitOutcome::NeedsApproval(_) => {
-            "任务在等待批准，不会自行继续；核对上面的步骤与参数后再批准或取消。".to_string()
+            "任务在等待批准，不会自行继续；核对上面的步骤与参数后再批准、只拒绝这一步，或取消整个任务。".to_string()
         }
         WaitOutcome::NeedsInput(_) => {
             "任务在等待你的回答，不会自行继续；用上面的 reply 命令回答，或取消任务。".to_string()

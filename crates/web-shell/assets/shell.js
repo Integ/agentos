@@ -212,7 +212,7 @@ function renderTaskDetail(task) {
   const stepRows = (task.steps || []).map((step, index) => `<div class="step"><strong>${String(index + 1).padStart(2, '0')} · ${step.agent ? `〔${e(step.agent)}〕` : ''}${e(step.capability)}</strong><p>${e(stateLabels[step.state] || step.state)}</p><details><summary class="count-label">参数与结果</summary><pre class="json-output">${e(JSON.stringify({ args: step.args, result: step.result }, null, 2))}</pre></details></div>`).join('');
   const noteResult = (task.steps || []).findLast(s => s.capability === 'notes.list' && s.state === 'succeeded' && Array.isArray(s.result?.notes));
   const confirmation = state.approval?.id === task.id && state.approval?.token === task.confirmation?.token && state.approval.expires_at_ms > Date.now() ? state.approval : null;
-  const approval = task.state === 'awaiting_confirmation' ? `<section class="approval-panel"><h3>这一步，需要你的明确批准。</h3><p>请查看具体能力、参数和原因。批准仅针对这一任务的这一步。</p>${confirmation ? `<pre class="json-output">${e(JSON.stringify({ capability: task.steps?.[confirmation.step]?.capability, args: task.steps?.[confirmation.step]?.args, reason: task.message }, null, 2))}</pre>${confirmation.verify_identity ? '<p>这一步不可逆，需要输入 PIN 才能批准。PIN 只发给本机后台核对，不会保存。</p><label class="count-label" for="approve-pin">PIN</label> <input id="approve-pin" type="password" inputmode="numeric" autocomplete="off" maxlength="12">' : ''}<button class="primary-button" id="approve-task" data-task-id="${e(id)}">批准第 ${confirmation.step + 1} 步</button><p>批准请求将在 ${e(formatTime(new Date(confirmation.expires_at_ms)))} 过期。</p>` : '<button class="secondary-button" id="refresh-approval">读取并查看当前批准请求</button>'}</section>` : '';
+  const approval = task.state === 'awaiting_confirmation' ? `<section class="approval-panel"><h3>这一步，需要你的明确批准。</h3><p>请查看具体能力、参数和原因。批准仅针对这一任务的这一步。</p>${confirmation ? `<pre class="json-output">${e(JSON.stringify({ capability: task.steps?.[confirmation.step]?.capability, args: task.steps?.[confirmation.step]?.args, reason: task.message }, null, 2))}</pre>${confirmation.verify_identity ? '<p>这一步不可逆，需要输入 PIN 才能批准。PIN 只发给本机后台核对，不会保存。</p><label class="count-label" for="approve-pin">PIN</label> <input id="approve-pin" type="password" inputmode="numeric" autocomplete="off" maxlength="12">' : ''}<button class="primary-button" id="approve-task" data-task-id="${e(id)}">批准第 ${confirmation.step + 1} 步</button> <button class="secondary-button" id="reject-task" data-task-id="${e(id)}">只拒绝这一步</button><p>拒绝后这一步不会执行，任务会换别的办法继续或说明没有做成；要整个停下，用下面的“停止后续步骤”。批准请求将在 ${e(formatTime(new Date(confirmation.expires_at_ms)))} 过期。</p>` : '<button class="secondary-button" id="refresh-approval">读取并查看当前批准请求</button>'}</section>` : '';
   const used = task.usage;
   const usage = used?.model_calls > 0 ? `<p class="inline-note">用量：${e(used.model_calls)} 次模型请求 · 输入 ${e(used.input_tokens)} / 输出 ${e(used.output_tokens)} token · 执行 ${e(Math.floor((used.active_ms || 0) / 1000))} 秒${used.unmetered_calls > 0 ? `（其中 ${e(used.unmetered_calls)} 次没有报告用量，token 数只是下限）` : ''}</p>` : '';
   // The question is the task's message, shown above; the answer goes to
@@ -899,6 +899,20 @@ document.addEventListener('click', async event => {
       state.approval = null;
       await api(`/tasks/${encodeURIComponent(button.dataset.taskId)}/approve`, { step: shown.step + 1, confirmation: shown.token, ...(shown.verify_identity ? { pin } : {}) });
       respond('这一具体步骤的批准已入队，后台会再次校验。'); await refreshTasks(); render();
+    } catch (error) { state.approval = null; handleError(error); render(); } return;
+  }
+  if (button.id === 'reject-task') {
+    // Refuses exactly the prompt that was shown, read again first like an approval; no PIN.
+    const shown = state.approval; if (!shown || shown.expires_at_ms <= Date.now() || !state.connected) { state.approval = null; render(); return; }
+    button.disabled = true;
+    try {
+      const fresh = (await api(`/tasks/${encodeURIComponent(button.dataset.taskId)}`)).task;
+      if (fresh.id !== shown.id || fresh.confirmation?.token !== shown.token || fresh.confirmation?.step !== shown.step || fresh.confirmation.expires_at_ms <= Date.now()) {
+        state.selected = fresh; state.approval = null; render(); respond('批准请求已经变化，请重新读取并查看。'); return;
+      }
+      state.approval = null;
+      await api(`/tasks/${encodeURIComponent(button.dataset.taskId)}/reject`, { step: shown.step + 1, confirmation: shown.token });
+      respond('已拒绝这一步，它不会执行；任务会换别的办法继续。'); await refreshTasks(); render();
     } catch (error) { state.approval = null; handleError(error); render(); } return;
   }
   if (button.id === 'reply-task') {

@@ -250,6 +250,17 @@ impl Sandbox {
         }
     }
 
+    /// Refuse the pending step only, with the token its prompt carried. No
+    /// PIN: refusing runs nothing.
+    pub async fn reject(&self, id: TaskId) {
+        let task = self.task(id);
+        if let Some(confirmation) = &task.confirmation {
+            self.butler
+                .reject_with_token(id, confirmation.step, &task.intent, &confirmation.token)
+                .await;
+        }
+    }
+
     pub fn cancel(&self, id: TaskId) -> io::Result<()> {
         self.butler.tasks().cancel(id).map(|_| ())
     }
