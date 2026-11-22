@@ -166,8 +166,10 @@ pub fn translate(
         }
     }
     // The task just read outside content: say so once in the conversation,
-    // so later steps and requests are read with that in mind.
-    if task.tainted && previous.is_none_or(|p| !p.tainted) {
+    // so later steps and requests are read with that in mind. A tainted
+    // question already carries its own warning; one warning is enough.
+    let question_warns = task.question.as_ref().is_some_and(|q| q.tainted);
+    if task.tainted && !question_warns && previous.is_none_or(|p| !p.tainted) {
         events.push(json!({
             "type": "expression", "kind": "report", "intent": id, "task": id, "from": "butler",
             "text": format!(
