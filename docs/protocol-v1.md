@@ -218,7 +218,7 @@ Agent 缺少只有用户知道的信息时可以提问。提问是任务的一�
 {"version":1,"id":9,"body":{"status":"ok","data":{"type":"value","capability":"notes.list","value":{"notes":["买牛奶"],"message":"1. 买牛奶"}}}}
 ```
 
-`args` 省略时为 `{}`，必须是 JSON 对象。`value` 是能力自己的返回值，结构由能力决定。
+`args` 省略时为 `{}`，必须是 JSON 对象。`value` 是能力自己的返回值，结构由能力决定。读到受污染的任务写下的内容时，`board.read`、`notes.list` 的 `value` 里多一个 `"tainted": true`；客户端可以据此提示用户这段内容来自外部，不认识它的客户端忽略即可。
 
 `read` 不创建任务，不经过规划器，不推进 revision，不产生变更事件，也不写审计记录：它和 `get`、`list` 一样，是同一系统用户对本机状态的查询，不是 Agent 的行为。因此它只对同时满足以下条件的能力开放：已授权给管家、风险为 L0 `read_only`、输出不属于不可信的外部内容（后者需要任务来承载污点）。其余能力返回 `not_readable`，必须通过 `submit` 提交意图，走规划、策略和审计。可读集合与 `capabilities` 的结果一致，插件被安装、停用或回滚后两者一起更新。
 

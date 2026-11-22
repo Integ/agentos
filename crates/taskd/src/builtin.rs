@@ -2,6 +2,10 @@
 //!
 //! The daemon uses an atomic on-disk notebook; `register_all` keeps an in-memory
 //! variant for embedders and tests. Both expose exactly the same capabilities.
+//!
+//! Each note remembers whether a tainted task wrote it, so content that came
+//! from outside the user's control does not become trusted once it is stored:
+//! `notes.list` taints whoever reads such a note.
 
 use std::fs;
 use std::io;
@@ -9,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use agentos_core::{
-    Capability, CapabilityError, CapabilityName, CapabilitySpec, Intent, RiskLevel,
+    Capability, CapabilityError, CapabilityName, CapabilitySpec, Intent, Invocation, RiskLevel,
+    TAINTED_OUTPUT,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -133,29 +138,99 @@ fn hostname() -> Option<String> {
     (!name.is_empty() && name.chars().all(|c| !c.is_control())).then(|| name.to_string())
 }
 
+/// The notes' texts, kept current for embedders and tests to look at.
 pub type NoteStore = Arc<Mutex<Vec<String>>>;
+
+/// One note and its provenance.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "StoredNote", into = "StoredNote")]
+struct Note {
+    text: String,
+    /// Written by a task that had seen content from outside the user's
+    /// control.
+    tainted: bool,
+}
+
+/// A note on disk. A trusted note stays a bare string, so a notebook with
+/// no tainted notes is saved exactly as before provenance existed, and old
+/// notebooks load with every note trusted.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum StoredNote {
+    Plain(String),
+    Marked(MarkedNote),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MarkedNote {
+    text: String,
+    tainted: bool,
+}
+
+impl From<StoredNote> for Note {
+    fn from(stored: StoredNote) -> Self {
+        match stored {
+            StoredNote::Plain(text) => Self {
+                text,
+                tainted: false,
+            },
+            StoredNote::Marked(MarkedNote { text, tainted }) => Self { text, tainted },
+        }
+    }
+}
+
+impl From<Note> for StoredNote {
+    fn from(note: Note) -> Self {
+        if note.tainted {
+            Self::Marked(MarkedNote {
+                text: note.text,
+                tainted: true,
+            })
+        } else {
+            Self::Plain(note.text)
+        }
+    }
+}
+
+impl Note {
+    fn new(text: String, call: Invocation) -> Self {
+        Self {
+            text,
+            tainted: call.tainted,
+        }
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NotebookData {
     version: u32,
-    notes: Vec<String>,
-    undo: Option<Vec<String>>,
+    notes: Vec<Note>,
+    undo: Option<Vec<Note>>,
 }
 
 struct Notebook {
-    notes: NoteStore,
-    undo: Mutex<Option<Vec<String>>>,
+    data: Mutex<(Vec<Note>, Option<Vec<Note>>)>,
+    texts: NoteStore,
     path: Option<PathBuf>,
 }
 
 impl Notebook {
     fn memory() -> Self {
         Self {
-            notes: Arc::default(),
-            undo: Mutex::new(None),
+            data: Mutex::default(),
+            texts: Arc::default(),
             path: None,
         }
+    }
+
+    fn notes(&self) -> Vec<Note> {
+        self.data
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .0
+            .clone()
     }
 
     fn open(path: &Path) -> io::Result<Self> {
@@ -170,7 +245,10 @@ impl Notebook {
                         .notes
                         .iter()
                         .chain(data.undo.iter().flatten())
-                        .any(|note| note.trim().is_empty() || note.chars().count() > MAX_NOTE_CHARS)
+                        .any(|note| {
+                            note.text.trim().is_empty()
+                                || note.text.chars().count() > MAX_NOTE_CHARS
+                        })
                 {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -190,9 +268,10 @@ impl Notebook {
         if !path.exists() {
             atomic_save(path, &data)?;
         }
+        let texts = data.notes.iter().map(|note| note.text.clone()).collect();
         Ok(Self {
-            notes: Arc::new(Mutex::new(data.notes)),
-            undo: Mutex::new(data.undo),
+            data: Mutex::new((data.notes, data.undo)),
+            texts: Arc::new(Mutex::new(texts)),
             path: Some(path.to_path_buf()),
         })
     }
@@ -202,20 +281,20 @@ impl Notebook {
         &self,
         update: impl FnOnce(&mut NotebookData) -> Result<T, CapabilityError>,
     ) -> Result<T, CapabilityError> {
-        let mut notes = self.notes.lock().unwrap_or_else(|p| p.into_inner());
-        let mut undo = self.undo.lock().unwrap_or_else(|p| p.into_inner());
+        let mut data = self.data.lock().unwrap_or_else(|p| p.into_inner());
         let mut next = NotebookData {
             version: 1,
-            notes: notes.clone(),
-            undo: undo.clone(),
+            notes: data.0.clone(),
+            undo: data.1.clone(),
         };
         let result = update(&mut next)?;
         if let Some(path) = &self.path {
             atomic_save(path, &next)
                 .map_err(|e| CapabilityError::Failed(format!("保存笔记失败：{e}")))?;
         }
-        *notes = next.notes;
-        *undo = next.undo;
+        *self.texts.lock().unwrap_or_else(|p| p.into_inner()) =
+            next.notes.iter().map(|note| note.text.clone()).collect();
+        *data = (next.notes, next.undo);
         Ok(result)
     }
 }
@@ -282,7 +361,7 @@ fn note_text(args: &Value, key: &str) -> Result<String, CapabilityError> {
 /// them), but only while it still reads `current`. Other tasks may change
 /// the notebook between the list a planner read and this call; matching
 /// the text keeps a shifted index from changing the wrong note.
-fn locate_note(notes: &[String], args: &Value) -> Result<usize, CapabilityError> {
+fn locate_note(notes: &[Note], args: &Value) -> Result<usize, CapabilityError> {
     let index = args
         .get("index")
         .and_then(Value::as_u64)
@@ -291,9 +370,10 @@ fn locate_note(notes: &[String], args: &Value) -> Result<usize, CapabilityError>
     let current = note_text(args, "current")?;
     let position = usize::try_from(index - 1).unwrap_or(usize::MAX);
     match notes.get(position) {
-        Some(note) if *note == current => Ok(position),
+        Some(note) if note.text == current => Ok(position),
         Some(note) => Err(CapabilityError::Failed(format!(
-            "第 {index} 条笔记现在是“{note}”，不是“{current}”；笔记可能已被改动，请重新列出后再试。没有做任何修改。"
+            "第 {index} 条笔记现在是“{}”，不是“{current}”；笔记可能已被改动，请重新列出后再试。没有做任何修改。",
+            note.text
         ))),
         None => Err(CapabilityError::Failed(format!(
             "没有第 {index} 条笔记（现在共 {} 条）；没有做任何修改。",
@@ -309,11 +389,20 @@ impl Capability for NotesUpdate {
     }
 
     async fn invoke(&self, args: Value) -> Result<Value, CapabilityError> {
+        self.invoke_with(args, Invocation::default()).await
+    }
+
+    // The new text replaces the old one entirely, so its provenance does
+    // too: rewriting a tainted note in an untainted task vouches for it.
+    // Such a task can only name the note's current text if the user told it
+    // (listing the note would have tainted it), so this is the user's call.
+    async fn invoke_with(&self, args: Value, call: Invocation) -> Result<Value, CapabilityError> {
         validate_args(&args, &["index", "current", "text"])?;
         let text = note_text(&args, "text")?;
         self.notebook.change(|data| {
             let position = locate_note(&data.notes, &args)?;
-            let previous = std::mem::replace(&mut data.notes[position], text.clone());
+            let previous =
+                std::mem::replace(&mut data.notes[position], Note::new(text.clone(), call)).text;
             Ok(json!({
                 "index": position + 1,
                 "previous": previous,
@@ -333,7 +422,7 @@ impl Capability for NotesRemove {
         validate_args(&args, &["index", "current"])?;
         self.notebook.change(|data| {
             let position = locate_note(&data.notes, &args)?;
-            let removed = data.notes.remove(position);
+            let removed = data.notes.remove(position).text;
             Ok(json!({
                 "removed": removed,
                 "count": data.notes.len(),
@@ -350,6 +439,10 @@ impl Capability for NotesAppend {
     }
 
     async fn invoke(&self, args: Value) -> Result<Value, CapabilityError> {
+        self.invoke_with(args, Invocation::default()).await
+    }
+
+    async fn invoke_with(&self, args: Value, call: Invocation) -> Result<Value, CapabilityError> {
         validate_args(&args, &["text"])?;
         let text = args
             .get("text")
@@ -362,7 +455,7 @@ impl Capability for NotesAppend {
                 ))
             })?;
         self.notebook.change(|data| {
-            data.notes.push(text.to_string());
+            data.notes.push(Note::new(text.to_string(), call));
             Ok(json!({"count": data.notes.len(), "message": format!("已记下：{text}")}))
         })
     }
@@ -376,22 +469,24 @@ impl Capability for NotesList {
 
     async fn invoke(&self, args: Value) -> Result<Value, CapabilityError> {
         validate_args(&args, &[])?;
-        let notes = self
-            .notebook
-            .notes
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let notes = self.notebook.notes();
         let message = if notes.is_empty() {
             "笔记是空的".to_string()
         } else {
             notes
                 .iter()
                 .enumerate()
-                .map(|(i, n)| format!("{}. {n}", i + 1))
+                .map(|(i, n)| format!("{}. {}", i + 1, n.text))
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        Ok(json!({"notes": *notes, "message": message}))
+        let texts: Vec<&str> = notes.iter().map(|note| note.text.as_str()).collect();
+        let mut out = json!({"notes": texts, "message": message});
+        if notes.iter().any(|note| note.tainted) {
+            // The butler taints the reading task on this marker.
+            out[TAINTED_OUTPUT] = json!(true);
+        }
+        Ok(out)
     }
 }
 
@@ -512,7 +607,7 @@ fn register(reg: &mut CapabilityRegistry, notebook: Notebook) -> NoteStore {
         ),
         notebook: notebook.clone(),
     }));
-    notebook.notes.clone()
+    notebook.texts.clone()
 }
 
 /// Register an in-memory notebook, primarily for tests and embedding.
@@ -551,6 +646,75 @@ mod tests {
             .invoke(args)
             .await
             .unwrap()
+    }
+
+    async fn invoke_as(reg: &CapabilityRegistry, name: &str, args: Value, tainted: bool) -> Value {
+        reg.get(&CapabilityName::new(name))
+            .unwrap()
+            .invoke_with(args, Invocation { tainted })
+            .await
+            .unwrap()
+    }
+
+    // Guards backward compatibility: a notebook saved before provenance
+    // existed loads with every note trusted, and a notebook without tainted
+    // notes is still saved in the old format.
+    #[tokio::test]
+    async fn an_old_notebook_loads_as_trusted_and_provenance_survives_restart() {
+        let dir = temp_dir("provenance");
+        let path = dir.join("notes.json");
+        fs::write(&path, r#"{"version":1,"notes":["牛奶"],"undo":["旧的"]}"#).unwrap();
+        let mut reg = CapabilityRegistry::new();
+        register_persistent(&mut reg, &path).unwrap();
+        let listed = invoke(&reg, "notes.list", json!({})).await;
+        assert_eq!(listed["notes"], json!(["牛奶"]));
+        assert!(!agentos_core::carries_taint(&listed));
+        invoke(&reg, "notes.restore", json!({})).await;
+        invoke(&reg, "notes.append", json!({"text": "面包"})).await;
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap()["notes"],
+            json!(["旧的", "牛奶", "面包"])
+        );
+
+        invoke_as(&reg, "notes.append", json!({"text": "外部"}), true).await;
+        drop(reg);
+        let mut reg = CapabilityRegistry::new();
+        let notes = register_persistent(&mut reg, &path).unwrap();
+        assert_eq!(*notes.lock().unwrap(), vec!["旧的", "牛奶", "面包", "外部"]);
+        let listed = invoke(&reg, "notes.list", json!({})).await;
+        assert!(agentos_core::carries_taint(&listed));
+        // Clearing and restoring keeps provenance with the note.
+        invoke(&reg, "notes.clear", json!({})).await;
+        assert!(!agentos_core::carries_taint(
+            &invoke(&reg, "notes.list", json!({})).await
+        ));
+        invoke(&reg, "notes.restore", json!({})).await;
+        assert!(agentos_core::carries_taint(
+            &invoke(&reg, "notes.list", json!({})).await
+        ));
+        // Rewriting the note as a whole in an untainted task replaces its
+        // provenance; removing it is allowed and takes it along.
+        invoke(
+            &reg,
+            "notes.update",
+            json!({"index": 4, "current": "外部", "text": "自己写的"}),
+        )
+        .await;
+        assert!(!agentos_core::carries_taint(
+            &invoke(&reg, "notes.list", json!({})).await
+        ));
+        invoke_as(
+            &reg,
+            "notes.update",
+            json!({"index": 4, "current": "自己写的", "text": "外部"}),
+            true,
+        )
+        .await;
+        invoke(&reg, "notes.remove", json!({"index": 4, "current": "外部"})).await;
+        assert!(!agentos_core::carries_taint(
+            &invoke(&reg, "notes.list", json!({})).await
+        ));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
