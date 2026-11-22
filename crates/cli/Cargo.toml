@@ -17,6 +17,9 @@ agentos-runtime.workspace = true
 agentos-ipc.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+reqwest.workspace = true
+# Only text rendering, for the WeChat login QR code in a terminal.
+qrcode = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 agentos-audit.workspace = true

@@ -24,7 +24,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 已知缺口：
 
 - 内置能力与服务同进程运行，没有进程隔离；插件和 MCP server 在 bubblewrap 沙箱里（没有可用沙箱的机器上，MCP server 要你在配置里明确允许才会启动）。不能中止的调用超过时限后转到后台运行完，在后台运行的调用没有数量上限。见[架构](docs/architecture.md#其他边界)。
-- 没有本机唤醒词，没有定时任务（见 [docs/agents.md](docs/agents.md#尚未实现)）。
+- 没有本机唤醒词（见 [docs/voice.md](docs/voice.md)）。
 - Web Shell 是浏览器里的本地界面，不是桌面合成器；实时语音会把音频发给模型服务，不是全本地语音。
 
 ## 现在能做什么
@@ -35,6 +35,8 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 - **图形设置助理**：首次进入桌面时出现 Liquid Glass 风格的设置助理，一页一件事：Wi‑Fi、模型接口（带 DeepSeek/通义千问/Ollama 预设）、语音、Home Assistant（可当场测试连接）、PIN、安装到硬盘。系统菜单「网络和 AI 设置…」可随时重新打开。见 [docs/shell.md](docs/shell.md#设置助理)。
 - **语音输入与朗读**：按住麦克风按钮或 **Caps Lock** 说话，松开发送，Caps Lock 指示灯就是录音灯；回复可以读出来。只在按住时录音，没有唤醒词。见 [docs/voice.md](docs/voice.md)。
 - **智能家居**：接入 Home Assistant，开灯、调空调是 L1，场景脚本是 L2，开锁、撤防、开车库门是 L3。见 [docs/smart-home.md](docs/smart-home.md)。
+- **网页、文件、定时任务**：`web.fetch` 读公开网页（不能访问本机和局域网），`files.*` 只能读写一个工作区目录（默认 `~/AgentOS`，替换前自动备份），`schedule.*` 让一句话在指定时间或每天、每周自动执行；都经过策略和审计。见 [docs/capabilities.md](docs/capabilities.md)。
+- **微信**：`agentos wechat login` 扫码绑定微信官方的 ClawBot，`agentos wechat` 之后在微信里和 AgentOS 说话；只听绑定的那个人，微信里不能批准。见 [docs/wechat.md](docs/wechat.md)。
 - **MCP 工具**：`mcp.json` 里配置的 MCP server，工具自动成为管家的能力；server 在 bubblewrap 沙箱里运行。见 [docs/mcp.md](docs/mcp.md)。
 - **自我进化**：让 AgentOS 给自己写新能力，以沙箱插件形式安装，可回滚。见 [docs/self-evolution.md](docs/self-evolution.md)。
 - **自我改进**：体检报告指出哪里做得不好；回放把过去的任务交给现在的系统、对比结局，可以当回归检查；打开后在空闲时从自己的历史里学经验和技能，回放证明明显变好才自动采用，变差就自动撤回，随时可以撤销。学到的东西改不了权限。见 [docs/self-improvement-research.md](docs/self-improvement-research.md) 和 [架构](docs/architecture.md#自我改进体检回放与学习)。

@@ -35,6 +35,20 @@ fn submitted_by(task: &Task, responder: &Intent) -> bool {
 /// never by a caller, itself included. Confirmation always returns to a
 /// person.
 fn may_approve(task: &Task, responder: &Intent) -> bool {
+    // A scheduled task has nobody at its source to ask: like a caller's, it
+    // is approved and answered by the human at this machine.
+    if task
+        .intent
+        .source
+        .as_str()
+        .starts_with(agentos_ipc::SCHEDULE_SOURCE_PREFIX)
+    {
+        return crate::butler::caller_of(responder).is_none()
+            && !responder
+                .source
+                .as_str()
+                .starts_with(agentos_ipc::SCHEDULE_SOURCE_PREFIX);
+    }
     match crate::butler::caller_of(&task.intent) {
         Some(_) => crate::butler::caller_of(responder).is_none(),
         None => submitted_by(task, responder),
@@ -211,5 +225,56 @@ mod tests {
             })
             .unwrap();
         assert!(approval_matches(&task, 0, &responder, now_ms()));
+    }
+
+    #[test]
+    fn a_scheduled_task_is_approved_by_the_human_and_by_nothing_else() {
+        let store = TaskStore::memory();
+        let from = |source: &str| Intent {
+            id: IntentId(1),
+            source: DeviceId::new(source),
+            speaker: Some(source.into()),
+            text: "看看天气".into(),
+            urgency: Urgency::Normal,
+            at_ms: now_ms(),
+        };
+        let task = store.create(from("schedule:sched-1")).unwrap();
+        let task = store
+            .update(task.id, |task| {
+                task.state = TaskState::AwaitingConfirmation;
+                task.steps = vec![TaskStep::pending(
+                    agentos_core::CapabilityName::new("mail.send"),
+                    json!({"to":"alice"}),
+                )];
+                task.confirmation = Some(Confirmation {
+                    step: 0,
+                    expires_at_ms: now_ms() + 1_000,
+                    token: "test-token".into(),
+                    verify_identity: false,
+                });
+            })
+            .unwrap();
+        // Guards "confirmation always returns to a person": nobody stands
+        // behind a schedule, so the human at the machine approves, and no
+        // caller or schedule can.
+        assert!(approval_matches(&task, 0, &from("unix:uid:1000"), now_ms()));
+        assert!(!approval_matches(
+            &task,
+            0,
+            &from("caller:helper"),
+            now_ms()
+        ));
+        assert!(!approval_matches(
+            &task,
+            0,
+            &from("schedule:sched-1"),
+            now_ms()
+        ));
+        assert!(!approval_matches(
+            &task,
+            0,
+            &from("schedule:sched-2"),
+            now_ms()
+        ));
     }
 }

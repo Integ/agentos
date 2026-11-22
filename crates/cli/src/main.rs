@@ -3,7 +3,7 @@ use std::io;
 use agentos_cli::args::{self, Action};
 use agentos_cli::client::{Client, ClientError};
 use agentos_cli::wait::wait_for_task;
-use agentos_cli::{mcp, render, workbench};
+use agentos_cli::{mcp, render, wechat, workbench};
 use agentos_ipc::{Command, Reply};
 
 #[tokio::main]
@@ -27,6 +27,20 @@ async fn main() -> io::Result<()> {
         }
         Action::Workbench => return workbench::run(client).await,
         Action::Mcp { caller } => return mcp::serve(client.as_caller(caller)).await,
+        Action::Wechat { login } => {
+            let dir = wechat::state_dir(options.state_dir)?;
+            let api = std::env::var("AGENTOS_WECHAT_API").unwrap_or_else(|_| wechat::API.into());
+            let result = if login {
+                wechat::login(&dir, &api).await
+            } else {
+                wechat::run(client, &dir, &api).await
+            };
+            if let Err(error) = result {
+                eprintln!("{}", render::safe_text(&error.to_string()));
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
         Action::Request(mut command) => {
             if let (
                 true,

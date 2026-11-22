@@ -37,8 +37,11 @@ use agentos_planner::Planner;
 use agentos_services::expression::ExpressionHub;
 use agentos_services::identity::{PinCheck, PinVault};
 use agentos_services::registry::CapabilityRegistry;
+use agentos_services::schedule::{Schedule, ScheduleStore};
 
 const MAX_CONNECTIONS: usize = 64;
+/// How often due schedules are looked for: a run is at most this late.
+const SCHEDULE_TICK: Duration = Duration::from_secs(20);
 const MAX_ACTIVITY: usize = 100;
 const QUEUE_CAPACITY: usize = 64;
 /// Tasks (and approvals being carried out) that run at the same time unless
@@ -75,6 +78,8 @@ struct Controller {
     preauths: Arc<PreauthStore>,
     /// The microphone and speaker, when this machine has them configured.
     voice: Option<Arc<Voice>>,
+    /// Intents the user asked to have submitted later; see `run_due`.
+    schedules: Option<Arc<ScheduleStore>>,
     work_tx: mpsc::UnboundedSender<Admitted>,
     /// Bounds work that has been admitted and has not started. The channel
     /// itself is unbounded because the scheduler takes work off it at once,
@@ -147,6 +152,7 @@ impl Service {
                 pins,
                 preauths: butler.preauthorizations().clone(),
                 voice: None,
+                schedules: None,
                 work_tx,
                 admission: Arc::new(Semaphore::new(QUEUE_CAPACITY)),
             }),
@@ -163,6 +169,14 @@ impl Service {
         Arc::get_mut(&mut self.controller)
             .expect("the controller is not shared before the service runs")
             .voice = Some(voice);
+        self
+    }
+
+    /// Submit the user's scheduled intents when they are due.
+    pub fn with_schedules(mut self, schedules: Arc<ScheduleStore>) -> Self {
+        Arc::get_mut(&mut self.controller)
+            .expect("the controller is not shared before the service runs")
+            .schedules = Some(schedules);
         self
     }
 
@@ -280,6 +294,8 @@ impl Server {
         let mut connections = JoinSet::new();
         tokio::pin!(shutdown);
         let mut worker_done = false;
+        let mut schedule_tick = tokio::time::interval(SCHEDULE_TICK);
+        schedule_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let outcome = loop {
             tokio::select! {
                 _ = &mut shutdown => break Ok(()),
@@ -302,6 +318,7 @@ impl Server {
                     });
                 }
                 Some(_) = connections.join_next(), if !connections.is_empty() => {},
+                _ = schedule_tick.tick() => controller.run_due_schedules(),
             }
         };
         drop(listener);
@@ -589,6 +606,38 @@ impl Controller {
             PinCheck::Ok => Ok(()),
             other => Err(protocol_error("identity_rejected", other.message())),
         }
+    }
+
+    /// Submit every schedule that is due, each as a task of its own from
+    /// `schedule:<id>`. The store has already moved each one on before it is
+    /// submitted, so a crash here skips a run and never repeats one.
+    fn run_due_schedules(&self) {
+        let Some(store) = &self.schedules else {
+            return;
+        };
+        for schedule in store.take_due(now_ms()) {
+            let outcome = match self.submit_scheduled(&schedule) {
+                Ok(id) => format!("task-{id}"),
+                Err(error) => format!("没有运行：{}", error.message),
+            };
+            store.record(&schedule.id, outcome);
+        }
+    }
+
+    fn submit_scheduled(&self, schedule: &Schedule) -> Result<TaskId, ProtocolError> {
+        let place = self.admit("任务队列已满；这一次定时任务没有运行")?;
+        let source = format!("{}{}", agentos_ipc::SCHEDULE_SOURCE_PREFIX, schedule.id);
+        let intent = Intent {
+            id: IntentId(0),
+            source: DeviceId::new(source.clone()),
+            speaker: Some(source),
+            text: schedule.text.clone(),
+            urgency: Urgency::Normal,
+            at_ms: now_ms(),
+        };
+        let task = self.tasks.create_in(intent, None).map_err(storage_error)?;
+        self.enqueue(Work::Run(task.id), place)?;
+        Ok(task.id)
     }
 
     /// A place in the bounded queue, or a refusal that changed nothing.

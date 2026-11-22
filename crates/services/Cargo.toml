@@ -12,6 +12,7 @@ agentos-core.workspace = true
 agentos-audit.workspace = true
 agentos-planner.workspace = true
 async-trait.workspace = true
+jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true

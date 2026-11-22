@@ -12,13 +12,15 @@ use agentos_runtime::{TaskId, TaskState};
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(300);
 const MAX_WAIT_SECONDS: u64 = 86_400;
 
-pub const HELP: &str = "AgentOS · 独立任务工作台\n\n用法：agentos [--socket 路径 | --state-dir 路径] [--json] <命令>\n\n  workbench                         实时终端工作台（默认）\n  submit [--thread task-N] [--wait] [--timeout 秒] <意图>\n                                    提交任务，客户端退出后仍继续；--wait 等到任务结束再返回；\n                                    --thread 接着某个线程说（用它第一个任务的编号）\n  tasks [--before task-N] [--limit N] [--state 状态] [--thread task-N]\n  task task-N                       查看计划、结果与批准令牌\n  cancel task-N                     取消任务的后续步骤\n  reply task-N 步骤 <回答>          回答任务在这一步提出的问题\n  approve task-N 步骤 --confirmation 令牌 [--pin-stdin]\n                                    批准一步；不可逆的步骤加 --pin-stdin，从标准输入读取 PIN\n  preauthorize <能力> [规则…] [--any-other-args] [--expires 时长] [--caller id] [--pin-stdin]\n                                    预授权：符合规则的调用不再逐次确认。规则：\n                                    --equals 字段=值　--one-of 字段=值1,值2　--prefix 字段=文本\n                                    --under 字段=目录　--any 字段；时长如 30m、2h、7d\n  preauthorizations                 查看仍然有效的预授权\n  revoke pre-N                      撤销一条预授权，立即生效\n  callers                           查看已注册的外部调用方\n  caller add <id> --name 名字 [--allow 能力或前缀]… [--max-risk L0|L1|L2] [--pin-stdin]\n                                    注册外部调用方，或整体替换它的清单；默认什么都不给\n  caller remove <id>                撤销调用方，它的预授权一并撤销\n  mcp --caller <id>                 以这个调用方的身份提供 MCP 服务（标准输入输出）\n  capabilities                      查看能力与风险\n  read <能力> [JSON 参数]           直接读取只读（L0）能力，不创建任务\n  watch [--after revision]           持续接收变更/重新同步通知\n  --help                            查看帮助\n  --version                         查看版本\n\n--json 应放在命令前，输出结构化 JSON。批准步骤从 1 开始。\n工作台 /quit 只关闭客户端，不停止后台服务。\n\n退出码：0 成功；1 连接、协议或后台错误；2 用法错误。\nsubmit --wait 另有：3 任务结束但未成功（未能处理、失败、已取消或已中断）；\n4 任务在等待批准；5 等待超时（任务仍在后台继续）；6 任务在等待回答。";
+pub const HELP: &str = "AgentOS · 独立任务工作台\n\n用法：agentos [--socket 路径 | --state-dir 路径] [--json] <命令>\n\n  workbench                         实时终端工作台（默认）\n  submit [--thread task-N] [--wait] [--timeout 秒] <意图>\n                                    提交任务，客户端退出后仍继续；--wait 等到任务结束再返回；\n                                    --thread 接着某个线程说（用它第一个任务的编号）\n  tasks [--before task-N] [--limit N] [--state 状态] [--thread task-N]\n  task task-N                       查看计划、结果与批准令牌\n  cancel task-N                     取消任务的后续步骤\n  reply task-N 步骤 <回答>          回答任务在这一步提出的问题\n  approve task-N 步骤 --confirmation 令牌 [--pin-stdin]\n                                    批准一步；不可逆的步骤加 --pin-stdin，从标准输入读取 PIN\n  preauthorize <能力> [规则…] [--any-other-args] [--expires 时长] [--caller id] [--pin-stdin]\n                                    预授权：符合规则的调用不再逐次确认。规则：\n                                    --equals 字段=值　--one-of 字段=值1,值2　--prefix 字段=文本\n                                    --under 字段=目录　--any 字段；时长如 30m、2h、7d\n  preauthorizations                 查看仍然有效的预授权\n  revoke pre-N                      撤销一条预授权，立即生效\n  callers                           查看已注册的外部调用方\n  caller add <id> --name 名字 [--allow 能力或前缀]… [--max-risk L0|L1|L2] [--pin-stdin]\n                                    注册外部调用方，或整体替换它的清单；默认什么都不给\n  caller remove <id>                撤销调用方，它的预授权一并撤销\n  mcp --caller <id>                 以这个调用方的身份提供 MCP 服务（标准输入输出）\n  wechat login                      用微信扫码绑定 ClawBot（微信：我 → 设置 → 插件）\n  wechat                            收发微信消息：你发的文字交给 AgentOS，结果发回微信\n  capabilities                      查看能力与风险\n  read <能力> [JSON 参数]           直接读取只读（L0）能力，不创建任务\n  watch [--after revision]           持续接收变更/重新同步通知\n  --help                            查看帮助\n  --version                         查看版本\n\n--json 应放在命令前，输出结构化 JSON。批准步骤从 1 开始。\n工作台 /quit 只关闭客户端，不停止后台服务。\n\n退出码：0 成功；1 连接、协议或后台错误；2 用法错误。\nsubmit --wait 另有：3 任务结束但未成功（未能处理、失败、已取消或已中断）；\n4 任务在等待批准；5 等待超时（任务仍在后台继续）；6 任务在等待回答。";
 
 pub const WORKBENCH_HELP: &str = "普通输入：提交意图，接着本次对话说；任务在后台继续\n/new：开始一段新的对话\n/tasks 或 /refresh：刷新当前页　/next：更早任务　/prev：返回上一页\n/latest：最近任务　/task task-N：选中并展示完整计划与结果\n/cancel task-N：取消后续步骤　/approve task-N 步骤：批准当前已展示的确认请求\n/reply task-N 步骤 回答：回答任务提出的问题\n/capabilities：查看能力　/help：帮助　/quit：退出工作台";
 
 #[derive(Debug)]
 pub struct Options {
     pub socket: PathBuf,
+    /// `--state-dir`, when given: where `wechat` keeps its login.
+    pub state_dir: Option<PathBuf>,
     pub json: bool,
     pub action: Action,
     /// Read the PIN for an irreversible step from standard input.
@@ -40,6 +42,10 @@ pub enum Action {
         caller: String,
     },
     Workbench,
+    /// Relay a WeChat chat (`login`: bind the bot by QR code first).
+    Wechat {
+        login: bool,
+    },
     Help,
     Version,
 }
@@ -132,6 +138,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             "--help" | "-h" => {
                 return Ok(Options {
                     socket: PathBuf::new(),
+                    state_dir: None,
                     json,
                     action: Action::Help,
                     pin_stdin: false,
@@ -140,6 +147,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             "--version" | "-V" => {
                 return Ok(Options {
                     socket: PathBuf::new(),
+                    state_dir: None,
                     json,
                     action: Action::Version,
                     pin_stdin: false,
@@ -151,6 +159,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
     if socket.is_some() && directory.is_some() {
         return Err("--socket 与 --state-dir 请只指定一个".into());
     }
+    let state_dir = directory.clone();
     let socket = match socket {
         Some(path) => path,
         None => default_socket_path(&match directory {
@@ -416,6 +425,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
         Some("mcp") if rest.len() == 3 && rest[1] == "--caller" => Action::Mcp {
             caller: caller_id(&rest[2])?,
         },
+        Some("wechat") if rest.len() == 1 => Action::Wechat { login: false },
+        Some("wechat") if rest.len() == 2 && rest[1] == "login" => Action::Wechat { login: true },
         Some("capabilities") if rest.len() == 1 => Action::Request(Command::Capabilities {}),
         Some("read") if rest.len() == 2 || rest.len() == 3 => {
             let name = rest[1].trim();
@@ -442,11 +453,17 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
         Some("help") if rest.len() == 1 => Action::Help,
         _ => return Err("未知命令或参数错误，使用 agentos --help 查看用法".into()),
     };
-    if json && matches!(action, Action::Workbench | Action::Mcp { .. }) {
-        return Err("--json 用于单次命令或 watch；工作台和 mcp 不使用它".into());
+    if json
+        && matches!(
+            action,
+            Action::Workbench | Action::Mcp { .. } | Action::Wechat { .. }
+        )
+    {
+        return Err("--json 用于单次命令或 watch；工作台、mcp 和 wechat 不使用它".into());
     }
     Ok(Options {
         socket,
+        state_dir,
         json,
         action,
         pin_stdin,

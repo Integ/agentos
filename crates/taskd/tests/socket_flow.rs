@@ -1790,3 +1790,54 @@ async fn revoking_a_caller_ends_its_waiting_tasks_and_registering_it_again_reviv
     };
     assert!(!value.to_string().contains("外部写的"));
 }
+
+#[tokio::test]
+async fn a_due_schedule_becomes_a_task_of_its_own_and_runs_once() {
+    let dir = TempDir::new();
+    let now = agentos_core::now_ms();
+    // A one-off that came due a moment ago.
+    std::fs::write(
+        dir.0.join(agentos_services::schedule::FILE),
+        serde_json::to_vec(&json!({
+            "next_id": 1,
+            "schedules": [{"id": "sched-1", "text": "记一下 喝水", "repeat": "once",
+                           "next_ms": now - 1000, "created_ms": now - 60_000}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let schedules = Arc::new(agentos_services::schedule::ScheduleStore::open(&dir.0).unwrap());
+    let (service, tasks) = build_service(&dir, Box::new(RulePlanner), vec![]);
+    let path = dir.0.join("control.sock");
+    let server = service
+        .with_schedules(schedules.clone())
+        .bind(&path)
+        .await
+        .unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let running = tokio::spawn(server.run_until(async {
+        let _ = stopped.await;
+    }));
+    let task = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(task) = tasks.get(TaskId(1)) {
+                if task.state.is_terminal() {
+                    return task;
+                }
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the schedule ran");
+    // Guards honest provenance: the task says it came from the schedule,
+    // not from the user typing it, and it was done like any other.
+    assert_eq!(task.intent.source.as_str(), "schedule:sched-1");
+    assert_eq!(task.state, TaskState::Succeeded);
+    // At most once: the one-off is gone, and no second task follows.
+    assert!(schedules.list().is_empty());
+    sleep(Duration::from_millis(100)).await;
+    assert!(tasks.get(TaskId(2)).is_none());
+    stop.send(()).unwrap();
+    running.await.unwrap().unwrap();
+}
