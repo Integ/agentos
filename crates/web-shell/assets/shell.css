@@ -88,3 +88,4 @@
 .voice-settings-row strong{font-size:12px;font-weight:400}
 .voice-settings-row p{font-size:10px;margin:8px 0 0}
 @media(max-width:500px){.live-voice-panel{padding:10px 11px;margin-bottom:9px}.voice-session-label{font-size:9px;gap:6px;letter-spacing:0}.voice-session-actions{gap:3px}.voice-action{padding:4px 6px;min-width:25px;height:25px}.voice-action svg{width:11px;height:11px}.voice-captions{max-height:130px}.voice-caption{grid-template-columns:27px minmax(0,1fr);gap:7px}.voice-caption p{font-size:10px;max-height:58px}.voice-caption>span{font-size:7px}}
+.approval-panel p.outside-content-warning{font-size:11px;color:#e8b48f;border-left:2px solid #d3a68d;padding-left:9px}.outside-content-marker{color:#e8b48f}

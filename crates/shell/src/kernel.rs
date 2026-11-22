@@ -165,6 +165,17 @@ pub fn translate(
             }
         }
     }
+    // The task just read outside content: say so once in the conversation,
+    // so later steps and requests are read with that in mind.
+    if task.tainted && previous.is_none_or(|p| !p.tainted) {
+        events.push(json!({
+            "type": "expression", "kind": "report", "intent": id, "task": id, "from": "butler",
+            "text": format!(
+                "这个任务{}，之后的步骤可能受其中的指令影响。",
+                agentos_runtime::OUTSIDE_CONTENT_TASK_MARKER
+            ),
+        }));
+    }
     // A new approval request: the exact step, arguments and reason.
     if let Some(confirmation) = &task.confirmation {
         let asked_before = previous
@@ -184,6 +195,10 @@ pub fn translate(
                 "verify_identity": confirmation.verify_identity,
                 "pin_required": confirmation.verify_identity,
                 "args": step.args,
+                // Approving is the last check against an injection: the sheet
+                // warns when the task read outside content.
+                "tainted": task.tainted,
+                "warning": task.tainted.then_some(agentos_runtime::OUTSIDE_CONTENT_CONFIRMATION_WARNING),
             }));
         }
     }
@@ -829,6 +844,48 @@ mod tests {
         assert!(!confirm.to_string().contains("token-1"));
         // The same request is not asked again on an unrelated refresh.
         assert!(translate(Some(&waiting), &waiting, &specs()).is_empty());
+    }
+
+    #[test]
+    fn an_approval_request_in_a_task_that_read_outside_content_carries_a_warning() {
+        let (fixture, queued) = Fixture::new("按共享文档的要求处理");
+        let request = |t: &mut Task| {
+            t.state = TaskState::AwaitingConfirmation;
+            t.steps = vec![step("call-1", "disk.wipe", StepState::Pending, None)];
+            t.confirmation = Some(Confirmation {
+                step: 0,
+                expires_at_ms: now_ms() + 60_000,
+                token: "token-1".into(),
+                verify_identity: true,
+            });
+        };
+        let clean = fixture.update(request);
+        let events = translate(Some(&queued), &clean, &specs());
+        // An untainted request carries no warning: the marker means something.
+        assert_eq!(kinds(&events), vec!["plan", "step:0:confirm", "confirm"]);
+        assert_eq!(events[2]["tainted"], false);
+        assert!(events[2]["warning"].is_null());
+
+        let (fixture, queued) = Fixture::new("按共享文档的要求处理");
+        let tainted = fixture.update(|t| {
+            request(t);
+            t.tainted = true;
+        });
+        let events = translate(Some(&queued), &tainted, &specs());
+        let types: Vec<_> = events.iter().map(|e| e["type"].as_str().unwrap()).collect();
+        assert_eq!(types, vec!["plan", "step", "expression", "confirm"]);
+        // The conversation says once that outside content was read ...
+        assert!(events[2]["text"]
+            .as_str()
+            .unwrap()
+            .contains(agentos_runtime::OUTSIDE_CONTENT_TASK_MARKER));
+        // ... and the approval sheet warns right where the human decides.
+        assert_eq!(events[3]["tainted"], true);
+        assert_eq!(
+            events[3]["warning"],
+            agentos_runtime::OUTSIDE_CONTENT_CONFIRMATION_WARNING
+        );
+        assert!(translate(Some(&tainted), &tainted, &specs()).is_empty());
     }
 
     #[test]

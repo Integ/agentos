@@ -737,6 +737,8 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
     $("#c-title").textContent = `${who}想要${c.description || "执行 " + c.capability}`;
     $("#c-sub").textContent = l3 ? "这一步不可撤销（风险等级 L3），只有你亲自确认后才会执行。" : `风险等级 ${c.risk}（${RISK_TEXT[c.risk] || ""}），需要你确认。`;
     const rows = [["能力", c.capability], ["原因", c.reason || "—"]];
+    // The task read outside content: the request may come from an injection.
+    if (c.tainted && c.warning) rows.unshift(["外部内容", c.warning]);
     if (c.args && Object.keys(c.args).length) rows.push(["参数", JSON.stringify(c.args, null, 1)]);
     if (c.verify_identity) rows.push(["身份核验", c.pin_required ? "需要输入 PIN" : "未设置 PIN，任何人都能确认（运行 agentos-taskd --set-pin 设置）"]);
     $("#c-rows").replaceChildren(...rows.map(([k, v]) => { const d = el("div"); const dd = el("dd", k === "能力" ? "mono" : null, v); d.append(el("dt", null, k), dd); return d; }));
