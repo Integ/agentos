@@ -145,6 +145,17 @@ pub struct Confirmation {
     pub verify_identity: bool,
 }
 
+/// Short marker shown wherever a task with `tainted` set is shown, so the
+/// person reading it knows outside content (a page, an email, a shared
+/// document) had a say in what the task did next.
+pub const OUTSIDE_CONTENT_TASK_MARKER: &str = "读过外部内容";
+
+/// Shown next to an approval request in a tainted task. Approving is the
+/// last check against an injection; the person must know to check where the
+/// recipient, address or command came from. One wording for every client.
+pub const OUTSIDE_CONTENT_CONFIRMATION_WARNING: &str =
+    "注意：这个任务读过外部内容，要批准的操作和参数可能来自其中的指令。核对收件人、地址和内容确实是你要的，再批准。";
+
 /// What a task has consumed so far. Counts are sums over every agent that
 /// worked on the task, the judge included.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

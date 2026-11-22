@@ -273,14 +273,28 @@ impl PolicyEngine {
                 verify_identity: false,
             },
             RiskLevel::External => Decision::NeedsConfirmation {
-                reason: "该操作会把数据发出本机或产生费用".into(),
+                reason: with_taint("该操作会把数据发出本机或产生费用", ctx),
                 verify_identity: false,
             },
             RiskLevel::Irreversible => Decision::NeedsConfirmation {
-                reason: "该操作不可撤销或涉及安全".into(),
+                reason: with_taint("该操作不可撤销或涉及安全", ctx),
                 verify_identity: true,
             },
         }
+    }
+}
+
+/// Added to an L2 or L3 reason when the context is tainted. The human is the
+/// last check against an injection, so the question must say when the call
+/// (a recipient, an address, a command) may have been planned from outside
+/// content. Only the wording changes: the decision is the same either way.
+pub const TAINTED_REASON_SUFFIX: &str = "任务读过不可信的外部内容，这一步的对象或内容可能来自其中";
+
+fn with_taint(reason: &str, ctx: CallContext) -> String {
+    if ctx.tainted {
+        format!("{reason}；{TAINTED_REASON_SUFFIX}")
+    } else {
+        reason.to_string()
     }
 }
 
@@ -414,6 +428,39 @@ mod tests {
             e.check(&a, &l1, tainted),
             Decision::NeedsConfirmation { .. }
         ));
+    }
+
+    fn reason_and_identity(decision: Decision) -> (String, bool) {
+        match decision {
+            Decision::NeedsConfirmation {
+                reason,
+                verify_identity,
+            } => (reason, verify_identity),
+            other => panic!("expected a confirmation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn external_and_irreversible_reasons_say_when_the_task_read_outside_content() {
+        let a = AgentId::new("butler");
+        let l2 = spec("l2", RiskLevel::External);
+        let l3 = spec("l3", RiskLevel::Irreversible);
+        let e = engine_with(&a, &[&l2, &l3]);
+        for s in [&l2, &l3] {
+            let (clean, clean_identity) =
+                reason_and_identity(e.check(&a, s, CallContext::default()));
+            let (tainted, tainted_identity) =
+                reason_and_identity(e.check(&a, s, CallContext { tainted: true }));
+            // The human is the last check against an injection: the question
+            // must say that the call may come from outside content.
+            assert!(tainted.contains(TAINTED_REASON_SUFFIX), "{tainted}");
+            assert!(tainted.starts_with(&clean), "{tainted}");
+            // An untainted call does not cry wolf.
+            assert!(!clean.contains("外部内容"), "{clean}");
+            // Only the wording differs: same decision, same identity proof.
+            assert_eq!(clean_identity, tainted_identity);
+            assert_eq!(tainted_identity, s.risk == RiskLevel::Irreversible);
+        }
     }
 
     fn pre(capability: &str, args: Vec<(&str, Matcher)>) -> Preauthorization {

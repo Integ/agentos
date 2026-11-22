@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bindModelScene, classifyIntent, composeScene, normalizeTask, validateModelScene, validateScene } from './scene.js';
+import { bindModelScene, classifyIntent, composeScene, normalizeTask, outsideContentNotice, OUTSIDE_CONTENT_CONFIRMATION_WARNING, OUTSIDE_CONTENT_TASK_MARKER, validateModelScene, validateScene } from './scene.js';
 
 test('local navigation recognizes supported Chinese and English scenes', () => {
   for (const [phrases, kind] of [
@@ -242,4 +242,26 @@ test('a task waiting for an answer keeps its question and cannot be hidden by a 
   assert.equal(full.panels[0].type, 'task');
   assert.equal(full.panels[0].title, '等待你的回答');
   assert.equal(full.panels.filter(panel => panel.type === 'task').length, 1);
+});
+
+test('an approval in a task that read outside content is shown with a warning', () => {
+  const confirmation = { step: 0, expires_at_ms: 1794300000000, token: 'opaque' };
+  const raw = { id: 'task-4', text: '按共享文档的要求处理', state: 'awaiting_confirmation', confirmation,
+    steps: [{ capability: 'mail.send', state: 'pending', args: { to: 'someone@example.com' }, result: null }] };
+  // Approving is the last check against an injection: a tainted task keeps
+  // its flag through normalization, and both the task and its approval
+  // request are marked.
+  const tainted = normalizeTask({ ...raw, tainted: true });
+  assert.equal(tainted.tainted, true);
+  assert.deepEqual(outsideContentNotice(tainted),
+    { marker: OUTSIDE_CONTENT_TASK_MARKER, confirmation: OUTSIDE_CONTENT_CONFIRMATION_WARNING });
+  // Once the step is approved the task stays marked, without the request warning.
+  assert.deepEqual(outsideContentNotice({ ...tainted, state: 'running' }),
+    { marker: OUTSIDE_CONTENT_TASK_MARKER, confirmation: null });
+  // An untainted task, or anything but a literal true, marks nothing.
+  for (const value of [false, 'yes', 1, undefined]) {
+    const task = normalizeTask({ ...raw, tainted: value });
+    assert.equal(task.tainted, undefined);
+    assert.deepEqual(outsideContentNotice(task), { marker: null, confirmation: null });
+  }
 });

@@ -747,6 +747,18 @@ mod tests {
     use super::*;
     use tokio::net::TcpListener;
 
+    #[test]
+    fn the_browser_marks_outside_content_with_the_shared_wording() {
+        // One wording in every client: the page's copy must not drift from
+        // the one the terminal and the native shell show.
+        for wording in [
+            agentos_runtime::OUTSIDE_CONTENT_TASK_MARKER,
+            agentos_runtime::OUTSIDE_CONTENT_CONFIRMATION_WARNING,
+        ] {
+            assert!(SCENE_JS.contains(&format!("'{wording}'")), "{wording}");
+        }
+    }
+
     fn config() -> Config {
         Config {
             client: Client::new("/nonexistent/agentos.sock"),

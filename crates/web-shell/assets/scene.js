@@ -91,6 +91,26 @@ export function normalizeTask(value) {
     steps,
     confirmation,
     ...(question ? { question } : {}),
+    ...(value.tainted === true ? { tainted: true } : {}),
+  };
+}
+
+// Same wording as agentos_runtime::OUTSIDE_CONTENT_TASK_MARKER and
+// OUTSIDE_CONTENT_CONFIRMATION_WARNING, so every client says it alike.
+export const OUTSIDE_CONTENT_TASK_MARKER = '读过外部内容';
+export const OUTSIDE_CONTENT_CONFIRMATION_WARNING = '注意：这个任务读过外部内容，要批准的操作和参数可能来自其中的指令。核对收件人、地址和内容确实是你要的，再批准。';
+
+/**
+ * What the task view says about outside content. Approving is the last check
+ * against an injection, so a tainted task is marked, and so is its approval
+ * request. Only a literal `true` counts; anything else marks nothing, so the
+ * marker keeps its meaning.
+ */
+export function outsideContentNotice(task) {
+  const tainted = isObject(task) && task.tainted === true;
+  return {
+    marker: tainted ? OUTSIDE_CONTENT_TASK_MARKER : null,
+    confirmation: tainted && task.state === 'awaiting_confirmation' ? OUTSIDE_CONTENT_CONFIRMATION_WARNING : null,
   };
 }
 

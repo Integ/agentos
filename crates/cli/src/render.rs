@@ -99,8 +99,15 @@ pub fn confirmation_visible(task: &Task) -> bool {
 }
 
 pub fn task_detail(task: &Task, include_token: bool) -> String {
+    // A task that read outside content says so in its heading, where it is
+    // seen before any step, result or approval request.
+    let marker = if task.tainted {
+        format!(" · {}", agentos_runtime::OUTSIDE_CONTENT_TASK_MARKER)
+    } else {
+        String::new()
+    };
     let mut lines = vec![
-        format!("{} · {}", task.id, state_label(task.state)),
+        format!("{} · {}{marker}", task.id, state_label(task.state)),
         format!("  意图：{}", one_line(&task.intent.text, 300)),
     ];
     if let Some(c) = &task.confirmation {
@@ -110,6 +117,12 @@ pub fn task_detail(task: &Task, include_token: bool) -> String {
                 c.step + 1,
                 one_line(step.capability.as_str(), 200)
             ));
+            if task.tainted {
+                lines.push(format!(
+                    "  {}",
+                    agentos_runtime::OUTSIDE_CONTENT_CONFIRMATION_WARNING
+                ));
+            }
             if include_token || confirmation_visible(task) {
                 lines.push(indent(&safe_text(&step.args.to_string()), "  完整参数："));
             } else {
@@ -680,6 +693,57 @@ mod tests {
         assert_eq!(WaitOutcome::Settled(done.clone()).exit_code(), 0);
         assert_eq!(WaitOutcome::TimedOut(done).exit_code(), 5);
         assert!(wait_text(&WaitOutcome::TimedOut(task)).contains("仍在后台继续"));
+    }
+
+    fn awaiting_approval(tainted: bool) -> Task {
+        let store = TaskStore::memory();
+        let task = store
+            .create(Intent {
+                id: IntentId(0),
+                source: DeviceId::new("test"),
+                speaker: None,
+                text: "按共享文档的要求处理".into(),
+                urgency: Urgency::Normal,
+                at_ms: now_ms(),
+            })
+            .unwrap();
+        store
+            .update(task.id, |t| {
+                t.state = TaskState::AwaitingConfirmation;
+                t.tainted = tainted;
+                t.steps = vec![agentos_runtime::TaskStep::pending(
+                    agentos_core::CapabilityName::new("mail.send"),
+                    serde_json::json!({"to": "someone@example.com"}),
+                )];
+                t.message = Some("该操作会把数据发出本机或产生费用".into());
+                t.confirmation = Some(agentos_runtime::Confirmation {
+                    step: 0,
+                    expires_at_ms: now_ms() + 60_000,
+                    token: "token".into(),
+                    verify_identity: false,
+                });
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn an_approval_in_a_task_that_read_outside_content_is_shown_with_a_warning() {
+        let tainted = task_detail(&awaiting_approval(true), false);
+        let heading = tainted.lines().next().unwrap();
+        // The person approving is the last check against an injection: the
+        // heading and the request both say outside content was read.
+        assert!(
+            heading.contains(agentos_runtime::OUTSIDE_CONTENT_TASK_MARKER),
+            "{tainted}"
+        );
+        assert!(
+            tainted.contains(agentos_runtime::OUTSIDE_CONTENT_CONFIRMATION_WARNING),
+            "{tainted}"
+        );
+        // An untainted task carries no marker: the marker means something.
+        let clean = task_detail(&awaiting_approval(false), false);
+        assert!(!clean.contains(agentos_runtime::OUTSIDE_CONTENT_TASK_MARKER));
+        assert!(!clean.contains(agentos_runtime::OUTSIDE_CONTENT_CONFIRMATION_WARNING));
     }
 
     #[test]
