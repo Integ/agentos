@@ -4,6 +4,7 @@ description = "AgentOS daemon: durable tasks, policy-gated execution and human c
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

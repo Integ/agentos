@@ -28,7 +28,7 @@
 
 信封还可以带一个可选的 `caller`，表示以某个已注册的外部调用方的身份发出请求；见“外部调用方”。
 
-`version` 是协议版本，与程序的语义版本号分开。v0.3 和 v0.4 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段，`question` 的 `tainted`；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法；请求信封的 `caller`、`preauthorize` 的 `caller`，以及 `register_caller`、`callers`、`revoke_caller` 方法；`activity`、`voice`、`listen`、`speech` 方法，`activity` 的 `improvement` 条目，`watch` 的 `voice`，`submit` 和 `reply` 的 `spoken`，以及语音事件 `voice_state`、`voice_level`、`transcript`、`voice_notice`（只发给声明了 `voice` 的订阅）；`reject` 方法和它的回复 `rejection_queued`。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、`reject`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；客户端遇到旧服务拒绝 `reject` 时，只能退回 `cancel`（取消整个任务），不能改发 `approve`；不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
+`version` 是协议版本，与程序的语义版本号分开。v0.3 和 v0.4 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段，`question` 的 `tainted`；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法；请求信封的 `caller`、`preauthorize` 的 `caller`，以及 `register_caller`、`callers`、`revoke_caller` 方法；`activity`、`voice`、`listen`、`speech` 方法，`activity` 的 `improvement` 条目，`watch` 的 `voice`，`submit` 和 `reply` 的 `spoken`，以及语音事件 `voice_state`、`voice_level`、`transcript`、`voice_notice`（只发给声明了 `voice` 的订阅）；`reject` 方法和它的回复 `rejection_queued`。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、`reject`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；客户端遇到旧服务拒绝 `reject` 时，只能退回 `cancel`（取消整个任务），不能改发 `approve`。定时任务的任务来源是 `schedule:<id>`，由用户批准和回答。不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
 
 `id` 是客户端选择的无符号整数，仅用于关联响应，**不是幂等键**。重复发送同一个 `submit` 请求编号仍可能创建第二个任务。收到完整响应前连接断开时，结果可能已经落盘；客户端必须查询任务，不能自动重发变更请求。
 
@@ -320,7 +320,7 @@ PIN 由服务端核对，不保存、不写入任务或审计；核对通过只�
 
 ## 最近活动
 
-`activity` 给桌面的“最近活动”面板用：每一项有 `seq`、`at_ms`、`kind` 和 `ok`，按 `kind` 另带字段——`invoked`（能力调用）和 `confirmation`（人工确认）带 `capability`，`device`（麦克风）带 `device` 和 `detail`，`crash` 带 `summary`，`improvement`（系统自己采用或撤回了一条经验、一个技能）带 `id` 和 `summary`，`ok` 为 `false` 表示撤回。服务崩溃时把报告写进状态目录的 `crash.txt` 并退出，用户服务把它重新拉起；新的一次运行把报告的第一行记为审计事件 `daemon_crashed`，这里就能看到。只读日志末尾的一段，更早的活动不会出现。
+`activity` 给桌面的“最近活动”面板用：每一项有 `seq`、`at_ms`、`kind` 和 `ok`，按 `kind` 另带字段——`invoked`（能力调用，包括超过时限、后来在后台结束的调用）和 `confirmation`（人工确认）带 `capability`，`device`（麦克风）带 `device` 和 `detail`，`crash` 带 `summary`，`improvement`（系统自己采用或撤回了一条经验、一个技能）带 `id` 和 `summary`，`ok` 为 `false` 表示撤回。服务崩溃时把报告写进状态目录的 `crash.txt` 并退出，用户服务把它重新拉起；新的一次运行把报告的第一行记为审计事件 `daemon_crashed`，这里就能看到。只读日志末尾的一段，更早的活动不会出现。
 
 ## 资源界限与背压
 
@@ -332,7 +332,7 @@ PIN 由服务端核对，不保存、不写入任务或审计；核对通过只�
 | 直接读取 | 能力名 1–128 字节；单次调用最多等待 10 秒，超时返回 `capability_failed` |
 | 并发连接 | 最多 64 条，含 watch；超额新连接直接关闭 |
 | 执行队列 | 最多 64 个等待项；满时拒绝，不先创建任务 |
-| 每任务预算 | 管家 8 轮规划；token 默认 2,000,000；执行时长默认 30 分钟。超出即 `failed`，已完成的步骤保留 |
+| 每任务预算 | 管家 8 轮规划；token 默认 2,000,000；执行时长默认 30 分钟；单次调用默认 15 分钟（不能中止的调用转到后台运行完）。超出即 `failed`，已完成的步骤保留 |
 | 同时执行 | 最多 4 个任务（含正在执行的批准）；其余在执行队列里等待。等待批准的任务不占名额 |
 | 变更通知 | 每个 store 使用 256 条有界广播缓冲，落后触发重新同步 |
 | 普通请求读入 | 每帧等待最多 60 秒；超时关闭连接 |

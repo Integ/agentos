@@ -11,7 +11,8 @@
 //! - shared memory: the [`blackboard`];
 //! - capability providers: [`mcp`] servers, sandboxed [`plugin`]s with their
 //!   [`plugin_store`] and the self-evolution capabilities in [`evolve`], and
-//!   the smart home through [`homeassistant`].
+//!   the smart home through [`homeassistant`]; the [`sandbox`] both kinds of
+//!   outside code run in.
 //!
 //! Nothing here decides whether a call may run. Capabilities never check
 //! permissions themselves; the daemon's butler puts every call through the
@@ -22,6 +23,7 @@ pub mod blackboard;
 pub mod devices;
 pub mod evolve;
 pub mod expression;
+pub mod files;
 pub mod homeassistant;
 pub mod identity;
 pub mod judge;
@@ -30,3 +32,6 @@ pub mod perception;
 pub mod plugin;
 pub mod plugin_store;
 pub mod registry;
+pub mod sandbox;
+pub mod schedule;
+pub mod web;

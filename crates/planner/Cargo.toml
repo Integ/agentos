@@ -4,6 +4,7 @@ description = "AgentOS planners: the planning contract, the offline rule planner
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 
 [features]

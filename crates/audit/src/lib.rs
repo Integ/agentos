@@ -127,14 +127,28 @@ pub enum AuditEvent {
         step: String,
         text: String,
     },
-    /// A call that had started was abandoned because its task was cancelled.
-    /// It closes the matching `CapabilityStarted` without claiming a result:
-    /// the call may or may not have taken effect.
+    /// A call that had started was abandoned: its task was cancelled or ran
+    /// out of time, or the call outlived its own time limit. It closes the
+    /// matching `CapabilityStarted` without claiming a result: the call may
+    /// or may not have taken effect. A call that was not safe to abandon is
+    /// only let go, not stopped; what it finally did is recorded as
+    /// `CapabilityFinishedLate`.
     CapabilityInterrupted {
         intent: IntentId,
         agent: AgentId,
         capability: CapabilityName,
         args: Value,
+    },
+    /// A call let go after its time limit (see `CapabilityInterrupted`) ran to
+    /// its end in the background. Its task had already stopped; this is what
+    /// the call did after all.
+    CapabilityFinishedLate {
+        intent: IntentId,
+        agent: AgentId,
+        capability: CapabilityName,
+        args: Value,
+        ok: bool,
+        result: Value,
     },
     /// An agent handed part of an intent to another agent.
     Delegated {
@@ -663,7 +677,10 @@ pub fn recent_activity(path: impl AsRef<Path>, n: usize) -> Vec<serde_json::Valu
         .filter_map(|line| serde_json::from_slice::<AuditEntry>(line).ok());
     let mut items: Vec<serde_json::Value> = entries
         .filter_map(|e| match e.event {
-            AuditEvent::CapabilityInvoked { capability, ok, .. } => Some(json!({
+            // A call let go after its time limit still did something when it
+            // finally ended; that belongs in the activity like any other call.
+            AuditEvent::CapabilityInvoked { capability, ok, .. }
+            | AuditEvent::CapabilityFinishedLate { capability, ok, .. } => Some(json!({
                 "seq": e.seq,
                 "at_ms": e.at_ms,
                 "kind": "invoked",

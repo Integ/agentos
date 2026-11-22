@@ -42,6 +42,10 @@ pub struct Request {
 /// Where a caller's tasks say they come from: `caller:<id>`.
 pub const CALLER_SOURCE_PREFIX: &str = "caller:";
 
+/// Where a scheduled task says it comes from: `schedule:<id>`. Only the
+/// service sets a source, so no client can claim to be a schedule.
+pub const SCHEDULE_SOURCE_PREFIX: &str = "schedule:";
+
 /// An outside program the user lets submit intents, and what it may use.
 /// A caller holds nothing it was not given here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
