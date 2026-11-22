@@ -375,6 +375,14 @@ struct Approval {
     pin: Option<String>,
 }
 
+/// A refusal names the prompt it refuses and nothing else: no PIN.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Rejection {
+    step: usize,
+    confirmation: String,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Answer {
@@ -502,6 +510,21 @@ fn command(request: &Request) -> Result<Command, HttpError> {
                         step: approval.step,
                         confirmation: approval.confirmation,
                         pin: approval.pin,
+                    })
+                }
+                ("POST", [_, "reject"]) => {
+                    let rejection: Rejection = serde_json::from_slice(&request.body)
+                        .map_err(|_| HttpError::bad("需要 step 与 confirmation"))?;
+                    if rejection.step == 0
+                        || rejection.confirmation.is_empty()
+                        || rejection.confirmation.len() > 1024
+                    {
+                        return Err(HttpError::bad("拒绝的步骤从 1 开始，并需要有效的确认令牌"));
+                    }
+                    Ok(Command::Reject {
+                        id,
+                        step: rejection.step,
+                        confirmation: rejection.confirmation,
                     })
                 }
                 _ => Err(HttpError::new(404, "not_found", "没有此接口")),
@@ -852,6 +875,21 @@ mod tests {
             json!({"step":0,"confirmation":"opaque"})
         ))
         .is_err());
+        assert!(
+            matches!(command(&request("POST", "/api/tasks/task-9/reject", json!({"step":2,"confirmation":"opaque"}))).unwrap(),
+            Command::Reject { id: TaskId(9), step: 2, confirmation } if confirmation == "opaque")
+        );
+        for body in [
+            json!({"step":0,"confirmation":"opaque"}),
+            json!({"step":2,"confirmation":""}),
+            json!({"step":2}),
+            json!({"step":2,"confirmation":"opaque","pin":"1234"}),
+        ] {
+            assert!(
+                command(&request("POST", "/api/tasks/9/reject", body.clone())).is_err(),
+                "{body}"
+            );
+        }
         assert!(command(&request(
             "POST",
             "/api/intent",

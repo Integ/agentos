@@ -66,6 +66,7 @@ cargo run -p agentos-cli -- --state-dir /tmp/agentos-demo workbench
 | `/task task-1` | 选中任务，显示意图、计划参数、步骤结果与确认请求 |
 | `/cancel task-1` | 停止后续步骤，不再等模型；已经开始的步骤可能仍完成 |
 | `/approve task-1 1` | 批准当前已展示详情中的具体确认请求 |
+| `/reject task-1 1` | 只拒绝这一步：它不执行，任务换别的办法继续或说明没做成；不需要 PIN |
 | `/reply task-1 1 周三` | 回答任务在第 1 步提出的问题；任务在原地继续 |
 | `/new` | 另起一段对话；不输入它时，工作台里的每句话都接着同一段对话说 |
 | `/capabilities`、`/help` | 查看能力与帮助 |
@@ -142,6 +143,12 @@ agentos approve task-3 1 --confirmation <令牌>
 ```
 
 批准绑定任务、步骤、随机令牌、同一系统用户和五分钟有效期；入队及执行时都校验，随后仍重新检查能力授权。普通 `y` 只会产生新任务。
+
+不想让这一步执行、又不想丢掉整个任务时，用同一个令牌只拒绝这一步（绑定方式相同，不需要 PIN）：
+
+```sh
+agentos reject task-3 1 --confirmation <令牌>
+```
 
 不可逆（L3）的步骤还需要 PIN 来证明是谁在批准。先用 `agentos-taskd --state-dir <目录> --set-pin` 设置；没有设置 PIN 时，L3 步骤直接拒绝执行。批准时加 `--pin-stdin`，PIN 从标准输入读取，不会出现在命令行里：
 

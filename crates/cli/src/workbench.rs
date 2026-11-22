@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use agentos_core::now_ms;
 use agentos_ipc::{Command, Event, Reply, TaskSummary};
-use agentos_runtime::{Task, TaskId, TaskState};
+use agentos_runtime::{Confirmation, Task, TaskId, TaskState};
 use tokio::sync::mpsc;
 
 use crate::args::{parse_workbench, WorkbenchCommand, WORKBENCH_HELP};
@@ -15,12 +15,14 @@ use crate::render;
 
 const PAGE_SIZE: usize = 12;
 
-pub fn approval_command(
+/// The confirmation of `id` at `step` as the workbench displayed it, if it is
+/// still the one waiting and has not expired.
+fn displayed_confirmation(
     displayed: Option<&Task>,
     id: TaskId,
     step: usize,
     at_ms: u64,
-) -> Result<Command, String> {
+) -> Result<(&Task, &Confirmation), String> {
     let task = displayed
         .filter(|task| task.id == id)
         .ok_or("请先用 /task 选择并查看这个任务的具体确认步骤")?;
@@ -34,6 +36,16 @@ pub fn approval_command(
                 && !c.token.is_empty()
         })
         .ok_or("当前展示的确认请求无效或已过期；请刷新并核对任务与步骤")?;
+    Ok((task, confirmation))
+}
+
+pub fn approval_command(
+    displayed: Option<&Task>,
+    id: TaskId,
+    step: usize,
+    at_ms: u64,
+) -> Result<Command, String> {
+    let (task, confirmation) = displayed_confirmation(displayed, id, step, at_ms)?;
     if !render::confirmation_visible(task) {
         return Err("待批准参数过长，工作台未完整展示；请用 agentos --json task 查看完整参数，再通过独立 approve 命令显式提供令牌".into());
     }
@@ -47,6 +59,22 @@ pub fn approval_command(
         step,
         confirmation: confirmation.token.clone(),
         pin: None,
+    })
+}
+
+/// Refuse the displayed step. Unlike approving, this needs neither the full
+/// arguments on screen nor a PIN: refusing runs nothing.
+pub fn rejection_command(
+    displayed: Option<&Task>,
+    id: TaskId,
+    step: usize,
+    at_ms: u64,
+) -> Result<Command, String> {
+    let (_, confirmation) = displayed_confirmation(displayed, id, step, at_ms)?;
+    Ok(Command::Reject {
+        id,
+        step,
+        confirmation: confirmation.token.clone(),
     })
 }
 
@@ -310,6 +338,21 @@ async fn perform(
             }
             println!("\n{}", render::reply_text(&reply));
         }
+        WorkbenchCommand::Reject { id, step } => {
+            if !view.connected {
+                return Err("后台连接中断，请等视图恢复后重新查看具体确认请求".into());
+            }
+            let command = rejection_command(view.selected.as_ref(), id, step, now_ms())?;
+            let reply = client
+                .request(command)
+                .await
+                .map_err(|e| request_error(view, e))?;
+            // The prompt is answered; it cannot be answered again from here.
+            if let Some(task) = &mut view.selected {
+                task.confirmation = None;
+            }
+            println!("\n{}", render::reply_text(&reply));
+        }
         WorkbenchCommand::Reply { id, step, text } => {
             // The service checks the reply against the question the task is
             // waiting on now; a stale one is refused there, not guessed here.
@@ -398,7 +441,7 @@ pub async fn run(client: Client) -> io::Result<()> {
 mod tests {
     use super::*;
     use agentos_core::{CapabilityName, DeviceId, Intent, IntentId, Urgency};
-    use agentos_runtime::{Confirmation, TaskStep, TaskStore};
+    use agentos_runtime::{TaskStep, TaskStore};
     use serde_json::json;
 
     fn pending(args: serde_json::Value) -> Task {
@@ -438,6 +481,23 @@ mod tests {
             approval_command(Some(&task), task.id, 1, now_ms()).unwrap()
         else {
             panic!("not approval")
+        };
+        assert_eq!(confirmation, "shown-token");
+    }
+
+    #[test]
+    fn a_rejection_uses_only_the_displayed_unexpired_confirmation_and_needs_no_pin() {
+        let mut task = pending(json!({"to":"alice","body":"hi"}));
+        assert!(rejection_command(None, task.id, 1, now_ms()).is_err());
+        assert!(rejection_command(Some(&task), TaskId(2), 1, now_ms()).is_err());
+        assert!(rejection_command(Some(&task), task.id, 2, now_ms()).is_err());
+        assert!(rejection_command(Some(&task), task.id, 1, u64::MAX).is_err());
+        // Refusing an irreversible step runs nothing, so no PIN is asked for.
+        task.confirmation.as_mut().unwrap().verify_identity = true;
+        let Command::Reject { confirmation, .. } =
+            rejection_command(Some(&task), task.id, 1, now_ms()).unwrap()
+        else {
+            panic!("not a rejection")
         };
         assert_eq!(confirmation, "shown-token");
     }

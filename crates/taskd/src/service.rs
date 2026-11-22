@@ -90,6 +90,12 @@ enum Work {
         responder: Intent,
         token: String,
     },
+    Reject {
+        id: TaskId,
+        step: usize,
+        responder: Intent,
+        token: String,
+    },
     Reply {
         id: TaskId,
         step: usize,
@@ -388,6 +394,12 @@ async fn run_workers(
                             .approve_with_token(id, step, &responder, &token)
                             .await
                     }
+                    Work::Reject {
+                        id,
+                        step,
+                        responder,
+                        token,
+                    } => butler.reject_with_token(id, step, &responder, &token).await,
                     Work::Reply {
                         id,
                         step,
@@ -409,7 +421,7 @@ async fn run_workers(
                 };
                 let thread = match &admitted.work {
                     Work::Run(id) => butler.tasks().thread_of(*id),
-                    Work::Approve { .. } | Work::Reply { .. } => None,
+                    Work::Approve { .. } | Work::Reject { .. } | Work::Reply { .. } => None,
                 };
                 match thread {
                     Some(thread) => match threads.get_mut(&thread) {
@@ -620,6 +632,7 @@ impl Controller {
             && matches!(
                 command,
                 Command::Approve { .. }
+                    | Command::Reject { .. }
                     | Command::Preauthorize { .. }
                     | Command::Preauthorizations {}
                     | Command::RevokePreauthorization { .. }
@@ -780,6 +793,35 @@ impl Controller {
                     place,
                 )?;
                 Ok(Reply::ApprovalQueued { id, step })
+            }
+            Command::Reject {
+                id,
+                step,
+                confirmation,
+            } => {
+                let index = step
+                    .checked_sub(1)
+                    .ok_or_else(|| protocol_error("invalid_argument", "步骤编号从 1 开始"))?;
+                let task = self.task(id)?;
+                let responder = responder(uid, format!("reject {id} {step}"));
+                // Checked here and again by the butler once it holds the
+                // task: a refusal that matches nothing changes nothing.
+                if !approval_matches_with_token(&task, index, &responder, now_ms(), &confirmation) {
+                    return Err(protocol_error("invalid_confirmation", "拒绝没有对上：必须是这个任务当前等待批准的步骤、同一系统用户、正确的确认令牌，并在五分钟有效期内。请重新查看任务详情"));
+                }
+                // No PIN, even for an irreversible step: refusing runs
+                // nothing, and this client could cancel the task without one.
+                let place = self.admit("拒绝队列已满或不可用；请稍后自己再拒绝一次，或取消任务")?;
+                self.enqueue(
+                    Work::Reject {
+                        id,
+                        step: index,
+                        responder,
+                        token: confirmation,
+                    },
+                    place,
+                )?;
+                Ok(Reply::RejectionQueued { id, step })
             }
             Command::Reply {
                 id,

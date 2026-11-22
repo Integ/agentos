@@ -12,9 +12,9 @@ use agentos_runtime::{TaskId, TaskState};
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(300);
 const MAX_WAIT_SECONDS: u64 = 86_400;
 
-pub const HELP: &str = "AgentOS · 独立任务工作台\n\n用法：agentos [--socket 路径 | --state-dir 路径] [--json] <命令>\n\n  workbench                         实时终端工作台（默认）\n  submit [--thread task-N] [--wait] [--timeout 秒] <意图>\n                                    提交任务，客户端退出后仍继续；--wait 等到任务结束再返回；\n                                    --thread 接着某个线程说（用它第一个任务的编号）\n  tasks [--before task-N] [--limit N] [--state 状态] [--thread task-N]\n  task task-N                       查看计划、结果与批准令牌\n  cancel task-N                     取消任务的后续步骤\n  reply task-N 步骤 <回答>          回答任务在这一步提出的问题\n  approve task-N 步骤 --confirmation 令牌 [--pin-stdin]\n                                    批准一步；不可逆的步骤加 --pin-stdin，从标准输入读取 PIN\n  preauthorize <能力> [规则…] [--any-other-args] [--expires 时长] [--caller id] [--pin-stdin]\n                                    预授权：符合规则的调用不再逐次确认。规则：\n                                    --equals 字段=值　--one-of 字段=值1,值2　--prefix 字段=文本\n                                    --under 字段=目录　--any 字段；时长如 30m、2h、7d\n  preauthorizations                 查看仍然有效的预授权\n  revoke pre-N                      撤销一条预授权，立即生效\n  callers                           查看已注册的外部调用方\n  caller add <id> --name 名字 [--allow 能力或前缀]… [--max-risk L0|L1|L2] [--pin-stdin]\n                                    注册外部调用方，或整体替换它的清单；默认什么都不给\n  caller remove <id>                撤销调用方，它的预授权一并撤销\n  mcp --caller <id>                 以这个调用方的身份提供 MCP 服务（标准输入输出）\n  capabilities                      查看能力与风险\n  read <能力> [JSON 参数]           直接读取只读（L0）能力，不创建任务\n  watch [--after revision]           持续接收变更/重新同步通知\n  --help                            查看帮助\n  --version                         查看版本\n\n--json 应放在命令前，输出结构化 JSON。批准步骤从 1 开始。\n工作台 /quit 只关闭客户端，不停止后台服务。\n\n退出码：0 成功；1 连接、协议或后台错误；2 用法错误。\nsubmit --wait 另有：3 任务结束但未成功（未能处理、失败、已取消或已中断）；\n4 任务在等待批准；5 等待超时（任务仍在后台继续）；6 任务在等待回答。";
+pub const HELP: &str = "AgentOS · 独立任务工作台\n\n用法：agentos [--socket 路径 | --state-dir 路径] [--json] <命令>\n\n  workbench                         实时终端工作台（默认）\n  submit [--thread task-N] [--wait] [--timeout 秒] <意图>\n                                    提交任务，客户端退出后仍继续；--wait 等到任务结束再返回；\n                                    --thread 接着某个线程说（用它第一个任务的编号）\n  tasks [--before task-N] [--limit N] [--state 状态] [--thread task-N]\n  task task-N                       查看计划、结果与批准令牌\n  cancel task-N                     取消任务的后续步骤\n  reply task-N 步骤 <回答>          回答任务在这一步提出的问题\n  approve task-N 步骤 --confirmation 令牌 [--pin-stdin]\n                                    批准一步；不可逆的步骤加 --pin-stdin，从标准输入读取 PIN\n  reject task-N 步骤 --confirmation 令牌\n                                    只拒绝这一步：它不执行，任务换别的办法继续；不需要 PIN\n  preauthorize <能力> [规则…] [--any-other-args] [--expires 时长] [--caller id] [--pin-stdin]\n                                    预授权：符合规则的调用不再逐次确认。规则：\n                                    --equals 字段=值　--one-of 字段=值1,值2　--prefix 字段=文本\n                                    --under 字段=目录　--any 字段；时长如 30m、2h、7d\n  preauthorizations                 查看仍然有效的预授权\n  revoke pre-N                      撤销一条预授权，立即生效\n  callers                           查看已注册的外部调用方\n  caller add <id> --name 名字 [--allow 能力或前缀]… [--max-risk L0|L1|L2] [--pin-stdin]\n                                    注册外部调用方，或整体替换它的清单；默认什么都不给\n  caller remove <id>                撤销调用方，它的预授权一并撤销\n  mcp --caller <id>                 以这个调用方的身份提供 MCP 服务（标准输入输出）\n  capabilities                      查看能力与风险\n  read <能力> [JSON 参数]           直接读取只读（L0）能力，不创建任务\n  watch [--after revision]           持续接收变更/重新同步通知\n  --help                            查看帮助\n  --version                         查看版本\n\n--json 应放在命令前，输出结构化 JSON。批准步骤从 1 开始。\n工作台 /quit 只关闭客户端，不停止后台服务。\n\n退出码：0 成功；1 连接、协议或后台错误；2 用法错误。\nsubmit --wait 另有：3 任务结束但未成功（未能处理、失败、已取消或已中断）；\n4 任务在等待批准；5 等待超时（任务仍在后台继续）；6 任务在等待回答。";
 
-pub const WORKBENCH_HELP: &str = "普通输入：提交意图，接着本次对话说；任务在后台继续\n/new：开始一段新的对话\n/tasks 或 /refresh：刷新当前页　/next：更早任务　/prev：返回上一页\n/latest：最近任务　/task task-N：选中并展示完整计划与结果\n/cancel task-N：取消后续步骤　/approve task-N 步骤：批准当前已展示的确认请求\n/reply task-N 步骤 回答：回答任务提出的问题\n/capabilities：查看能力　/help：帮助　/quit：退出工作台";
+pub const WORKBENCH_HELP: &str = "普通输入：提交意图，接着本次对话说；任务在后台继续\n/new：开始一段新的对话\n/tasks 或 /refresh：刷新当前页　/next：更早任务　/prev：返回上一页\n/latest：最近任务　/task task-N：选中并展示完整计划与结果\n/cancel task-N：取消后续步骤　/approve task-N 步骤：批准当前已展示的确认请求\n/reject task-N 步骤：只拒绝这一步，任务继续\n/reply task-N 步骤 回答：回答任务提出的问题\n/capabilities：查看能力　/help：帮助　/quit：退出工作台";
 
 #[derive(Debug)]
 pub struct Options {
@@ -298,6 +298,21 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
                 pin: None,
             })
         }
+        Some("reject") if rest.len() == 5 && rest[3] == "--confirmation" => {
+            let step = rest[2]
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or("步骤必须是从 1 开始的正整数")?;
+            if rest[4].is_empty() {
+                return Err("确认令牌不能为空".into());
+            }
+            Action::Request(Command::Reject {
+                id: task_id(&rest[1])?,
+                step,
+                confirmation: rest[4].clone(),
+            })
+        }
         Some("preauthorize") if rest.len() > 1 => {
             let capability = rest[1].trim();
             if capability.is_empty()
@@ -466,6 +481,10 @@ pub enum WorkbenchCommand {
         id: TaskId,
         step: usize,
     },
+    Reject {
+        id: TaskId,
+        step: usize,
+    },
     Reply {
         id: TaskId,
         step: usize,
@@ -495,6 +514,14 @@ pub fn parse_workbench(text: &str) -> Result<WorkbenchCommand, String> {
         ["/task", id] => WorkbenchCommand::Task(task_id(id)?),
         ["/cancel", id] => WorkbenchCommand::Cancel(task_id(id)?),
         ["/approve", id, step] => WorkbenchCommand::Approve {
+            id: task_id(id)?,
+            step: step
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or("步骤必须从 1 开始")?,
+        },
+        ["/reject", id, step] => WorkbenchCommand::Reject {
             id: task_id(id)?,
             step: step
                 .parse::<usize>()
@@ -581,6 +608,43 @@ mod tests {
     }
 
     #[test]
+    fn a_rejection_needs_its_token_and_never_takes_a_pin() {
+        for args in [
+            vec!["reject", "task-1", "1"],
+            vec!["reject", "task-1", "0", "--confirmation", "nonce"],
+            vec!["reject", "task-1", "1", "--confirmation", ""],
+            vec![
+                "reject",
+                "task-1",
+                "1",
+                "--confirmation",
+                "nonce",
+                "--pin-stdin",
+            ],
+        ] {
+            assert!(argv(&args).is_err(), "{args:?}");
+        }
+        let options = argv(&["reject", "task-3", "2", "--confirmation", "nonce"]).unwrap();
+        assert!(!options.pin_stdin);
+        let Action::Request(Command::Reject {
+            id,
+            step,
+            confirmation,
+        }) = options.action
+        else {
+            panic!("not a rejection")
+        };
+        assert_eq!((id, step, confirmation), (TaskId(3), 2, "nonce".into()));
+        assert_eq!(
+            parse_workbench("/reject task-3 2"),
+            Ok(WorkbenchCommand::Reject {
+                id: TaskId(3),
+                step: 2
+            })
+        );
+    }
+
+    #[test]
     fn waiting_options_are_only_read_before_the_intent() {
         let Action::SubmitAndWait { text, timeout, .. } =
             argv(&["submit", "--wait", "记一下", "买牛奶"])
@@ -661,6 +725,9 @@ mod tests {
         for input in [
             "/approve task-1",
             "/approve task-1 0",
+            "/reject task-1",
+            "/reject task-1 0",
+            "/reject task-1 1 extra",
             "/cancel",
             "/tasks extra",
             "/unknown",

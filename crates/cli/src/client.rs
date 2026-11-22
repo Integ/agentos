@@ -69,6 +69,7 @@ fn mutating(command: &Command) -> bool {
         Command::Submit { .. }
             | Command::Cancel { .. }
             | Command::Approve { .. }
+            | Command::Reject { .. }
             | Command::Reply { .. }
             | Command::Preauthorize { .. }
             | Command::RevokePreauthorization { .. }
@@ -135,6 +136,7 @@ fn reply_matches(command: &Command, reply: &Reply) -> bool {
                 Reply::Task { .. }
             )
             | (Command::Approve { .. }, Reply::ApprovalQueued { .. })
+            | (Command::Reject { .. }, Reply::RejectionQueued { .. })
             | (Command::Reply { .. }, Reply::ReplyQueued { .. })
             | (Command::Preauthorize { .. }, Reply::Preauthorized { .. })
             | (
@@ -239,6 +241,13 @@ impl Client {
             (
                 Command::Approve { id, step, .. },
                 Reply::ApprovalQueued {
+                    id: actual,
+                    step: actual_step,
+                },
+            ) => id == actual && step == actual_step,
+            (
+                Command::Reject { id, step, .. },
+                Reply::RejectionQueued {
                     id: actual,
                     step: actual_step,
                 },

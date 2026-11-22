@@ -331,6 +331,21 @@ impl Harness {
         self.out.0.lock().unwrap().last().cloned().unwrap()
     }
 
+    /// Refuse the pending step with the token its prompt carried, as a
+    /// client that showed it would.
+    async fn reject(&mut self, task: u64) -> Expression {
+        let confirmation = self.task(task).confirmation.expect("a pending approval");
+        self.butler
+            .reject_with_token(
+                TaskId(task),
+                confirmation.step,
+                &Self::intent("reject"),
+                &confirmation.token,
+            )
+            .await;
+        self.out.0.lock().unwrap().last().cloned().unwrap()
+    }
+
     fn task(&self, id: u64) -> Task {
         self.butler.tasks().get(TaskId(id)).unwrap()
     }
@@ -1944,4 +1959,275 @@ async fn the_time_budget_is_a_deadline_inside_a_round_not_only_between_rounds() 
         .expect("the budget ended the request");
     assert!(r.text.contains("超出预算：执行时长"), "{}", r.text);
     assert_eq!(h.task(1).state, TaskState::Failed);
+}
+
+fn mail() -> Arc<Fixed> {
+    Fixed::new(
+        "mail.send",
+        RiskLevel::External,
+        Ok(json!({"message": "已发送"})),
+    )
+}
+
+fn refusals(audit: &[AuditEvent]) -> usize {
+    audit
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                AuditEvent::HumanConfirmation {
+                    approved: false,
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+fn started(audit: &[AuditEvent], name: &str) -> bool {
+    audit.iter().any(|e| {
+        matches!(e, AuditEvent::CapabilityStarted { capability, .. } if capability.as_str() == name)
+    })
+}
+
+#[tokio::test]
+async fn a_refused_step_never_runs_and_the_planner_can_still_finish_the_task_another_way() {
+    let mail = mail();
+    let mut h = Harness::with(
+        "reject-recover",
+        |s| match s.rounds {
+            0 => call("mail.send", json!({"to": "attacker@evil.example"})),
+            1 if !s.last[0].0 && s.last[0].1.contains("用户拒绝") => {
+                call("notes.append", json!({"text": "会议在 B-307"}))
+            }
+            2 => answer("没有发那封邮件；会议地点已记到笔记里。"),
+            _ => answer("意外"),
+        },
+        Options {
+            capabilities: vec![mail.clone()],
+            ..Options::default()
+        },
+    );
+    assert_eq!(h.say("记下会议地点").await.kind, ExpressionKind::AskConfirm);
+
+    let r = h.reject(1).await;
+    assert!(r.text.contains("没有发那封邮件"), "{}", r.text);
+    // Guards "the refused capability never runs": no call, no start marker.
+    assert_eq!(mail.count(), 0);
+    assert!(!started(&h.audit(), "mail.send"));
+    // The planner was shown the refusal as that step's failure.
+    let seen = h.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[1].last.len(), 1);
+    assert!(!seen[1].last[0].0);
+    let task = h.task(1);
+    assert_eq!(
+        h.steps(1),
+        vec![
+            ("mail.send".into(), None, StepState::Failed),
+            ("notes.append".into(), None, StepState::Succeeded),
+        ]
+    );
+    assert!(
+        task.steps[0]
+            .result
+            .as_ref()
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.contains("用户拒绝")),
+        "{:?}",
+        task.steps[0].result
+    );
+    // Guards honest outcomes: the task succeeded because the user's request
+    // was done by other means, not because the refused step counted.
+    assert_eq!(task.state, TaskState::Succeeded);
+    assert!(task.confirmation.is_none());
+    assert_eq!(h.notes(), vec!["会议在 B-307"]);
+    assert_eq!(refusals(&h.audit()), 1);
+}
+
+#[tokio::test]
+async fn a_refusal_skips_the_rest_of_its_round_and_is_never_counted_as_success() {
+    let mail = mail();
+    let mut h = Harness::with(
+        "reject-round",
+        |s| match s.rounds {
+            0 => calls(&[
+                ("mail.send", json!({"to": "attacker@evil.example"})),
+                ("notes.append", json!({"text": "已发送"})),
+            ]),
+            _ => answer("都办好了"),
+        },
+        Options {
+            capabilities: vec![mail.clone()],
+            ..Options::default()
+        },
+    );
+    h.say("发邮件").await;
+    h.reject(1).await;
+    assert_eq!(mail.count(), 0);
+    assert!(h.notes().is_empty());
+    assert_eq!(
+        h.steps(1),
+        vec![
+            ("mail.send".into(), None, StepState::Failed),
+            ("notes.append".into(), None, StepState::Skipped),
+        ]
+    );
+    let seen = h.seen.lock().unwrap().clone();
+    assert!(seen[1].last.iter().all(|(ok, _)| !ok));
+    // Guards "succeeded only when it really happened": ending right after a
+    // refused step fails the task, whatever the planner says about it.
+    assert_eq!(h.task(1).state, TaskState::Failed);
+}
+
+#[tokio::test]
+async fn a_rejection_is_bound_to_its_task_step_responder_and_token_and_is_single_use() {
+    let mail = mail();
+    let mut h = Harness::with(
+        "reject-bound",
+        |s| match s.rounds {
+            0 => call("mail.send", json!({"to": "bob"})),
+            _ => answer("好的"),
+        },
+        Options {
+            capabilities: vec![mail.clone()],
+            ..Options::default()
+        },
+    );
+    h.say("发邮件").await;
+    let token = h.task(1).confirmation.unwrap().token;
+    let mut stranger = Harness::intent("reject");
+    stranger.source = DeviceId::new("another-device");
+    for (task, step, who, offered) in [
+        (TaskId(1), 0, Harness::intent("reject"), "wrong".to_string()),
+        (TaskId(1), 0, Harness::intent("reject"), String::new()),
+        (TaskId(1), 1, Harness::intent("reject"), token.clone()),
+        (TaskId(2), 0, Harness::intent("reject"), token.clone()),
+        (TaskId(1), 0, stranger, token.clone()),
+    ] {
+        h.butler.reject_with_token(task, step, &who, &offered).await;
+        // Nothing changed: still waiting on the same prompt, nothing run,
+        // no refusal on record.
+        let waiting = h.task(1);
+        assert_eq!(waiting.state, TaskState::AwaitingConfirmation);
+        assert_eq!(waiting.confirmation.unwrap().token, token);
+        assert_eq!(waiting.steps[0].state, StepState::Pending);
+        assert_eq!(refusals(&h.audit()), 0);
+    }
+
+    // After expiry the prompt can no longer be refused either.
+    h.butler
+        .tasks()
+        .update(TaskId(1), |task| {
+            task.confirmation.as_mut().unwrap().expires_at_ms = now_ms() - 1;
+        })
+        .unwrap();
+    h.butler
+        .reject_with_token(TaskId(1), 0, &Harness::intent("reject"), &token)
+        .await;
+    assert_eq!(h.task(1).state, TaskState::AwaitingConfirmation);
+    assert_eq!(h.task(1).steps[0].state, StepState::Pending);
+    assert_eq!(refusals(&h.audit()), 0);
+
+    h.butler
+        .tasks()
+        .update(TaskId(1), |task| {
+            task.confirmation.as_mut().unwrap().expires_at_ms = now_ms() + 60_000;
+        })
+        .unwrap();
+    h.reject(1).await;
+    assert_eq!(h.task(1).steps[0].state, StepState::Failed);
+    assert_eq!(refusals(&h.audit()), 1);
+    // The prompt is answered: neither a second refusal nor a late approval
+    // of the same token does anything.
+    h.butler
+        .reject_with_token(TaskId(1), 0, &Harness::intent("reject"), &token)
+        .await;
+    h.butler
+        .approve_with_token(TaskId(1), 0, &Harness::intent("approve"), &token)
+        .await;
+    assert_eq!(mail.count(), 0);
+    assert_eq!(refusals(&h.audit()), 1);
+    assert!(!h
+        .audit()
+        .iter()
+        .any(|e| matches!(e, AuditEvent::HumanConfirmation { approved: true, .. })));
+}
+
+#[tokio::test]
+async fn refusing_an_irreversible_step_needs_no_pin_and_leaves_no_grant_behind() {
+    let wipe = Fixed::new(
+        "disk.wipe",
+        RiskLevel::Irreversible,
+        Ok(json!({"message": "已清除"})),
+    );
+    let mut h = Harness::with(
+        "reject-pin",
+        |s| match s.rounds {
+            0 => call("disk.wipe", json!({})),
+            _ => answer("没有清除磁盘"),
+        },
+        Options {
+            capabilities: vec![wipe.clone()],
+            pin: Some("4321"),
+            ..Options::default()
+        },
+    );
+    h.say("清除磁盘").await;
+    assert!(h.task(1).confirmation.unwrap().verify_identity);
+    h.reject(1).await;
+    assert_eq!(wipe.count(), 0);
+    assert_eq!(h.task(1).steps[0].state, StepState::Failed);
+    assert_eq!(h.task(1).state, TaskState::Failed);
+    // Without a PIN the next request still cannot be approved.
+    h.say("清除磁盘").await;
+    h.approve(2).await;
+    assert_eq!(wipe.count(), 0);
+}
+
+#[tokio::test]
+async fn a_refusal_inside_a_delegate_goes_back_to_the_delegate_to_decide() {
+    let mail = mail();
+    let mut agents = AgentDirectory::with_builtin();
+    agents
+        .add(
+            serde_json::from_value::<AgentManifest>(json!({
+                "id": "mailer", "name": "邮件 Agent", "description": "收发邮件",
+                "capabilities": ["mail.*"], "max_risk": "L2"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let mut h = Harness::with(
+        "reject-delegate",
+        |s| match (s.delegate, s.rounds) {
+            (false, 0) => call("agent.mailer", json!({"task": "给 Alice 发邮件"})),
+            (true, 0) => call("mail.send", json!({"to": "alice"})),
+            (true, _) if s.last[0].1.contains("用户拒绝") => answer("用户不让发，没有发出"),
+            (true, _) => answer("意外"),
+            (false, _) => answer("邮件没有发出"),
+        },
+        Options {
+            capabilities: vec![mail.clone()],
+            agents: Some(agents),
+            ..Options::default()
+        },
+    );
+    h.say("给 Alice 发封邮件").await;
+    let r = h.reject(1).await;
+    assert!(r.text.contains("邮件没有发出"), "{}", r.text);
+    assert_eq!(mail.count(), 0);
+    let seen = h.seen.lock().unwrap().clone();
+    // The delegate, not the butler, was told of the refusal first.
+    assert!(seen[2].delegate && seen[2].last[0].1.contains("用户拒绝"));
+    // It ended right after the refused step, so its own call is not a
+    // success either, and neither is the task.
+    assert_eq!(h.task(1).state, TaskState::Failed);
+    assert_eq!(
+        h.steps(1),
+        vec![
+            ("agent.mailer".into(), None, StepState::Failed),
+            ("mail.send".into(), Some("mailer".into()), StepState::Failed),
+        ]
+    );
 }

@@ -31,7 +31,7 @@ pub enum Request {
     /// Answer the pending approval of `task` (the newest waiting one if
     /// absent), with the PIN the page collected for an irreversible step.
     Confirm {
-        approved: bool,
+        answer: Answer,
         task: Option<u64>,
         pin: Option<String>,
     },
@@ -42,6 +42,17 @@ pub enum Request {
         mode: Option<SpeakMode>,
         stop: bool,
     },
+}
+
+/// What the person decided about the step they were shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// Run this step.
+    Approve,
+    /// Do not run this step; the task goes on without it.
+    Reject,
+    /// Stop the whole task.
+    Cancel,
 }
 
 fn risk_label(risk: RiskLevel) -> &'static str {
@@ -427,11 +438,7 @@ impl Session {
                     Err(error) => Err(error),
                 }
             }
-            Request::Confirm {
-                approved,
-                task,
-                pin,
-            } => self.confirm(approved, task, pin, emit).await,
+            Request::Confirm { answer, task, pin } => self.confirm(answer, task, pin, emit).await,
         };
         if let Err(error) = result {
             emit(json!({"type": "expression", "kind": "error", "text": error.to_string()}));
@@ -441,7 +448,7 @@ impl Session {
 
     async fn confirm(
         &mut self,
-        approved: bool,
+        answer: Answer,
         task: Option<u64>,
         pin: Option<String>,
         emit: &impl Fn(Value) -> bool,
@@ -453,21 +460,30 @@ impl Session {
         else {
             return Ok(());
         };
-        if !approved {
+        if answer == Answer::Cancel {
             self.client
                 .request(Command::Cancel { id: TaskId(id) })
                 .await?;
             return self.refresh(id, emit).await;
         }
-        // Approve exactly what the page showed: the step and token read with it.
+        // Answer exactly what the page showed: the step and token read with it.
         let Some(confirmation) = self.shown.get(&id).and_then(|t| t.confirmation.clone()) else {
             return Ok(());
         };
-        let command = Command::Approve {
-            id: TaskId(id),
-            step: confirmation.step + 1,
-            confirmation: confirmation.token,
-            pin,
+        let command = if answer == Answer::Reject {
+            // A refusal never carries the PIN, even if the page collected one.
+            Command::Reject {
+                id: TaskId(id),
+                step: confirmation.step + 1,
+                confirmation: confirmation.token,
+            }
+        } else {
+            Command::Approve {
+                id: TaskId(id),
+                step: confirmation.step + 1,
+                confirmation: confirmation.token,
+                pin,
+            }
         };
         match self.client.request(command).await {
             Ok(_) => Ok(()),

@@ -642,6 +642,82 @@ async fn approval_uses_the_concrete_token_across_connections_and_is_single_use()
 }
 
 #[tokio::test]
+async fn a_rejection_over_the_socket_is_bound_to_its_prompt_and_never_runs_the_step() {
+    let capability = external();
+    let harness = Harness::start(Box::new(ExternalPlanner), vec![capability.clone()]).await;
+    let mut client = harness.connect().await;
+    let id = client.submit("send test").await;
+    let task = harness.wait(id, TaskState::AwaitingConfirmation).await;
+    let token = task.confirmation.unwrap().token;
+    // Guards "approval is bound to a concrete request", which a refusal
+    // shares: a wrong token or step is refused and the task keeps waiting.
+    for (step, confirmation, code) in [
+        (1, "wrong".to_string(), "invalid_confirmation"),
+        (2, token.clone(), "invalid_confirmation"),
+        (0, token.clone(), "invalid_argument"),
+    ] {
+        assert_eq!(
+            error_code(
+                client
+                    .request(Command::Reject {
+                        id,
+                        step,
+                        confirmation,
+                    })
+                    .await
+            ),
+            code
+        );
+    }
+    assert_eq!(
+        harness.tasks.get(id).unwrap().state,
+        TaskState::AwaitingConfirmation
+    );
+    assert!(matches!(
+        client
+            .ok(Command::Reject {
+                id,
+                step: 1,
+                confirmation: token.clone(),
+            })
+            .await,
+        Reply::RejectionQueued { step: 1, .. }
+    ));
+    // This planner has nothing else to try: the task ends, and since the
+    // last thing attempted did not happen it is not shown as a success.
+    let ended = harness.wait(id, TaskState::Failed).await;
+    assert_eq!(ended.steps[0].state, StepState::Failed);
+    assert_eq!(capability.calls.load(Ordering::SeqCst), 0);
+    // Single use: the prompt is gone, so neither answer is accepted again.
+    assert_eq!(
+        error_code(
+            client
+                .request(Command::Reject {
+                    id,
+                    step: 1,
+                    confirmation: token.clone(),
+                })
+                .await
+        ),
+        "invalid_confirmation"
+    );
+    assert_eq!(
+        error_code(
+            client
+                .request(Command::Approve {
+                    id,
+                    step: 1,
+                    confirmation: token,
+                    pin: None,
+                })
+                .await
+        ),
+        "invalid_confirmation"
+    );
+    assert_eq!(capability.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn a_full_queue_creates_no_phantom_tasks_and_cancellation_remains_available() {
     let gate = Arc::new(Gate::default());
     let mut harness = Harness::start(Box::new(SlowPlanner(gate.clone())), vec![]).await;
@@ -1572,6 +1648,11 @@ async fn an_outside_caller_reaches_only_what_it_was_given_and_only_its_own_tasks
             step: 1,
             confirmation: "x".into(),
             pin: None,
+        },
+        Command::Reject {
+            id: TaskId(1),
+            step: 1,
+            confirmation: "x".into(),
         },
         Command::Preauthorize {
             capability: CapabilityName::new("notes.append"),
