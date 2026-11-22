@@ -138,7 +138,8 @@ fn hostname() -> Option<String> {
     (!name.is_empty() && name.chars().all(|c| !c.is_control())).then(|| name.to_string())
 }
 
-/// The notes' texts, kept current for embedders and tests to look at.
+/// The notes' texts. Embedders and tests may read it and seed it directly;
+/// a note put here by code rather than by a capability call is trusted.
 pub type NoteStore = Arc<Mutex<Vec<String>>>;
 
 /// One note and its provenance.
@@ -211,26 +212,40 @@ struct NotebookData {
 }
 
 struct Notebook {
-    data: Mutex<(Vec<Note>, Option<Vec<Note>>)>,
-    texts: NoteStore,
+    /// The texts stay in the shared `NoteStore`, which embedders seed
+    /// directly; provenance sits beside it, position by position. A text
+    /// without a flag (seeded by code) is trusted.
+    notes: NoteStore,
+    tainted: Mutex<Vec<bool>>,
+    undo: Mutex<Option<Vec<Note>>>,
     path: Option<PathBuf>,
+}
+
+fn joined(texts: &[String], tainted: &[bool]) -> Vec<Note> {
+    texts
+        .iter()
+        .enumerate()
+        .map(|(i, text)| Note {
+            text: text.clone(),
+            tainted: tainted.get(i).copied().unwrap_or(false),
+        })
+        .collect()
 }
 
 impl Notebook {
     fn memory() -> Self {
         Self {
-            data: Mutex::default(),
-            texts: Arc::default(),
+            notes: Arc::default(),
+            tainted: Mutex::default(),
+            undo: Mutex::new(None),
             path: None,
         }
     }
 
     fn notes(&self) -> Vec<Note> {
-        self.data
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .0
-            .clone()
+        let texts = self.notes.lock().unwrap_or_else(|p| p.into_inner());
+        let tainted = self.tainted.lock().unwrap_or_else(|p| p.into_inner());
+        joined(&texts, &tainted)
     }
 
     fn open(path: &Path) -> io::Result<Self> {
@@ -269,9 +284,11 @@ impl Notebook {
             atomic_save(path, &data)?;
         }
         let texts = data.notes.iter().map(|note| note.text.clone()).collect();
+        let tainted = data.notes.iter().map(|note| note.tainted).collect();
         Ok(Self {
-            data: Mutex::new((data.notes, data.undo)),
-            texts: Arc::new(Mutex::new(texts)),
+            notes: Arc::new(Mutex::new(texts)),
+            tainted: Mutex::new(tainted),
+            undo: Mutex::new(data.undo),
             path: Some(path.to_path_buf()),
         })
     }
@@ -281,20 +298,22 @@ impl Notebook {
         &self,
         update: impl FnOnce(&mut NotebookData) -> Result<T, CapabilityError>,
     ) -> Result<T, CapabilityError> {
-        let mut data = self.data.lock().unwrap_or_else(|p| p.into_inner());
+        let mut texts = self.notes.lock().unwrap_or_else(|p| p.into_inner());
+        let mut tainted = self.tainted.lock().unwrap_or_else(|p| p.into_inner());
+        let mut undo = self.undo.lock().unwrap_or_else(|p| p.into_inner());
         let mut next = NotebookData {
             version: 1,
-            notes: data.0.clone(),
-            undo: data.1.clone(),
+            notes: joined(&texts, &tainted),
+            undo: undo.clone(),
         };
         let result = update(&mut next)?;
         if let Some(path) = &self.path {
             atomic_save(path, &next)
                 .map_err(|e| CapabilityError::Failed(format!("保存笔记失败：{e}")))?;
         }
-        *self.texts.lock().unwrap_or_else(|p| p.into_inner()) =
-            next.notes.iter().map(|note| note.text.clone()).collect();
-        *data = (next.notes, next.undo);
+        *texts = next.notes.iter().map(|note| note.text.clone()).collect();
+        *tainted = next.notes.iter().map(|note| note.tainted).collect();
+        *undo = next.undo;
         Ok(result)
     }
 }
@@ -607,7 +626,7 @@ fn register(reg: &mut CapabilityRegistry, notebook: Notebook) -> NoteStore {
         ),
         notebook: notebook.clone(),
     }));
-    notebook.texts.clone()
+    notebook.notes.clone()
 }
 
 /// Register an in-memory notebook, primarily for tests and embedding.
@@ -715,6 +734,25 @@ mod tests {
             &invoke(&reg, "notes.list", json!({})).await
         ));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    // Guards the embedder contract: notes seeded straight into the store
+    // are real notes, trusted, and keep their place beside tainted ones.
+    #[tokio::test]
+    async fn notes_seeded_into_the_store_are_trusted_notes() {
+        let mut reg = CapabilityRegistry::new();
+        let notes = register_all(&mut reg);
+        notes.lock().unwrap().push("牛奶".into());
+        invoke_as(&reg, "notes.append", json!({"text": "外部"}), true).await;
+        let listed = invoke(&reg, "notes.list", json!({})).await;
+        assert_eq!(listed["notes"], json!(["牛奶", "外部"]));
+        assert!(agentos_core::carries_taint(&listed));
+        invoke(&reg, "notes.remove", json!({"index": 2, "current": "外部"})).await;
+        let listed = invoke(&reg, "notes.list", json!({})).await;
+        assert_eq!(listed["notes"], json!(["牛奶"]));
+        assert!(!agentos_core::carries_taint(&listed));
+        invoke(&reg, "notes.clear", json!({})).await;
+        assert!(notes.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
