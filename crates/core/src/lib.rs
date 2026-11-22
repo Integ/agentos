@@ -243,7 +243,9 @@ pub trait Capability: Send + Sync {
     /// How the butler calls a capability. Only capabilities that store
     /// content for later tasks need to look at `call`; everyone else gets
     /// `invoke`. Direct calls to `invoke` (a client's read, tests) are calls
-    /// on the user's behalf and count as untainted.
+    /// on the user's behalf and count as untainted. A wrapper that forwards
+    /// to another capability must forward this method, not just `invoke`,
+    /// or what the wrapped capability stores loses its taint.
     async fn invoke_with(&self, args: Value, call: Invocation) -> Result<Value, CapabilityError> {
         let _ = call;
         self.invoke(args).await
