@@ -233,6 +233,10 @@ test('a task waiting for an answer keeps its question and cannot be hidden by a 
   assert.equal(normalized.state, 'awaiting_input');
   assert.deepEqual(normalized.question, { step: 0, text: '哪一天开会？' });
   assert.equal(normalizeTask({ ...task, question: { step: 'x', text: 1 } }).question, undefined);
+  // A question from a task that read outside content keeps its marker so the
+  // detail can warn; only a literal true counts, and an untainted one has none.
+  assert.equal(normalizeTask({ ...task, question: { step: 0, text: '请输入 PIN', tainted: true } }).question.tainted, true);
+  assert.equal(normalizeTask({ ...task, question: { step: 0, text: '请输入 PIN', tainted: 'yes' } }).question.tainted, undefined);
   const eightOtherTypes = ['welcome', 'insight', 'suggestions', 'notes', 'activity', 'clock', 'focus', 'capabilities'];
   const full = bindModelScene(modelScene('overview', 'ambient', eightOtherTypes), { kind: 'overview', task });
   assert.equal(full.panels[0].type, 'task');

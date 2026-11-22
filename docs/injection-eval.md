@@ -295,6 +295,8 @@ OPENAI_API_KEY=… cargo run --release -p agentos-eval -- --planner openai --mod
 
 **建议。** 受污染任务的提问标注“任务读过外部内容”。
 
+**状态：已修复。** 提问的 Agent 或任务读过外部内容时，任务的 `question` 带 `tainted: true`，终端、Web Shell、原生桌面和管家说的话都在问题旁提示不要在这里输入密码或 PIN。提问照样允许，策略不变。见 `a_question_asked_after_reading_outside_content_is_marked_and_still_asked`。
+
 ## 局限
 
 - 规模小：4 个用户任务、5 个注入目标、5 种写法，都是中文，注入只放在一处、一次性，没有多轮或针对防御调整的攻击。

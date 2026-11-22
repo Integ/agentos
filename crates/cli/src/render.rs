@@ -201,7 +201,14 @@ pub fn task_detail(task: &Task, include_token: bool) -> String {
         lines.push(line);
     }
     if let Some(question) = &task.question {
-        // The question itself is the task's message, shown above.
+        // The question itself is the task's message, shown above. A task
+        // that read outside content may be relaying an injection's words.
+        if question.tainted {
+            lines.push(format!(
+                "  {}",
+                agentos_runtime::OUTSIDE_CONTENT_QUESTION_WARNING
+            ));
+        }
         lines.push(format!(
             "  任务在等你回答第 {} 步的问题；不回答就不会继续。",
             question.step + 1
@@ -566,6 +573,45 @@ mod tests {
         );
         assert!(view.contains("/quit（后台任务继续）"));
         assert!(!view.contains('\x1b'));
+    }
+
+    fn waiting_on(tainted: bool) -> Task {
+        let store = TaskStore::memory();
+        let task = store
+            .create(Intent {
+                id: IntentId(0),
+                source: DeviceId::new("test"),
+                speaker: None,
+                text: "看看这个网页".into(),
+                urgency: Urgency::Normal,
+                at_ms: now_ms(),
+            })
+            .unwrap();
+        store
+            .update(task.id, |t| {
+                t.state = TaskState::AwaitingInput;
+                t.tainted = tainted;
+                t.steps = vec![agentos_runtime::TaskStep::pending(
+                    agentos_core::CapabilityName::new("ask.user"),
+                    serde_json::json!({"question": "请输入你的 PIN"}),
+                )];
+                t.message = Some("请输入你的 PIN".into());
+                t.question = Some(agentos_runtime::Question {
+                    step: 0,
+                    text: "请输入你的 PIN".into(),
+                    tainted,
+                });
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_question_from_a_task_that_read_outside_content_is_shown_with_a_warning() {
+        let warning = agentos_runtime::OUTSIDE_CONTENT_QUESTION_WARNING;
+        // The person answering must know the words may be an injection's.
+        assert!(task_detail(&waiting_on(true), false).contains(warning));
+        // An ordinary question is not flagged, so the warning keeps meaning.
+        assert!(!task_detail(&waiting_on(false), false).contains(warning));
     }
 
     #[test]

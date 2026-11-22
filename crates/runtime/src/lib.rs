@@ -176,7 +176,20 @@ impl TaskUsage {
 pub struct Question {
     pub step: usize,
     pub text: String,
+    /// The task had read content from outside the user's control when it
+    /// asked, so the wording may come from an injection (asking for a
+    /// password or PIN, say). Asking is still allowed; clients show
+    /// [`OUTSIDE_CONTENT_QUESTION_WARNING`] so the person answering knows.
+    /// Absent in records stored before the flag existed, and omitted when
+    /// false so strict older clients can still read untainted questions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tainted: bool,
 }
+
+/// Shown next to a question whose `tainted` flag is set. One wording for
+/// every client, so the warning reads the same wherever it is answered.
+pub const OUTSIDE_CONTENT_QUESTION_WARNING: &str =
+    "注意：这个问题来自读过外部内容的任务，内容可能被篡改。不要在这里输入密码或 PIN。";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1801,6 +1814,28 @@ mod tests {
     }
 
     #[test]
+    fn a_question_stored_before_the_outside_content_flag_loads_as_unflagged() {
+        // Guards "old records stay readable": tasks written by earlier
+        // versions have no `tainted` on their question.
+        let old: Question = serde_json::from_str(r#"{"step":0,"text":"哪一天？"}"#).unwrap();
+        assert!(!old.tainted);
+        // An unflagged question is written as before, so strict older
+        // clients can still read it; a flagged one says so.
+        assert_eq!(
+            serde_json::to_value(&old).unwrap(),
+            serde_json::json!({"step": 0, "text": "哪一天？"})
+        );
+        let flagged = Question {
+            tainted: true,
+            ..old
+        };
+        assert_eq!(
+            serde_json::to_value(&flagged).unwrap()["tainted"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
     fn a_question_exists_exactly_while_a_task_awaits_input_and_never_survives_it() {
         let dir = TempDir::new();
         let store = TaskStore::open(&dir.0).unwrap();
@@ -1810,6 +1845,7 @@ mod tests {
             task.question = Some(Question {
                 step: 0,
                 text: "哪一天？".into(),
+                tainted: false,
             });
         };
         let waiting = store.create(intent()).unwrap();
