@@ -147,6 +147,11 @@ fn task_view(task: &Task) -> Value {
     });
     if let Some(question) = &task.question {
         view["question"] = json!({"step": question.step + 1, "text": clip(&question.text)});
+        if question.tainted {
+            // The caller relays the question to a person; tell it to pass on
+            // that the words may come from outside content.
+            view["question"]["warning"] = json!(agentos_runtime::OUTSIDE_CONTENT_QUESTION_WARNING);
+        }
     }
     if let Some(note) = waiting {
         view["note"] = json!(note);

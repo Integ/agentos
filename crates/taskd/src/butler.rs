@@ -1813,6 +1813,11 @@ impl Butler {
                         t.question = Some(Question {
                             step: index,
                             text: question.clone(),
+                            // The asker's frame, or anything the task as a
+                            // whole has read, may have put these words in
+                            // its mouth. Asking stays allowed; the person
+                            // answering is told.
+                            tainted: frame.tainted || t.tainted,
                         });
                     }
                 })?;
@@ -1821,12 +1826,17 @@ impl Butler {
                     return Ok(Flow::Stop);
                 }
                 let number = task.question.as_ref().map_or(0, |q| q.step + 1);
+                let warning = if task.question.as_ref().is_some_and(|q| q.tainted) {
+                    agentos_runtime::OUTSIDE_CONTENT_QUESTION_WARNING
+                } else {
+                    ""
+                };
                 self.say_for(
                     &task,
                     frame,
                     ExpressionKind::AskInput,
                     format!(
-                        "{question}（输入 /reply {id} {number} 加上你的回答，或 /cancel {id} 取消。可继续提交其他任务。）"
+                        "{question}{warning}（输入 /reply {id} {number} 加上你的回答，或 /cancel {id} 取消。可继续提交其他任务。）"
                     ),
                 )
                 .await;
