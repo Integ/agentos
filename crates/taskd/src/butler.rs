@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 
 use agentos_audit::{AuditEvent, AuditLog, IntentRecord};
 use agentos_core::{
-    now_ms, AgentId, Capability, CapabilityError, CapabilityName, CapabilitySpec, Expression,
-    ExpressionKind, Intent, IntentId, RiskLevel, Urgency,
+    carries_taint, now_ms, AgentId, Capability, CapabilityError, CapabilityName, CapabilitySpec,
+    Expression, ExpressionKind, Intent, IntentId, Invocation, RiskLevel, Urgency,
 };
 use agentos_planner::{
     sub_agent_prompt, Conversation, Plan, Planner, Round, Step, ToolResult, Usage, SYSTEM_PROMPT,
@@ -1951,12 +1951,17 @@ impl Butler {
         if started.state.is_terminal() {
             return Ok(Flow::Stop);
         }
+        // Capabilities that store content record whether this task has seen
+        // outside content, so what it writes keeps that provenance.
+        let invocation = Invocation {
+            tainted: frame.tainted,
+        };
         // Why an abortable call was abandoned: cancelled, or out of time.
         let mut over_budget = None;
         let results = if capability.abortable() {
             tokio::select! {
                 biased;
-                results = run_together(&calls) => Some(results),
+                results = run_together(&calls, invocation) => Some(results),
                 () = self.stopped(id) => None,
                 limit = self.out_of_time(stretch) => {
                     over_budget = Some(limit);
@@ -1967,7 +1972,9 @@ impl Butler {
             // Not safe to abandon: wait for it, and record what it did even
             // though the task may have been cancelled or run out of time
             // meanwhile. The budget stops the task at the next round.
-            Some(vec![capability.invoke(step.args.clone()).await])
+            Some(vec![
+                capability.invoke_with(step.args.clone(), invocation).await,
+            ])
         };
         let Some(results) = results else {
             // The start markers must not be left open, and must not be
@@ -2097,7 +2104,9 @@ impl Butler {
         // the rest of the task, and a delegate's taint flows back to its parent.
         // A failure counts too: its error text (an MCP tool's error content, a
         // plugin's stderr) can carry outside words to the planner just as well.
-        let untrusted = ran.untrusted;
+        // Content a tainted task stored (on the blackboard, in the notebook)
+        // counts as outside content when it is read back.
+        let untrusted = ran.untrusted || carries_taint(&value);
         if untrusted {
             frame.tainted = true;
         }
@@ -2349,9 +2358,12 @@ type Call = (Step, String, Arc<dyn Capability>);
 
 /// Run `calls` at the same time and return their results in order. A
 /// capability that panics takes the service down exactly as it would alone.
-async fn run_together(calls: &[Call]) -> Vec<Result<Value, CapabilityError>> {
+async fn run_together(
+    calls: &[Call],
+    invocation: Invocation,
+) -> Vec<Result<Value, CapabilityError>> {
     if let [(step, _, capability)] = calls {
-        return vec![capability.invoke(step.args.clone()).await];
+        return vec![capability.invoke_with(step.args.clone(), invocation).await];
     }
     // Dropping the set (the task was cancelled or ran out of time) aborts
     // every call still running: they are all abortable reads.
@@ -2359,7 +2371,7 @@ async fn run_together(calls: &[Call]) -> Vec<Result<Value, CapabilityError>> {
     for (index, (step, _, capability)) in calls.iter().enumerate() {
         let capability = capability.clone();
         let args = step.args.clone();
-        set.spawn(async move { (index, capability.invoke(args).await) });
+        set.spawn(async move { (index, capability.invoke_with(args, invocation).await) });
     }
     let mut results: Vec<Option<Result<Value, CapabilityError>>> =
         (0..calls.len()).map(|_| None).collect();

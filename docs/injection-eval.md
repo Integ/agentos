@@ -279,7 +279,10 @@ OPENAI_API_KEY=… cargo run --release -p agentos-eval -- --planner openai --mod
 
 **建议。** 增加“拒绝这一步”：这一步记为失败并写明人拒绝了，结果交还规划器，由它换个办法或结束。
 
-### 4. 污点不随数据保存下来
+### 4. 污点不随数据保存下来（已修复）
+
+**已修复。** 黑板条目和笔记记下写入它的任务是否受污染：黑板摘要不再附上受污染的条目，`board.read`、`notes.list` 读到它们会污染读的任务。下面的验证已做成测试 `an_approved_write_in_a_tainted_task_does_not_become_trusted_context_for_later_tasks`（`crates/eval/tests/injection_flow.rs`）。设计见 [architecture.md](architecture.md)（污点跟着存储走）。
+
 
 **现象。** 受污染任务里人批准过的写入，之后就是可信内容。黑板内容会进入以后每个任务的系统提示，那些任务却不受污染（`Butler::context` 只从同一线程此前的任务继承污点）；`notes.list` 的输出也不算不可信。一次草率的批准，就把一次性的注入变成长期指令。
 
