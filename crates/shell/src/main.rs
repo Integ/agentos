@@ -112,7 +112,12 @@ fn butler_request(v: &Value) -> Option<kernel::Request> {
             v.get("text")?.as_str()?.to_string(),
         )),
         "confirm" => Some(kernel::Request::Confirm {
-            approved: v.get("approved")?.as_bool()?,
+            answer: match v.get("answer")?.as_str()? {
+                "approve" => kernel::Answer::Approve,
+                "reject" => kernel::Answer::Reject,
+                "cancel" => kernel::Answer::Cancel,
+                _ => return None,
+            },
             task: v.get("task").and_then(Value::as_u64),
             pin: pin_of(v),
         }),
@@ -441,22 +446,27 @@ mod tests {
         let v = |s: &str| serde_json::from_str::<Value>(s).unwrap();
         assert_eq!(
             butler_request(&v(
-                r#"{"type":"confirm","approved":true,"task":3,"pin":"1234","token":"forged"}"#
+                r#"{"type":"confirm","answer":"approve","task":3,"pin":"1234","token":"forged"}"#
             )),
             Some(kernel::Request::Confirm {
-                approved: true,
+                answer: kernel::Answer::Approve,
                 task: Some(3),
                 pin: Some("1234".into())
             })
         );
-        assert_eq!(
-            butler_request(&v(r#"{"type":"confirm","approved":false}"#)),
-            Some(kernel::Request::Confirm {
-                approved: false,
-                task: None,
-                pin: None
-            })
-        );
+        for (wire, answer) in [
+            ("reject", kernel::Answer::Reject),
+            ("cancel", kernel::Answer::Cancel),
+        ] {
+            assert_eq!(
+                butler_request(&v(&format!(r#"{{"type":"confirm","answer":"{wire}"}}"#))),
+                Some(kernel::Request::Confirm {
+                    answer,
+                    task: None,
+                    pin: None
+                })
+            );
+        }
         assert_eq!(
             butler_request(&v(r#"{"type":"intent","text":"记一下 牛奶"}"#)),
             Some(kernel::Request::Intent("记一下 牛奶".into()))
@@ -468,12 +478,14 @@ mod tests {
             json!(""),
             json!(1234),
         ] {
-            let body = json!({"type": "confirm", "approved": true, "pin": pin});
+            let body = json!({"type": "confirm", "answer": "approve", "pin": pin});
             assert_eq!(pin_of(&body), None, "{body}");
         }
         for other in [
             r#"{"type":"system","action":"reboot"}"#,
             r#"{"type":"confirm"}"#,
+            r#"{"type":"confirm","approved":true}"#,
+            r#"{"type":"confirm","answer":"yes"}"#,
             r#"{"type":"intent"}"#,
         ] {
             assert_eq!(butler_request(&v(other)), None, "{other}");

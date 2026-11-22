@@ -32,8 +32,8 @@ use std::time::{Duration, Instant};
 
 use agentos_audit::{AuditEvent, AuditLog, IntentRecord};
 use agentos_core::{
-    now_ms, AgentId, Capability, CapabilityError, CapabilityName, CapabilitySpec, Expression,
-    ExpressionKind, Intent, IntentId, RiskLevel, Urgency,
+    carries_taint, now_ms, AgentId, Capability, CapabilityError, CapabilityName, CapabilitySpec,
+    Expression, ExpressionKind, Intent, IntentId, Invocation, RiskLevel, Urgency,
 };
 use agentos_planner::{
     sub_agent_prompt, Conversation, Plan, Planner, Round, Step, ToolResult, Usage, SYSTEM_PROMPT,
@@ -160,10 +160,11 @@ fn caller_agent(id: &str) -> AgentId {
     AgentId::new(format!("{}{id}", agentos_ipc::CALLER_SOURCE_PREFIX))
 }
 
-/// What lets a paused task go on: the step the human approved, or the step
-/// that asked and what the human answered.
+/// What lets a paused task go on: the step the human approved, the step the
+/// human refused, or the step that asked and what the human answered.
 enum Resume {
     Approved(String),
+    Rejected(String),
     Answered(String, String),
 }
 
@@ -277,6 +278,11 @@ fn caller_excluded(name: &str) -> bool {
 pub const OVER_BUDGET: &str = "超出预算";
 pub const GOING_IN_CIRCLES: &str = "规划陷入了重复";
 pub const INVALID_PLAN: &str = "计划无效";
+/// The result of a step the human refused at its confirmation. The planner
+/// reads it as that step's failure, so it is worded for the planner as much
+/// as for the person: it must not be mistaken for an error worth retrying.
+pub const REFUSED_BY_USER: &str =
+    "用户拒绝了这一步，没有执行。不要再请求同样的调用；换别的办法完成用户的请求，或者如实说明没有做这一步。";
 
 enum Flow {
     Continue,
@@ -989,7 +995,9 @@ impl Butler {
             results: Vec::new(),
             rounds: 0,
             max_rounds: self.budget.rounds,
-            tainted,
+            // A task can be tainted before its first round: a scheduled run
+            // of text that a tainted task stored.
+            tainted: tainted || task.tainted,
             insert_at: None,
             prefetched: HashMap::new(),
             halted: false,
@@ -1010,6 +1018,23 @@ impl Butler {
         token: &str,
     ) {
         if let Err(e) = self.approve_inner(id, step, responder, token).await {
+            self.storage_error(id, e).await;
+        }
+    }
+
+    /// Refuse the step a task is waiting to have approved. Bound exactly like
+    /// an approval (task, step, token, who submitted it, the expiry); the
+    /// step fails without running and the planner goes on from there.
+    /// Unlike approving an irreversible step, refusing needs no PIN: it makes
+    /// nothing happen.
+    pub async fn reject_with_token(
+        &self,
+        id: TaskId,
+        step: usize,
+        responder: &Intent,
+        token: &str,
+    ) {
+        if let Err(e) = self.reject_inner(id, step, responder, token).await {
             self.storage_error(id, e).await;
         }
     }
@@ -1081,6 +1106,47 @@ impl Butler {
         let task = self.transition(id, TaskState::Running, None)?;
         if task.state != TaskState::Cancelled {
             self.drive(id, stack, Some(Resume::Approved(key)), &mut held)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn reject_inner(
+        &self,
+        id: TaskId,
+        step: usize,
+        responder: &Intent,
+        token: &str,
+    ) -> io::Result<()> {
+        let claimed = self
+            .claim(id, |task| {
+                crate::control::approval_matches_with_token(task, step, responder, now_ms(), token)
+            })
+            .await;
+        let Some((task, mut held)) = claimed else {
+            if let Some(task) = self.tasks.get(id) {
+                self.say(
+                    &task,
+                    ExpressionKind::Error,
+                    "拒绝无效：请核对任务、步骤、输入来源和五分钟有效期",
+                )
+                .await;
+            }
+            return Ok(());
+        };
+        let Some(stack) = self.paused_stack(id, &mut held).await? else {
+            return Ok(());
+        };
+        // The refusal is on record before the task acts on it.
+        self.audit.append(AuditEvent::HumanConfirmation {
+            intent: task.intent.id,
+            capability: task.steps[step].capability.clone(),
+            approved: false,
+        })?;
+        let key = task.steps[step].id.clone();
+        let task = self.transition(id, TaskState::Running, None)?;
+        if task.state != TaskState::Cancelled {
+            self.drive(id, stack, Some(Resume::Rejected(key)), &mut held)
                 .await?;
         }
         Ok(())
@@ -1601,6 +1667,21 @@ impl Butler {
             self.skip_rest(id, frame)?;
             return Ok(Flow::Continue);
         }
+        // The human refused this very step: it fails here, before policy,
+        // the judge or the capability is consulted, and like any failure it
+        // skips the rest of its round. The planner reads the refusal next.
+        if matches!(resume, Some(Resume::Rejected(refused)) if *refused == key) {
+            *resume = None;
+            let task = self.fail_step(id, frame, REFUSED_BY_USER)?;
+            self.say_for(
+                &task,
+                frame,
+                ExpressionKind::Report,
+                format!("你拒绝了 {}，这一步没有执行。", step.capability),
+            )
+            .await;
+            return Ok(Flow::Continue);
+        }
 
         let delegate = self
             .kernel()
@@ -1784,7 +1865,7 @@ impl Butler {
                         frame,
                         ExpressionKind::AskConfirm,
                         format!(
-                            "步骤 {number}：{} {}。原因：{reason}。{identity}五分钟内输入 /approve {id} {number} 批准，或 /cancel {id} 取消。可继续提交其他任务。",
+                            "步骤 {number}：{} {}。原因：{reason}。{identity}五分钟内输入 /approve {id} {number} 批准，/reject {id} {number} 只拒绝这一步，或 /cancel {id} 取消整个任务。可继续提交其他任务。",
                             step.capability, step.args,
                         ),
                     )
@@ -1828,6 +1909,11 @@ impl Butler {
                         t.question = Some(Question {
                             step: index,
                             text: question.clone(),
+                            // The asker's frame, or anything the task as a
+                            // whole has read, may have put these words in
+                            // its mouth. Asking stays allowed; the person
+                            // answering is told.
+                            tainted: frame.tainted || t.tainted,
                         });
                     }
                 })?;
@@ -1836,12 +1922,17 @@ impl Butler {
                     return Ok(Flow::Stop);
                 }
                 let number = task.question.as_ref().map_or(0, |q| q.step + 1);
+                let warning = if task.question.as_ref().is_some_and(|q| q.tainted) {
+                    agentos_runtime::OUTSIDE_CONTENT_QUESTION_WARNING
+                } else {
+                    ""
+                };
                 self.say_for(
                     &task,
                     frame,
                     ExpressionKind::AskInput,
                     format!(
-                        "{question}（输入 /reply {id} {number} 加上你的回答，或 /cancel {id} 取消。可继续提交其他任务。）"
+                        "{question}{warning}（输入 /reply {id} {number} 加上你的回答，或 /cancel {id} 取消。可继续提交其他任务。）"
                     ),
                 )
                 .await;
@@ -1956,6 +2047,11 @@ impl Butler {
         if started.state.is_terminal() {
             return Ok(Flow::Stop);
         }
+        // Capabilities that store content record whether this task has seen
+        // outside content, so what it writes keeps that provenance.
+        let invocation = Invocation {
+            tainted: frame.tainted,
+        };
         // Why the calls were abandoned: cancelled, out of time, or past the
         // limit of a single call; and whether one was let go still running.
         let mut over_budget = None;
@@ -1964,7 +2060,7 @@ impl Butler {
         let results = if capability.abortable() {
             tokio::select! {
                 biased;
-                results = run_together(&calls) => Some(results),
+                results = run_together(&calls, invocation) => Some(results),
                 () = self.stopped(id) => None,
                 limit = self.out_of_time(stretch) => {
                     over_budget = Some(limit);
@@ -1987,7 +2083,7 @@ impl Butler {
             let mut call = {
                 let capability = capability.clone();
                 let args = step.args.clone();
-                Box::pin(async move { capability.invoke(args).await })
+                Box::pin(async move { capability.invoke_with(args, invocation).await })
             };
             match self.budget.call {
                 None => Some(vec![call.await]),
@@ -2128,7 +2224,9 @@ impl Butler {
         // the rest of the task, and a delegate's taint flows back to its parent.
         // A failure counts too: its error text (an MCP tool's error content, a
         // plugin's stderr) can carry outside words to the planner just as well.
-        let untrusted = ran.untrusted;
+        // Content a tainted task stored (on the blackboard, in the notebook)
+        // counts as outside content when it is read back.
+        let untrusted = ran.untrusted || carries_taint(&value);
         if untrusted {
             frame.tainted = true;
         }
@@ -2425,9 +2523,12 @@ type Call = (Step, String, Arc<dyn Capability>);
 
 /// Run `calls` at the same time and return their results in order. A
 /// capability that panics takes the service down exactly as it would alone.
-async fn run_together(calls: &[Call]) -> Vec<Result<Value, CapabilityError>> {
+async fn run_together(
+    calls: &[Call],
+    invocation: Invocation,
+) -> Vec<Result<Value, CapabilityError>> {
     if let [(step, _, capability)] = calls {
-        return vec![capability.invoke(step.args.clone()).await];
+        return vec![capability.invoke_with(step.args.clone(), invocation).await];
     }
     // Dropping the set (the task was cancelled or ran out of time) aborts
     // every call still running: they are all abortable reads.
@@ -2435,7 +2536,7 @@ async fn run_together(calls: &[Call]) -> Vec<Result<Value, CapabilityError>> {
     for (index, (step, _, capability)) in calls.iter().enumerate() {
         let capability = capability.clone();
         let args = step.args.clone();
-        set.spawn(async move { (index, capability.invoke(args).await) });
+        set.spawn(async move { (index, capability.invoke_with(args, invocation).await) });
     }
     let mut results: Vec<Option<Result<Value, CapabilityError>>> =
         (0..calls.len()).map(|_| None).collect();

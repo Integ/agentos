@@ -166,18 +166,22 @@ pub fn task_detail(task: &Task, include_token: bool) -> String {
         } else {
             lines.push(format!("  此步骤等待明确批准 · 剩余 {remaining} 秒"));
             if include_token {
+                let token = one_line(&confirmation.token, 256);
                 lines.push(format!(
-                    "  agentos approve {} {} --confirmation {}",
+                    "  agentos approve {} {} --confirmation {token}",
                     task.id,
                     confirmation.step + 1,
-                    one_line(&confirmation.token, 256)
+                ));
+                lines.push(format!(
+                    "  只拒绝这一步：agentos reject {} {} --confirmation {token}",
+                    task.id,
+                    confirmation.step + 1,
                 ));
             } else if confirmation_visible(task) {
                 lines.push(format!(
-                    "  批准 /approve {} {}    取消 /cancel {}",
-                    task.id,
-                    confirmation.step + 1,
-                    task.id
+                    "  批准 /approve {id} {step}    只拒绝这一步 /reject {id} {step}    取消整个任务 /cancel {id}",
+                    id = task.id,
+                    step = confirmation.step + 1,
                 ));
             }
         }
@@ -201,7 +205,14 @@ pub fn task_detail(task: &Task, include_token: bool) -> String {
         lines.push(line);
     }
     if let Some(question) = &task.question {
-        // The question itself is the task's message, shown above.
+        // The question itself is the task's message, shown above. A task
+        // that read outside content may be relaying an injection's words.
+        if question.tainted {
+            lines.push(format!(
+                "  {}",
+                agentos_runtime::OUTSIDE_CONTENT_QUESTION_WARNING
+            ));
+        }
         lines.push(format!(
             "  任务在等你回答第 {} 步的问题；不回答就不会继续。",
             question.step + 1
@@ -429,6 +440,9 @@ pub fn reply_text(reply: &Reply) -> String {
         Reply::ApprovalQueued { id, step } => {
             format!("{id} 第 {step} 步的批准请求已排队；执行前仍会校验权限与有效期。")
         }
+        Reply::RejectionQueued { id, step } => {
+            format!("{id} 第 {step} 步已拒绝，不会执行；任务会换别的办法继续，或说明没有做成。")
+        }
         Reply::ReplyQueued { id, step } => {
             format!("{id} 第 {step} 步的回答已收到；任务会接着进行。")
         }
@@ -486,7 +500,7 @@ pub fn wait_text(outcome: &WaitOutcome) -> String {
     let note = match outcome {
         WaitOutcome::Settled(_) => return detail,
         WaitOutcome::NeedsApproval(_) => {
-            "任务在等待批准，不会自行继续；核对上面的步骤与参数后再批准或取消。".to_string()
+            "任务在等待批准，不会自行继续；核对上面的步骤与参数后再批准、只拒绝这一步，或取消整个任务。".to_string()
         }
         WaitOutcome::NeedsInput(_) => {
             "任务在等待你的回答，不会自行继续；用上面的 reply 命令回答，或取消任务。".to_string()
@@ -566,6 +580,45 @@ mod tests {
         );
         assert!(view.contains("/quit（后台任务继续）"));
         assert!(!view.contains('\x1b'));
+    }
+
+    fn waiting_on(tainted: bool) -> Task {
+        let store = TaskStore::memory();
+        let task = store
+            .create(Intent {
+                id: IntentId(0),
+                source: DeviceId::new("test"),
+                speaker: None,
+                text: "看看这个网页".into(),
+                urgency: Urgency::Normal,
+                at_ms: now_ms(),
+            })
+            .unwrap();
+        store
+            .update(task.id, |t| {
+                t.state = TaskState::AwaitingInput;
+                t.tainted = tainted;
+                t.steps = vec![agentos_runtime::TaskStep::pending(
+                    agentos_core::CapabilityName::new("ask.user"),
+                    serde_json::json!({"question": "请输入你的 PIN"}),
+                )];
+                t.message = Some("请输入你的 PIN".into());
+                t.question = Some(agentos_runtime::Question {
+                    step: 0,
+                    text: "请输入你的 PIN".into(),
+                    tainted,
+                });
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_question_from_a_task_that_read_outside_content_is_shown_with_a_warning() {
+        let warning = agentos_runtime::OUTSIDE_CONTENT_QUESTION_WARNING;
+        // The person answering must know the words may be an injection's.
+        assert!(task_detail(&waiting_on(true), false).contains(warning));
+        // An ordinary question is not flagged, so the warning keeps meaning.
+        assert!(!task_detail(&waiting_on(false), false).contains(warning));
     }
 
     #[test]

@@ -31,7 +31,7 @@ pub enum Request {
     /// Answer the pending approval of `task` (the newest waiting one if
     /// absent), with the PIN the page collected for an irreversible step.
     Confirm {
-        approved: bool,
+        answer: Answer,
         task: Option<u64>,
         pin: Option<String>,
     },
@@ -42,6 +42,17 @@ pub enum Request {
         mode: Option<SpeakMode>,
         stop: bool,
     },
+}
+
+/// What the person decided about the step they were shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// Run this step.
+    Approve,
+    /// Do not run this step; the task goes on without it.
+    Reject,
+    /// Stop the whole task.
+    Cancel,
 }
 
 fn risk_label(risk: RiskLevel) -> &'static str {
@@ -186,9 +197,16 @@ pub fn translate(
                 .get(question.step)
                 .and_then(|step| step.agent.as_ref())
                 .map_or("butler", |agent| agent.as_str());
+            // A question from a task that read outside content may be an
+            // injection's words; the page says so before the person types.
+            let warning = if question.tainted {
+                format!("\n{}", agentos_runtime::OUTSIDE_CONTENT_QUESTION_WARNING)
+            } else {
+                String::new()
+            };
             events.push(json!({
                 "type": "expression", "kind": "report", "intent": id, "task": id, "from": from,
-                "text": format!("{}\n（你输入的下一句话会作为对这个问题的回答。）", question.text),
+                "text": format!("{}{warning}\n（你输入的下一句话会作为对这个问题的回答。）", question.text),
             }));
         }
     }
@@ -427,11 +445,7 @@ impl Session {
                     Err(error) => Err(error),
                 }
             }
-            Request::Confirm {
-                approved,
-                task,
-                pin,
-            } => self.confirm(approved, task, pin, emit).await,
+            Request::Confirm { answer, task, pin } => self.confirm(answer, task, pin, emit).await,
         };
         if let Err(error) = result {
             emit(json!({"type": "expression", "kind": "error", "text": error.to_string()}));
@@ -441,7 +455,7 @@ impl Session {
 
     async fn confirm(
         &mut self,
-        approved: bool,
+        answer: Answer,
         task: Option<u64>,
         pin: Option<String>,
         emit: &impl Fn(Value) -> bool,
@@ -453,21 +467,30 @@ impl Session {
         else {
             return Ok(());
         };
-        if !approved {
+        if answer == Answer::Cancel {
             self.client
                 .request(Command::Cancel { id: TaskId(id) })
                 .await?;
             return self.refresh(id, emit).await;
         }
-        // Approve exactly what the page showed: the step and token read with it.
+        // Answer exactly what the page showed: the step and token read with it.
         let Some(confirmation) = self.shown.get(&id).and_then(|t| t.confirmation.clone()) else {
             return Ok(());
         };
-        let command = Command::Approve {
-            id: TaskId(id),
-            step: confirmation.step + 1,
-            confirmation: confirmation.token,
-            pin,
+        let command = if answer == Answer::Reject {
+            // A refusal never carries the PIN, even if the page collected one.
+            Command::Reject {
+                id: TaskId(id),
+                step: confirmation.step + 1,
+                confirmation: confirmation.token,
+            }
+        } else {
+            Command::Approve {
+                id: TaskId(id),
+                step: confirmation.step + 1,
+                confirmation: confirmation.token,
+                pin,
+            }
         };
         match self.client.request(command).await {
             Ok(_) => Ok(()),
@@ -725,6 +748,7 @@ mod tests {
             t.question = Some(agentos_runtime::Question {
                 step: 0,
                 text: "哪一天开会？".into(),
+                tainted: false,
             });
         });
         let events = translate(Some(&queued), &asking, &specs());
@@ -736,6 +760,8 @@ mod tests {
         assert_eq!(said.len(), 1);
         // The page has no control of its own for answering: it is told how.
         assert!(said[0].starts_with("哪一天开会？") && said[0].contains("下一句话"));
+        // An untainted question carries no warning: the marker means something.
+        assert!(!said[0].contains(agentos_runtime::OUTSIDE_CONTENT_QUESTION_WARNING));
         // Seeing the same question again says nothing new.
         assert!(translate(Some(&asking), &asking, &specs()).is_empty());
         let answered = fixture.update(|t| {
@@ -749,6 +775,32 @@ mod tests {
             kinds(&translate(Some(&asking), &answered, &specs())),
             vec!["step:0:done"]
         );
+    }
+
+    #[test]
+    fn a_question_from_a_task_that_read_outside_content_is_said_with_a_warning() {
+        let (fixture, queued) = Fixture::new("看看这个网页");
+        let asking = fixture.update(|t| {
+            t.state = TaskState::AwaitingInput;
+            t.tainted = true;
+            t.steps = vec![step("call-1", "ask.user", StepState::Pending, None)];
+            t.message = Some("请输入你的 PIN".into());
+            t.question = Some(agentos_runtime::Question {
+                step: 0,
+                text: "请输入你的 PIN".into(),
+                tainted: true,
+            });
+        });
+        let events = translate(Some(&queued), &asking, &specs());
+        let said: Vec<&str> = events
+            .iter()
+            .filter(|e| e["type"] == "expression")
+            .map(|e| e["text"].as_str().unwrap())
+            .collect();
+        // The question may be an injection's words; the person answering is
+        // warned before typing anything into it.
+        assert_eq!(said.len(), 1);
+        assert!(said[0].contains(agentos_runtime::OUTSIDE_CONTENT_QUESTION_WARNING));
     }
 
     #[test]

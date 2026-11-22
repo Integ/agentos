@@ -17,7 +17,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use agentos_core::{Capability, CapabilityError, CapabilityName, CapabilitySpec, RiskLevel};
+use agentos_core::{
+    Capability, CapabilityError, CapabilityName, CapabilitySpec, Invocation, RiskLevel,
+};
 use async_trait::async_trait;
 use jiff::civil::{DateTime, Time};
 use jiff::tz::TimeZone;
@@ -60,6 +62,11 @@ pub struct Schedule {
     /// When it is next due, Unix milliseconds.
     pub next_ms: u64,
     pub created_ms: u64,
+    /// Created by a task that had read outside content. Its runs start
+    /// tainted, so text an injection got past the human once cannot act
+    /// unchecked every day after.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tainted: bool,
     /// What happened the last time it was due: the task it became, or why
     /// it did not run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,6 +129,7 @@ impl ScheduleStore {
         at: &str,
         repeat: Repeat,
         now_ms: u64,
+        tainted: bool,
     ) -> Result<Schedule, String> {
         let text = text.trim();
         if text.is_empty() || text.chars().count() > MAX_TEXT_CHARS {
@@ -139,6 +147,7 @@ impl ScheduleStore {
             repeat,
             next_ms,
             created_ms: now_ms,
+            tainted,
             last: None,
         };
         book.schedules.push(schedule.clone());
@@ -373,6 +382,10 @@ impl Capability for ScheduleCreate {
     }
 
     async fn invoke(&self, args: Value) -> Result<Value, CapabilityError> {
+        self.invoke_with(args, Invocation::default()).await
+    }
+
+    async fn invoke_with(&self, args: Value, call: Invocation) -> Result<Value, CapabilityError> {
         let o = object(&args, &["text", "at", "repeat"])?;
         let repeat = match o.get("repeat").and_then(Value::as_str) {
             None | Some("once") => Repeat::Once,
@@ -391,6 +404,7 @@ impl Capability for ScheduleCreate {
                 string(o, "at")?,
                 repeat,
                 agentos_core::now_ms(),
+                call.tainted,
             )
             .map_err(CapabilityError::Failed)?;
         let mut out = self.store.describe(&s);
@@ -523,10 +537,10 @@ mod tests {
         let store = ScheduleStore::open_in(&dir, TimeZone::UTC).unwrap();
         let now = morning();
         let daily = store
-            .create("看看天气", "08:00", Repeat::Daily, now)
+            .create("看看天气", "08:00", Repeat::Daily, now, false)
             .unwrap();
         let once = store
-            .create("提醒我开会", "09:00", Repeat::Once, now)
+            .create("提醒我开会", "09:00", Repeat::Once, now, false)
             .unwrap();
         assert!(store.take_due(now).is_empty());
         let due = store.take_due(now + 2 * 60 * MINUTE + 1);
@@ -549,7 +563,7 @@ mod tests {
         let store = ScheduleStore::open_in(&dir, TimeZone::UTC).unwrap();
         let now = morning();
         let s = store
-            .create("看看天气", "08:00", Repeat::Daily, now)
+            .create("看看天气", "08:00", Repeat::Daily, now, false)
             .unwrap();
         // Off for three days: no burst of make-up runs, and an honest note.
         let later = now + 3 * DAY + 2 * 60 * MINUTE;

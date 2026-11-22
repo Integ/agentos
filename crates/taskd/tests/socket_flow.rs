@@ -642,6 +642,82 @@ async fn approval_uses_the_concrete_token_across_connections_and_is_single_use()
 }
 
 #[tokio::test]
+async fn a_rejection_over_the_socket_is_bound_to_its_prompt_and_never_runs_the_step() {
+    let capability = external();
+    let harness = Harness::start(Box::new(ExternalPlanner), vec![capability.clone()]).await;
+    let mut client = harness.connect().await;
+    let id = client.submit("send test").await;
+    let task = harness.wait(id, TaskState::AwaitingConfirmation).await;
+    let token = task.confirmation.unwrap().token;
+    // Guards "approval is bound to a concrete request", which a refusal
+    // shares: a wrong token or step is refused and the task keeps waiting.
+    for (step, confirmation, code) in [
+        (1, "wrong".to_string(), "invalid_confirmation"),
+        (2, token.clone(), "invalid_confirmation"),
+        (0, token.clone(), "invalid_argument"),
+    ] {
+        assert_eq!(
+            error_code(
+                client
+                    .request(Command::Reject {
+                        id,
+                        step,
+                        confirmation,
+                    })
+                    .await
+            ),
+            code
+        );
+    }
+    assert_eq!(
+        harness.tasks.get(id).unwrap().state,
+        TaskState::AwaitingConfirmation
+    );
+    assert!(matches!(
+        client
+            .ok(Command::Reject {
+                id,
+                step: 1,
+                confirmation: token.clone(),
+            })
+            .await,
+        Reply::RejectionQueued { step: 1, .. }
+    ));
+    // This planner has nothing else to try: the task ends, and since the
+    // last thing attempted did not happen it is not shown as a success.
+    let ended = harness.wait(id, TaskState::Failed).await;
+    assert_eq!(ended.steps[0].state, StepState::Failed);
+    assert_eq!(capability.calls.load(Ordering::SeqCst), 0);
+    // Single use: the prompt is gone, so neither answer is accepted again.
+    assert_eq!(
+        error_code(
+            client
+                .request(Command::Reject {
+                    id,
+                    step: 1,
+                    confirmation: token.clone(),
+                })
+                .await
+        ),
+        "invalid_confirmation"
+    );
+    assert_eq!(
+        error_code(
+            client
+                .request(Command::Approve {
+                    id,
+                    step: 1,
+                    confirmation: token,
+                    pin: None,
+                })
+                .await
+        ),
+        "invalid_confirmation"
+    );
+    assert_eq!(capability.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn a_full_queue_creates_no_phantom_tasks_and_cancellation_remains_available() {
     let gate = Arc::new(Gate::default());
     let mut harness = Harness::start(Box::new(SlowPlanner(gate.clone())), vec![]).await;
@@ -1573,6 +1649,11 @@ async fn an_outside_caller_reaches_only_what_it_was_given_and_only_its_own_tasks
             confirmation: "x".into(),
             pin: None,
         },
+        Command::Reject {
+            id: TaskId(1),
+            step: 1,
+            confirmation: "x".into(),
+        },
         Command::Preauthorize {
             capability: CapabilityName::new("notes.append"),
             caller: Some("helper".into()),
@@ -1838,6 +1919,51 @@ async fn a_due_schedule_becomes_a_task_of_its_own_and_runs_once() {
     assert!(schedules.list().is_empty());
     sleep(Duration::from_millis(100)).await;
     assert!(tasks.get(TaskId(2)).is_none());
+    stop.send(()).unwrap();
+    running.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_schedule_a_tainted_task_made_runs_tainted() {
+    let dir = TempDir::new();
+    let now = agentos_core::now_ms();
+    std::fs::write(
+        dir.0.join(agentos_services::schedule::FILE),
+        serde_json::to_vec(&json!({
+            "next_id": 1,
+            "schedules": [{"id": "sched-1", "text": "记一下 喝水", "repeat": "once",
+                           "next_ms": now - 1000, "created_ms": now - 60_000, "tainted": true}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let schedules = Arc::new(agentos_services::schedule::ScheduleStore::open(&dir.0).unwrap());
+    let (service, tasks) = build_service(&dir, Box::new(RulePlanner), vec![]);
+    let server = service
+        .with_schedules(schedules)
+        .bind(&dir.0.join("control.sock"))
+        .await
+        .unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let running = tokio::spawn(server.run_until(async {
+        let _ = stopped.await;
+    }));
+    let task = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(task) = tasks.get(TaskId(1)) {
+                if task.state == TaskState::AwaitingConfirmation || task.state.is_terminal() {
+                    return task;
+                }
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the schedule ran");
+    // Guards stored taint: words a tainted task planted for later carry its
+    // taint, so even an ordinary L1 note waits for the human.
+    assert!(task.tainted);
+    assert_eq!(task.state, TaskState::AwaitingConfirmation);
     stop.send(()).unwrap();
     running.await.unwrap().unwrap();
 }

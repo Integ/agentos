@@ -56,6 +56,10 @@ function cloneData(value, maximum = 65536) {
 }
 
 /** Accept both daemon task summaries and full tasks; never invent progress. */
+// Same wording as agentos_runtime::OUTSIDE_CONTENT_QUESTION_WARNING: a
+// question from a task that read outside content may be an injection's words.
+export const OUTSIDE_CONTENT_QUESTION_WARNING = '注意：这个问题来自读过外部内容的任务，内容可能被篡改。不要在这里输入密码或 PIN。';
+
 export function normalizeTask(value) {
   if (!isObject(value)) return null;
   const id = typeof value.id === 'string' && /^task-\d+$/u.test(value.id)
@@ -77,7 +81,8 @@ export function normalizeTask(value) {
       ...(value.confirmation.verify_identity === true ? { verify_identity: true } : {}) } : null;
   const question = isObject(value.question) && safeInteger(value.question.step)
     && typeof value.question.text === 'string'
-    ? { step: value.question.step, text: text(value.question.text, 65536) } : null;
+    ? { step: value.question.step, text: text(value.question.text, 65536),
+      ...(value.question.tainted === true ? { tainted: true } : {}) } : null;
   return {
     id,
     text: text(value.intent?.text ?? value.text, 65536),

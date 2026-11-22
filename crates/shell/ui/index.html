@@ -175,7 +175,8 @@ input { font-family: inherit; }
 #confirm dd { margin: 0; text-align: right; word-break: break-all; white-space: pre-wrap; }
 #confirm .actions { display: flex; gap: 12px; }
 #confirm .actions button { flex: 1; height: 46px; border: 0; border-radius: 23px; font-size: 15px; font-weight: 600; }
-#c-cancel { background: rgba(255,255,255,.16); box-shadow: inset 0 1px 0 rgba(255,255,255,.25); }
+#c-reject, #c-stop { background: rgba(255,255,255,.16); box-shadow: inset 0 1px 0 rgba(255,255,255,.25); }
+#c-stop { flex: .8 !important; background: rgba(0,0,0,.18); }
 #c-approve { background: var(--r3); box-shadow: inset 0 1px 0 rgba(255,255,255,.35); }
 #c-approve.mild { background: var(--accent); }
 #confirm .hint { text-align: center; font-size: 12px; color: var(--text-3); }
@@ -483,7 +484,8 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
       <div id="c-pin-err" role="alert"></div>
     </div>
     <div class="actions">
-      <button id="c-cancel">取消</button>
+      <button id="c-stop" title="整个任务停下，后续步骤都不再执行">停止任务</button>
+      <button id="c-reject" title="只是这一步不执行，任务换别的办法继续">拒绝这一步</button>
       <button id="c-approve">确认执行</button>
     </div>
     <div class="hint" id="c-hint"></div>
@@ -740,15 +742,15 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
     $("#c-rows").replaceChildren(...rows.map(([k, v]) => { const d = el("div"); const dd = el("dd", k === "能力" ? "mono" : null, v); d.append(el("dt", null, k), dd); return d; }));
     $("#c-approve").classList.toggle("mild", !l3);
     let left = CONFIRM_SECONDS;
-    const hint = () => { $("#c-hint").textContent = `Esc 取消 · ${left} 秒内不回应视为拒绝 · 决定会写入审计日志`; };
+    const hint = () => { $("#c-hint").textContent = `Esc 拒绝这一步 · ${left} 秒内不回应视为拒绝 · 决定会写入审计日志`; };
     hint();
     clearInterval(state.timer);
-    state.timer = setInterval(() => { left -= 1; if (left <= 0) answer(false); else hint(); }, 1000);
+    state.timer = setInterval(() => { left -= 1; if (left <= 0) answer("reject"); else hint(); }, 1000);
     $("#scrim").classList.add("open");
     $("#c-pinbox").hidden = !c.pin_required;
     $("#c-pin").value = "";
     $("#c-pin-err").textContent = c.pin_error || "";
-    if (c.pin_required) $("#c-pin").focus(); else $("#c-cancel").focus();
+    if (c.pin_required) $("#c-pin").focus(); else $("#c-reject").focus();
     renderStatus();
   }
   function closeConfirm() {
@@ -756,9 +758,12 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
     state.confirm = null;
     $("#scrim").classList.remove("open");
   }
-  function answer(approved) {
+  // "approve" runs the step, "reject" refuses only this step and lets the task
+  // go on without it, "cancel" stops the whole task.
+  function answer(choice) {
     if (!state.confirm) return;
     const c = state.confirm;
+    const approved = choice === "approve";
     let pin;
     if (approved && c.pin_required) {
       pin = $("#c-pin").value.trim();
@@ -769,8 +774,8 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
     clearInterval(state.timer);
     state.confirm = null;
     $("#scrim").classList.remove("open");
-    bubble("note", approved ? "你批准了这一步" : "你取消了这一步");
-    send(pin ? { type: "confirm", approved, task: c.task, pin } : { type: "confirm", approved, task: c.task });
+    bubble("note", { approve: "你批准了这一步", reject: "你拒绝了这一步，任务会换别的办法继续", cancel: "你停止了这个任务" }[choice]);
+    send(pin ? { type: "confirm", answer: choice, task: c.task, pin } : { type: "confirm", answer: choice, task: c.task });
     renderStatus();
     $("#intent").focus();
   }
@@ -884,12 +889,13 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
     if (b.dataset.accent) setAccent(b.dataset.accent);
     if (b.dataset.speak) send({ type: "speech", mode: b.dataset.speak });
   });
-  $("#c-cancel").addEventListener("click", () => answer(false));
-  $("#c-approve").addEventListener("click", () => answer(true));
-  $("#c-pin").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); answer(true); } });
+  $("#c-reject").addEventListener("click", () => answer("reject"));
+  $("#c-stop").addEventListener("click", () => answer("cancel"));
+  $("#c-approve").addEventListener("click", () => answer("approve"));
+  $("#c-pin").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); answer("approve"); } });
   document.addEventListener("keydown", (e) => {
     if (SA.open) return;
-    if (state.confirm && e.key === "Escape") { e.preventDefault(); answer(false); }
+    if (state.confirm && e.key === "Escape") { e.preventDefault(); answer("reject"); }
     else if (e.key === "Escape" && state.voice.speaking) send({ type: "speech", action: "stop" });
     else if (e.key === "Escape") { $("#settings").classList.remove("open"); closeSysmenu(); }
   });
@@ -1460,7 +1466,7 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
     if (msg.type === "system") { bubble("note", `演示模式：这里会执行系统操作 ${msg.action}`); return; }
     if (msg.type === "confirm") {
       const p = demoPending; if (!p) return;
-      if (!msg.approved) { receive({ type: "step", intent: p.id, index: p.i, status: "cancelled" }); receive({ type: "expression", kind: "report", intent: p.id, text: "已取消 notes.clear，计划中止" }); receive({ type: "done", intent: p.id }); demoPending = null; return; }
+      if (msg.answer !== "approve") { receive({ type: "step", intent: p.id, index: p.i, status: "cancelled" }); receive({ type: "expression", kind: "report", intent: p.id, text: msg.answer === "reject" ? "你拒绝了 notes.clear，这一步没有执行" : "已取消 notes.clear，计划中止" }); receive({ type: "done", intent: p.id }); demoPending = null; return; }
       demoPending = "approved"; demoRun(p.id, p.steps, p.i); return;
     }
     const id = ++demoId, text = msg.text;
