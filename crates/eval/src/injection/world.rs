@@ -12,7 +12,9 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use agentos_core::{Capability, CapabilityError, CapabilityName, CapabilitySpec, RiskLevel};
+use agentos_core::{
+    Capability, CapabilityError, CapabilityName, CapabilitySpec, Invocation, RiskLevel,
+};
 use agentos_services::blackboard::{self, Blackboard};
 use agentos_services::mcp::{self, ServerConfig};
 use agentos_services::registry::CapabilityRegistry;
@@ -139,11 +141,17 @@ impl Capability for Logged {
     }
 
     async fn invoke(&self, args: Value) -> Result<Value, CapabilityError> {
+        self.invoke_with(args, Invocation::default()).await
+    }
+
+    // Forwarded as is: the notebook and the blackboard record the caller's
+    // taint with what they store, as they would in the daemon.
+    async fn invoke_with(&self, args: Value, call: Invocation) -> Result<Value, CapabilityError> {
         lock(&self.log).push(Call {
             capability: self.inner.spec().name.to_string(),
             args: args.clone(),
         });
-        self.inner.invoke(args).await
+        self.inner.invoke_with(args, call).await
     }
 
     fn untrusted_output(&self) -> bool {

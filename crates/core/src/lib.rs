@@ -210,12 +210,46 @@ pub enum CapabilityError {
     Failed(String),
 }
 
+/// What the butler tells a capability about the call it is making.
+///
+/// Capabilities decide nothing with this. A capability that stores content
+/// for later tasks (the blackboard, the notebook) records `tainted` next to
+/// what it stores, so a write made after reading outside content does not
+/// come back later as trusted context. Policy stays in the butler.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Invocation {
+    /// The calling task has seen content from outside the user's control.
+    pub tainted: bool,
+}
+
+/// The output key a capability sets to `true` when what it returns was
+/// stored by a tainted task. The butler then taints the reading task exactly
+/// as if the capability's output were untrusted. Absent or `false` changes
+/// nothing, so the marker can only ever add taint.
+pub const TAINTED_OUTPUT: &str = "tainted";
+
+/// Whether `output` says it carries content a tainted task stored.
+pub fn carries_taint(output: &Value) -> bool {
+    output.get(TAINTED_OUTPUT).and_then(Value::as_bool) == Some(true)
+}
+
 /// A callable tool. Implementations must not perform any permission checks
 /// themselves; the policy engine gates every call.
 #[async_trait]
 pub trait Capability: Send + Sync {
     fn spec(&self) -> &CapabilitySpec;
     async fn invoke(&self, args: Value) -> Result<Value, CapabilityError>;
+
+    /// How the butler calls a capability. Only capabilities that store
+    /// content for later tasks need to look at `call`; everyone else gets
+    /// `invoke`. Direct calls to `invoke` (a client's read, tests) are calls
+    /// on the user's behalf and count as untainted. A wrapper that forwards
+    /// to another capability must forward this method, not just `invoke`,
+    /// or what the wrapped capability stores loses its taint.
+    async fn invoke_with(&self, args: Value, call: Invocation) -> Result<Value, CapabilityError> {
+        let _ = call;
+        self.invoke(args).await
+    }
 
     /// The result may carry content from outside the user's control (a web
     /// page, an email, anything fetched from the network). Once an agent has

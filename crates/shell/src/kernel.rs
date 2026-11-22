@@ -197,9 +197,16 @@ pub fn translate(
                 .get(question.step)
                 .and_then(|step| step.agent.as_ref())
                 .map_or("butler", |agent| agent.as_str());
+            // A question from a task that read outside content may be an
+            // injection's words; the page says so before the person types.
+            let warning = if question.tainted {
+                format!("\n{}", agentos_runtime::OUTSIDE_CONTENT_QUESTION_WARNING)
+            } else {
+                String::new()
+            };
             events.push(json!({
                 "type": "expression", "kind": "report", "intent": id, "task": id, "from": from,
-                "text": format!("{}\n（你输入的下一句话会作为对这个问题的回答。）", question.text),
+                "text": format!("{}{warning}\n（你输入的下一句话会作为对这个问题的回答。）", question.text),
             }));
         }
     }
@@ -741,6 +748,7 @@ mod tests {
             t.question = Some(agentos_runtime::Question {
                 step: 0,
                 text: "哪一天开会？".into(),
+                tainted: false,
             });
         });
         let events = translate(Some(&queued), &asking, &specs());
@@ -752,6 +760,8 @@ mod tests {
         assert_eq!(said.len(), 1);
         // The page has no control of its own for answering: it is told how.
         assert!(said[0].starts_with("哪一天开会？") && said[0].contains("下一句话"));
+        // An untainted question carries no warning: the marker means something.
+        assert!(!said[0].contains(agentos_runtime::OUTSIDE_CONTENT_QUESTION_WARNING));
         // Seeing the same question again says nothing new.
         assert!(translate(Some(&asking), &asking, &specs()).is_empty());
         let answered = fixture.update(|t| {
@@ -765,6 +775,32 @@ mod tests {
             kinds(&translate(Some(&asking), &answered, &specs())),
             vec!["step:0:done"]
         );
+    }
+
+    #[test]
+    fn a_question_from_a_task_that_read_outside_content_is_said_with_a_warning() {
+        let (fixture, queued) = Fixture::new("看看这个网页");
+        let asking = fixture.update(|t| {
+            t.state = TaskState::AwaitingInput;
+            t.tainted = true;
+            t.steps = vec![step("call-1", "ask.user", StepState::Pending, None)];
+            t.message = Some("请输入你的 PIN".into());
+            t.question = Some(agentos_runtime::Question {
+                step: 0,
+                text: "请输入你的 PIN".into(),
+                tainted: true,
+            });
+        });
+        let events = translate(Some(&queued), &asking, &specs());
+        let said: Vec<&str> = events
+            .iter()
+            .filter(|e| e["type"] == "expression")
+            .map(|e| e["text"].as_str().unwrap())
+            .collect();
+        // The question may be an injection's words; the person answering is
+        // warned before typing anything into it.
+        assert_eq!(said.len(), 1);
+        assert!(said[0].contains(agentos_runtime::OUTSIDE_CONTENT_QUESTION_WARNING));
     }
 
     #[test]

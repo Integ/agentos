@@ -1,4 +1,4 @@
-import { classifyIntent, composeScene, validateScene, validateModelScene, bindModelScene } from '/scene.js';
+import { classifyIntent, composeScene, validateScene, validateModelScene, bindModelScene, OUTSIDE_CONTENT_QUESTION_WARNING } from '/scene.js';
 import { LayoutCoordinator } from '/layout-client.js';
 import { RealtimeVoiceSession } from '/realtime-voice.js';
 import { VoiceToolRouter } from '/voice-tools.js';
@@ -217,7 +217,7 @@ function renderTaskDetail(task) {
   const usage = used?.model_calls > 0 ? `<p class="inline-note">用量：${e(used.model_calls)} 次模型请求 · 输入 ${e(used.input_tokens)} / 输出 ${e(used.output_tokens)} token · 执行 ${e(Math.floor((used.active_ms || 0) / 1000))} 秒${used.unmetered_calls > 0 ? `（其中 ${e(used.unmetered_calls)} 次没有报告用量，token 数只是下限）` : ''}</p>` : '';
   // The question is the task's message, shown above; the answer goes to
   // exactly this task and this step.
-  const question = task.state === 'awaiting_input' && task.question ? `<section class="approval-panel"><h3>它在等你的回答。</h3><p>不回答，这个任务就不会继续；你也可以停止它。</p><label class="count-label" for="reply-text">你的回答</label> <textarea id="reply-text" rows="3" maxlength="4000"></textarea><button class="primary-button" id="reply-task" data-task-id="${e(id)}" data-step="${e(task.question.step + 1)}">回答第 ${task.question.step + 1} 步的问题</button></section>` : '';
+  const question = task.state === 'awaiting_input' && task.question ? `<section class="approval-panel"><h3>它在等你的回答。</h3>${task.question.tainted ? `<p class="question-warning" role="note">${e(OUTSIDE_CONTENT_QUESTION_WARNING)}</p>` : ''}<p>不回答，这个任务就不会继续；你也可以停止它。</p><label class="count-label" for="reply-text">你的回答</label> <textarea id="reply-text" rows="3" maxlength="4000"></textarea><button class="primary-button" id="reply-task" data-task-id="${e(id)}" data-step="${e(task.question.step + 1)}">回答第 ${task.question.step + 1} 步的问题</button></section>` : '';
   return `<div class="detail-kicker">${e(id.toUpperCase())} <span> / ${e(stateLabels[task.state] || task.state)}</span></div><h2>${e(taskText(task))}</h2>${task.message ? `<p class="detail-message">${e(task.message)}</p>` : ''}${stepRows ? `<div class="steps">${stepRows}</div>` : ''}${noteResult ? `<div class="result-notes"><span class="eyebrow">返回的笔记</span>${noteResult.result.notes.length ? noteResult.result.notes.map(n => `<p>${e(n)}</p>`).join('') : '<p>笔记本是空的。</p>'}</div>` : ''}${approval}${question}${usage}${state.connected && !terminalStates.has(task.state) ? `<div style="margin-top:20px"><button class="secondary-button" id="cancel-task" data-task-id="${e(id)}">停止后续步骤</button></div>` : ''}${task.local ? '<p class="inline-note">此操作在浏览器内完成，不属于后台任务。</p>' : ''}`;
 }
 function renderActivity(scene) {
@@ -465,7 +465,8 @@ function processTask(task) {
   }
   else if (task.state === 'awaiting_input' && `${task.id}:${task.question?.step}` !== lastAnnouncedQuestion) {
     lastAnnouncedQuestion = `${task.id}:${task.question?.step}`;
-    respond(`${task.question?.text || task.message || '我需要你补充一点信息。'} 请在任务详情里回答。`, true);
+    const warning = task.question?.tainted ? ` ${OUTSIDE_CONTENT_QUESTION_WARNING}` : '';
+    respond(`${task.question?.text || task.message || '我需要你补充一点信息。'}${warning} 请在任务详情里回答。`, true);
   }
   else if (terminalStates.has(task.state) && `${task.id}:${task.state}` !== lastAnnouncedTask) {
     lastAnnouncedTask = `${task.id}:${task.state}`;

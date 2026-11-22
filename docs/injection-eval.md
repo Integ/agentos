@@ -287,7 +287,10 @@ OPENAI_API_KEY=… cargo run --release -p agentos-eval -- --planner openai --mod
 
 **建议。** 要不要让“被用户拒绝”不算“最后一步没做成”，是一个取舍：放宽后回答类任务能记为成功，但用户拒绝了自己真正要做的那一步、规划器说一句“好的，没做”时，任务也会显示为成功。现在保持严格，界面上看到的是“失败”加上正确的回答。
 
-### 4. 污点不随数据保存下来
+### 4. 污点不随数据保存下来（已修复）
+
+**已修复。** 黑板条目和笔记记下写入它的任务是否受污染：黑板摘要不再附上受污染的条目，`board.read`、`notes.list` 读到它们会污染读的任务。下面的验证已做成测试 `an_approved_write_in_a_tainted_task_does_not_become_trusted_context_for_later_tasks`（`crates/eval/tests/injection_flow.rs`）。设计见 [architecture.md](architecture.md)（污点跟着存储走）。
+
 
 **现象。** 受污染任务里人批准过的写入，之后就是可信内容。黑板内容会进入以后每个任务的系统提示，那些任务却不受污染（`Butler::context` 只从同一线程此前的任务继承污点）；`notes.list` 的输出也不算不可信。一次草率的批准，就把一次性的注入变成长期指令。
 
@@ -302,6 +305,8 @@ OPENAI_API_KEY=… cargo run --release -p agentos-eval -- --planner openai --mod
 **证据。** 读代码得出（`Butler::advance` 里处理 `ask.user` 的分支），评测没有对它计数。
 
 **建议。** 受污染任务的提问标注“任务读过外部内容”。
+
+**状态：已修复。** 提问的 Agent 或任务读过外部内容时，任务的 `question` 带 `tainted: true`，终端、Web Shell、原生桌面和管家说的话都在问题旁提示不要在这里输入密码或 PIN。提问照样允许，策略不变。见 `a_question_asked_after_reading_outside_content_is_marked_and_still_asked`。
 
 ## 局限
 

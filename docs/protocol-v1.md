@@ -28,7 +28,7 @@
 
 信封还可以带一个可选的 `caller`，表示以某个已注册的外部调用方的身份发出请求；见“外部调用方”。
 
-`version` 是协议版本，与程序的语义版本号分开。v0.3 和 v0.4 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法；请求信封的 `caller`、`preauthorize` 的 `caller`，以及 `register_caller`、`callers`、`revoke_caller` 方法；`activity`、`voice`、`listen`、`speech` 方法，`activity` 的 `improvement` 条目，`watch` 的 `voice`，`submit` 和 `reply` 的 `spoken`，以及语音事件 `voice_state`、`voice_level`、`transcript`、`voice_notice`（只发给声明了 `voice` 的订阅）；`reject` 方法和它的回复 `rejection_queued`。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、`reject`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；客户端遇到旧服务拒绝 `reject` 时，只能退回 `cancel`（取消整个任务），不能改发 `approve`；不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
+`version` 是协议版本，与程序的语义版本号分开。v0.3 和 v0.4 实现支持协议 `1`；未知版本得到 `unsupported_version`。协议 `1` 内的新增是向后兼容的追加，晚于最初的 v0.3.0 加入的有：`read` 方法；`unhandled` 任务状态；步骤的 `id`、`agent` 字段和 `skipped` 状态；确认请求的 `verify_identity`；`approve` 的 `pin`；`reply` 方法；`awaiting_input` 任务状态；任务的 `thread` 和 `question` 字段，`question` 的 `tainted`；`submit` 和 `list` 的 `thread`；任务摘要的 `thread`；任务的 `usage`；`preauthorize`、`preauthorizations`、`revoke_preauthorization` 方法；请求信封的 `caller`、`preauthorize` 的 `caller`，以及 `register_caller`、`callers`、`revoke_caller` 方法；`activity`、`voice`、`listen`、`speech` 方法，`activity` 的 `improvement` 条目，`watch` 的 `voice`，`submit` 和 `reply` 的 `spoken`，以及语音事件 `voice_state`、`voice_level`、`transcript`、`voice_notice`（只发给声明了 `voice` 的订阅）；`reject` 方法和它的回复 `rejection_queued`。旧服务会以 `invalid_request` 拒绝 `read`、`reply`、`reject`、预授权的三个方法、带 `pin` 的 `approve` 和带 `thread` 的 `submit`/`list`；客户端遇到旧服务拒绝 `reject` 时，只能退回 `cancel`（取消整个任务），不能改发 `approve`；不认识 `awaiting_input` 的客户端应把它当作尚未结束的任务；严格解析的旧客户端需要升级后才能读取含这些新字段或新取值的任务。
 
 `id` 是客户端选择的无符号整数，仅用于关联响应，**不是幂等键**。重复发送同一个 `submit` 请求编号仍可能创建第二个任务。收到完整响应前连接断开时，结果可能已经落盘；客户端必须查询任务，不能自动重发变更请求。
 
@@ -111,6 +111,8 @@
 线程里此前的某个任务读过外部内容（`tainted`）时，接着它说的任务从一开始就是 `tainted`：它拿到的上文来自用户控制之外，之后有副作用的步骤都需要批准。其他线程只会被告知那个任务发生过，不会拿到它的结果。
 
 Agent 缺少只有用户知道的信息时可以提问。提问是任务的一步，能力名为 `ask.user`，参数是 `{"question": "..."}`。任务进入 `awaiting_input`，`question` 为 `{"step": 下标, "text": 问题}`，`message` 也是这个问题，被问的那一步保持 `pending`。
+
+提问时这一步的 Agent 或整个任务已经读过外部内容（`tainted`）时，`question` 带 `"tainted": true`：问题的措辞可能来自注入，比如索要密码或 PIN。客户端应在问题旁明确提示，不要在这里输入密码或 PIN。提问照样允许，回答方式不变。字段默认 `false`，为 `false` 时不出现；此前保存的任务没有这个字段，读作 `false`。不认识它的宽松客户端可以忽略，严格解析的旧客户端只会在问题被标记时遇到它。
 
 ```json
 {"version":1,"id":4,"command":{"method":"reply","id":1,"step":1,"text":"周三"}}
@@ -219,7 +221,7 @@ Agent 缺少只有用户知道的信息时可以提问。提问是任务的一�
 {"version":1,"id":9,"body":{"status":"ok","data":{"type":"value","capability":"notes.list","value":{"notes":["买牛奶"],"message":"1. 买牛奶"}}}}
 ```
 
-`args` 省略时为 `{}`，必须是 JSON 对象。`value` 是能力自己的返回值，结构由能力决定。
+`args` 省略时为 `{}`，必须是 JSON 对象。`value` 是能力自己的返回值，结构由能力决定。读到受污染的任务写下的内容时，`board.read`、`notes.list` 的 `value` 里多一个 `"tainted": true`；客户端可以据此提示用户这段内容来自外部，不认识它的客户端忽略即可。
 
 `read` 不创建任务，不经过规划器，不推进 revision，不产生变更事件，也不写审计记录：它和 `get`、`list` 一样，是同一系统用户对本机状态的查询，不是 Agent 的行为。因此它只对同时满足以下条件的能力开放：已授权给管家、风险为 L0 `read_only`、输出不属于不可信的外部内容（后者需要任务来承载污点）。其余能力返回 `not_readable`，必须通过 `submit` 提交意图，走规划、策略和审计。可读集合与 `capabilities` 的结果一致，插件被安装、停用或回滚后两者一起更新。
 
