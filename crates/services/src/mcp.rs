@@ -27,7 +27,9 @@
 //! - A tool's risk is `tools[name]`, else the server's `risk`, else **L2**
 //!   (ask every time). A server's `destructiveHint` can only raise it to L3;
 //!   `readOnlyHint` never lowers it.
-//! - Results are untrusted (they taint the task) unless `"trusted": true`.
+//! - Results are untrusted (they taint the task) unless `"trusted": true`,
+//!   and an untrusted server's tools are never below L2, whatever is
+//!   configured: what reaches outside can carry data out.
 //! - The server runs with a cleared environment (PATH, HOME, LANG and the
 //!   `env` given here), so it does not inherit the planner's API keys.
 
@@ -152,10 +154,21 @@ pub fn tool_risk(cfg: &ServerConfig, tool: &str, annotations: Option<&Value>) ->
         .and_then(|a| a.get("destructiveHint"))
         .and_then(Value::as_bool)
         == Some(true);
-    if destructive {
+    let risk = if destructive {
         RiskLevel::Irreversible
     } else {
         base
+    };
+    if cfg.trusted {
+        risk
+    } else {
+        // An untrusted server talks to something outside the user's control
+        // (that is why its results taint), so its arguments can leave the
+        // machine: a URL to fetch carries whatever the agent puts in it. L0
+        // means "read-only, local", and a tainted task only asks before L1+,
+        // so an L0 here would let an injection exfiltrate what the agent read
+        // without asking. Same floor as a plugin with network access.
+        risk.max(RiskLevel::External)
     }
 }
 
@@ -490,7 +503,7 @@ pub async fn register_all(reg: &mut CapabilityRegistry, cfg: &McpConfig) -> Vec<
             if sc.trusted {
                 ""
             } else {
-                "（结果视为不可信）"
+                "（结果视为不可信，风险至少 L2）"
             }
         ));
     }
@@ -598,7 +611,7 @@ for line in sys.stdin:
             env: HashMap::new(),
             risk: Some("L1".into()),
             tools: [("read".to_string(), "L0".to_string())].into(),
-            trusted: false,
+            trusted: true,
             disabled: false,
         };
         let ro = json!({"readOnlyHint": true});
@@ -615,6 +628,32 @@ for line in sys.stdin:
             ..sc
         };
         assert_eq!(tool_risk(&none, "x", Some(&ro)), RiskLevel::External);
+    }
+
+    #[test]
+    fn an_untrusted_servers_tools_never_go_below_l2_whatever_is_configured() {
+        // docs/mcp.md's fetch example as it used to read: "risk": "L0" and
+        // no "trusted". Guards "L0 is read-only and local": a tool that
+        // reaches outside could carry what a tainted task read out unasked.
+        let sc: ServerConfig = serde_json::from_value(json!({
+            "command": "uvx",
+            "args": ["mcp-server-fetch"],
+            "risk": "L0",
+            "tools": {"fetch_l1": "L1"}
+        }))
+        .unwrap();
+        assert_eq!(tool_risk(&sc, "fetch", None), RiskLevel::External);
+        assert_eq!(tool_risk(&sc, "fetch_l1", None), RiskLevel::External);
+        let destructive = json!({"destructiveHint": true});
+        assert_eq!(
+            tool_risk(&sc, "fetch", Some(&destructive)),
+            RiskLevel::Irreversible
+        );
+        let trusted = ServerConfig {
+            trusted: true,
+            ..sc
+        };
+        assert_eq!(tool_risk(&trusted, "fetch", None), RiskLevel::ReadOnly);
     }
 
     #[test]
@@ -645,18 +684,18 @@ for line in sys.stdin:
         let notes = register_all(&mut reg, &cfg).await;
         assert_eq!(
             notes,
-            vec!["MCP server Fake Srv：4 个工具（结果视为不可信）"]
+            vec!["MCP server Fake Srv：4 个工具（结果视为不可信，风险至少 L2）"]
         );
 
         let cap = |n: &str| reg.get(&CapabilityName::new(n)).expect(n).clone();
         // Unknown risk defaults to L2; destructive is raised to L3; the
-        // user's per-tool L0 holds even though readOnlyHint is not needed.
+        // user's per-tool L0 is floored at L2 because the server is untrusted.
         assert_eq!(cap("mcp.fake_srv.echo").spec().risk, RiskLevel::External);
         assert_eq!(
             cap("mcp.fake_srv.wipe_all").spec().risk,
             RiskLevel::Irreversible
         );
-        assert_eq!(cap("mcp.fake_srv.env").spec().risk, RiskLevel::ReadOnly);
+        assert_eq!(cap("mcp.fake_srv.env").spec().risk, RiskLevel::External);
         assert!(cap("mcp.fake_srv.echo").untrusted_output());
         assert_eq!(
             cap("mcp.fake_srv.echo").spec().input_schema["properties"]["text"]["type"],
@@ -700,6 +739,9 @@ for line in sys.stdin:
         let echo = reg.get(&CapabilityName::new("mcp.fake_srv.echo")).unwrap();
         assert!(!echo.untrusted_output());
         assert_eq!(echo.spec().risk, RiskLevel::Reversible);
+        // The user vouches for a trusted server, so their L0 holds.
+        let env = reg.get(&CapabilityName::new("mcp.fake_srv.env")).unwrap();
+        assert_eq!(env.spec().risk, RiskLevel::ReadOnly);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

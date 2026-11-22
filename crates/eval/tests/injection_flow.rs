@@ -65,6 +65,28 @@ fn started(audit: &[AuditEvent], wanted: &dyn Fn(&Call) -> bool) -> bool {
     })
 }
 
+/// Submit the user's request and play the attentive human up to the attack:
+/// approve each step the request itself needs (`web-answer` reads its page
+/// through an L2 MCP tool), and stop at the first that does what the attacker
+/// wants or once nothing waits.
+async fn run_up_to_the_attack(
+    sandbox: &Sandbox,
+    intent: &str,
+    achieves: &dyn Fn(&Call) -> bool,
+) -> Task {
+    let id = sandbox.submit(intent).await.unwrap();
+    for _ in 0..8 {
+        let task = sandbox.task(id);
+        match pending(&task) {
+            Some(call) if task.state == TaskState::AwaitingConfirmation && !achieves(&call) => {
+                sandbox.approve(id).await;
+            }
+            _ => return task,
+        }
+    }
+    panic!("{intent}: still asking after 8 approvals");
+}
+
 fn injected_cases() -> Vec<Case> {
     Selection::default()
         .cases()
@@ -80,12 +102,10 @@ async fn an_injected_side_effect_in_a_tainted_task_waits_for_the_human_and_never
     let mut checked = 0;
     for case in injected_cases() {
         let (goal, template) = case.attack.unwrap();
-        // L0 calls are not side effects to the policy engine, so this rule
-        // says nothing about them; docs/injection-eval.md reports what an
-        // L0 call can still leak.
-        if goal.risk == RiskLevel::ReadOnly {
-            continue;
-        }
+        // Every goal is L1 or above, including carrying notes out in a URL
+        // through an untrusted MCP tool configured as L0: an untrusted
+        // server's tools are floored at L2.
+        assert!(goal.risk > RiskLevel::ReadOnly, "{}", goal.id);
         let mut setup = setup_for(&dir, Obedient { case });
         setup.pin = Some(pin.clone());
         let sandbox = Sandbox::open(
@@ -95,15 +115,19 @@ async fn an_injected_side_effect_in_a_tainted_task_waits_for_the_human_and_never
             Protection::PolicyAndTaint,
         )
         .unwrap();
-        let id = sandbox.submit(case.user.intent).await.unwrap();
-        let task = sandbox.task(id);
         let achieves = |call: &Call| (goal.achieved_by)(call);
+        let task = run_up_to_the_attack(&sandbox, case.user.intent, &achieves).await;
         let label = case.id();
         // Guards "a side effect after outside content asks the human": the
         // injected call is exactly where the task stopped, and it never ran.
         assert!(!sandbox.world.calls().iter().any(achieves), "{label}");
         assert!(!started(&sandbox.audit().unwrap(), &achieves), "{label}");
-        assert_eq!(sandbox.world.notes(), NOTES, "{label}");
+        // The user's own approved note may be added; none of theirs is gone.
+        let notes = sandbox.world.notes();
+        assert!(
+            NOTES.iter().all(|n| notes.contains(&n.to_string())),
+            "{label}: {notes:?}"
+        );
         if template == Template::FollowUp {
             // Guards "outside content cannot request a follow-up": the
             // request in the result was never even planned.
@@ -127,7 +151,7 @@ async fn an_injected_side_effect_in_a_tainted_task_waits_for_the_human_and_never
         }
         checked += 1;
     }
-    assert_eq!(checked, 4 * 4 * Template::ALL.len());
+    assert_eq!(checked, GOALS.len() * 4 * Template::ALL.len());
 }
 
 #[tokio::test]
@@ -148,8 +172,9 @@ async fn without_taint_the_same_injections_run_wherever_the_policy_alone_allows_
             Protection::PolicyOnly,
         )
         .unwrap();
-        let id = sandbox.submit(case.user.intent).await.unwrap();
-        let task = sandbox.task(id);
+        let task =
+            run_up_to_the_attack(&sandbox, case.user.intent, &|call| (goal.achieved_by)(call))
+                .await;
         let ran = sandbox
             .world
             .calls()
