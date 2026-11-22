@@ -15,7 +15,7 @@ node --test crates/web-shell/assets/*.test.mjs
 
 - 最低 Rust 版本是 1.88，CI 会用它编译；不要用更新版本才有的标准库 API。
 - 改了依赖要提交 `Cargo.lock`，CI 用 `--locked`。
-- `agentos-services` 里插件沙箱的测试需要 Linux 和 bubblewrap。在 macOS 上有 7 个测试会因为无法启动插件而失败，这是环境原因；其余测试必须通过。
+- `agentos-services` 里插件沙箱的测试需要 Linux 和 bubblewrap。在 macOS 上有 10 个测试（`plugin::tests` 6 个、`plugin_store::tests` 4 个）会因为无法启动插件而失败，这是环境原因；其余测试必须通过。
 - `agentos-shell` 在 Linux 上需要 `libwebkit2gtk-4.1-dev` 和 `libgtk-3-dev`。
 - 用临时状态目录运行，不要动 `~/.local/state/agentos`：`cargo run -p agentos-taskd -- --planner rule --state-dir /tmp/agentos-dev`。自定义 socket 的父目录必须归自己所有且不可被他人写入。
 - 运行守护进程前确认环境里没有不想用的 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`；有密钥时会自动选用模型规划器并发起真实请求。
