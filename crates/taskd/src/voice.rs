@@ -25,6 +25,7 @@
 //!   step's token, which the client sends only when the human acts on screen.
 
 use std::collections::VecDeque;
+use std::io;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -912,6 +913,15 @@ impl Voice {
     /// Stop recording. With `send`, what was said is transcribed and comes
     /// back as a `transcript` event; otherwise it is thrown away.
     pub async fn listen_stop(self: &Arc<Self>, send: bool) -> Result<u64, VoiceError> {
+        self.finish_recording(send, |ms, to| self.audit_mic(ms, to))
+            .await
+    }
+
+    async fn finish_recording(
+        self: &Arc<Self>,
+        send: bool,
+        audit: impl FnOnce(u64, &str) -> io::Result<()>,
+    ) -> Result<u64, VoiceError> {
         let Some(mut rec) = self.recording.lock().await.take() else {
             return Err(VoiceError::new("not_listening", "现在没有在录音"));
         };
@@ -943,12 +953,12 @@ impl Voice {
         };
 
         if !send || held_ms < MIN_RECORDING_MS {
-            self.audit_mic(audio_ms, "本机（已丢弃）");
+            let _ = audit(audio_ms, "本机（已丢弃）");
             self.set_mic(MicState::Idle);
             return Ok(serial);
         }
         if pcm.is_empty() {
-            self.audit_mic(0, "本机（已丢弃）");
+            let _ = audit(0, "本机（已丢弃）");
             self.set_mic(MicState::Idle);
             self.notice(
                 NoticeLevel::Error,
@@ -957,15 +967,20 @@ impl Voice {
             return Ok(serial);
         }
         if peak < SILENCE_PEAK {
-            self.audit_mic(audio_ms, "本机（静音，已丢弃）");
+            let _ = audit(audio_ms, "本机（静音，已丢弃）");
             self.set_mic(MicState::Idle);
             self.notice(NoticeLevel::Info, "没有听到声音，麦克风可能被静音了");
             return Ok(serial);
         }
 
+        // Record the destination before the audio can leave this process.
+        if audit(audio_ms, &stt.destination()).is_err() {
+            self.set_mic(MicState::Idle);
+            let message = "无法写入录音审计，录音已丢弃";
+            self.notice(NoticeLevel::Error, message);
+            return Err(VoiceError::new("audit_unavailable", message));
+        }
         self.set_mic(MicState::Transcribing);
-        // On record before the audio leaves this process.
-        self.audit_mic(audio_ms, &stt.destination());
         let wav = wav_from_pcm(&pcm, SAMPLE_RATE, 1);
         let me = self.clone();
         // Transcribe off the request path so the client stays responsive.
@@ -986,15 +1001,16 @@ impl Voice {
         Ok(serial)
     }
 
-    fn audit_mic(&self, audio_ms: u64, sent_to: &str) {
+    fn audit_mic(&self, audio_ms: u64, sent_to: &str) -> io::Result<()> {
         let ev = AuditEvent::DeviceUsed {
             device: DeviceId::new(MIC_DEVICE),
             action: "record".into(),
             detail: json!({"duration_ms": audio_ms, "sent_to": sent_to}),
         };
-        if let Err(e) = self.audit.append(ev) {
-            eprintln!("audit write failed: {e}");
-        }
+        self.audit
+            .append(ev)
+            .map(|_| ())
+            .inspect_err(|e| eprintln!("audit write failed: {e}"))
     }
 
     /// Queue `text` to be read aloud.
@@ -1195,6 +1211,84 @@ mod tests {
             s.starts_with("--XX\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nm1\r\n")
         );
         assert!(s.contains("name=\"file\"; filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\nRIFF\r\n--XX--\r\n"));
+    }
+
+    #[tokio::test]
+    async fn a_recording_is_discarded_if_its_destination_cannot_be_audited() {
+        struct CloudStt(AtomicBool);
+        #[async_trait]
+        impl SpeechToText for CloudStt {
+            fn label(&self) -> String {
+                "cloud".into()
+            }
+
+            fn destination(&self) -> String {
+                "cloud.example".into()
+            }
+
+            async fn transcribe(&self, _: Vec<u8>) -> VoiceResult<String> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok("test transcript".into())
+            }
+        }
+
+        let path = std::env::temp_dir().join(format!("agentos-voice-audit-{}", std::process::id()));
+        let audit = Arc::new(AuditLog::open(&path).unwrap());
+        std::fs::remove_file(path).unwrap();
+        let recognizer = Arc::new(CloudStt(AtomicBool::new(false)));
+        let voice = Voice::new(
+            VoiceConfig {
+                stt: Some(recognizer.clone()),
+                ..VoiceConfig::disabled()
+            },
+            audit,
+        );
+        let mut events = voice.subscribe();
+        voice.set_mic(MicState::Listening);
+        *voice.recording.lock().await = Some(Recording {
+            child: Command::new("sleep")
+                .arg("30")
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap(),
+            reader: tokio::spawn(async { (vec![0x7f; 32000], 0.99) }),
+            started: Instant::now() - Duration::from_millis(MIN_RECORDING_MS),
+            serial: 1,
+        });
+
+        let error = voice
+            .finish_recording(true, |duration, destination| {
+                assert!(duration > 0);
+                assert_eq!(destination, "cloud.example");
+                Err(io::Error::other("audit disk unavailable"))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "audit_unavailable");
+        assert_eq!(voice.mic_state(), MicState::Idle);
+        assert!(voice.recording.lock().await.is_none());
+        tokio::task::yield_now().await;
+        assert!(!recognizer.0.load(Ordering::SeqCst));
+        let events: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                EventKind::VoiceNotice {
+                    level: NoticeLevel::Error,
+                    ..
+                }
+            )
+        }));
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event,
+                EventKind::Transcript { .. }
+                    | EventKind::VoiceState {
+                        mic: MicState::Transcribing,
+                        ..
+                    }
+            )
+        }));
     }
 
     fn local(url: &str) -> OpenAiVoiceConfig {

@@ -364,7 +364,7 @@ PIN 由服务端核对，不保存、不写入任务或审计；核对通过只�
 | `not_listening` | 现在没有在录音，`stop`/`cancel` 没有可停止的 |
 | `voice_failed` | 无法启动录音程序；消息里写明原因 |
 | `storage_unavailable` | 状态读写失败；检查本地存储与任务实际状态 |
-| `audit_unavailable` | 取消已保存，但记录取消审计失败；先查询任务，不假定取消没发生 |
+| `audit_unavailable` | 取消已保存但审计写入失败，先查询任务；`listen stop` 遇到审计写入失败时丢弃录音 |
 | `response_too_large` | 完整响应超过 1 MiB；使用精简任务页或范围更小的读取 |
 
 帧超限、读写超时、UID 不匹配和连接数超限可能直接关闭连接，不保证存在结构化错误帧。

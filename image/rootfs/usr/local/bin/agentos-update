@@ -28,6 +28,9 @@ ROOT="${ROOT%/}"
 ASSET=agentos-update-x86_64.tar.gz
 STATE="$ROOT/var/lib/agentos-update"
 RELEASE_FILE="$ROOT/usr/share/agentos/release"
+ROLLBACK="$STATE/rollback"
+PENDING="$STATE/pending"
+UPDATER=usr/local/bin/agentos-update
 
 die() { echo "agentos-update: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
@@ -48,8 +51,6 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-
-current=$(cat "$RELEASE_FILE" 2>/dev/null || echo unknown)
 
 need_root() {
   if [ -z "$ROOT" ] && [ "$(id -u)" -ne 0 ]; then
@@ -111,7 +112,7 @@ health_check() {
   tmp=$(mktemp -d)
   # No model, no judge: whatever keys this shell has must not be used.
   env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u OPENAI_BASE_URL -u AGENTOS_PLANNER -u AGENTOS_JUDGE \
-    "$dir/usr/local/bin/agentos-taskd" --planner rule --state-dir "$tmp/state" >"$tmp/log" 2>&1 &
+    "$dir/usr/local/bin/agentos-taskd" --planner rule --state-dir "$tmp/state" 9>&- >"$tmp/log" 2>&1 &
   pid=$!
   for _ in $(seq 100); do [ -S "$tmp/state/control.sock" ] && break; sleep 0.1; done
   out=$(timeout 60 "$dir/usr/local/bin/agentos" --state-dir "$tmp/state" \
@@ -126,30 +127,57 @@ health_check() {
   rm -rf "$tmp"
 }
 
-# Copy every file of $1 over $ROOT, each one atomically (write next to the
-# target, then rename), so a running binary is never half-written.
+# Write next to the target, then rename, so a running binary is never
+# half-written. Swap the updater itself after the rest of the payload.
+install_file() {
+  local dir="$1" f="$2" dest="$ROOT/$2"
+  mkdir -p "$(dirname "$dest")"
+  cp -p "$dir/$f" "$dest.agentos-new"
+  mv -f "$dest.agentos-new" "$dest"
+}
+
 install_tree() {
-  local dir="$1" f dest
-  (cd "$dir" && find . -type f | sed 's|^\./||') | while read -r f; do
-    dest="$ROOT/$f"
-    mkdir -p "$(dirname "$dest")"
-    cp -p "$dir/$f" "$dest.agentos-new"
-    mv -f "$dest.agentos-new" "$dest"
+  local dir="$1" f
+  (cd "$dir" && find . -type f | sed 's|^\./||') | while IFS= read -r f; do
+    if [ "$f" != "$UPDATER" ]; then
+      install_file "$dir" "$f"
+    fi
   done
 }
 
-do_rollback() {
-  need_root
-  local back="$STATE/rollback"
-  [ -d "$back/files" ] || die "没有可回滚的版本"
-  say "回滚到 $(cat "$back/release" 2>/dev/null || echo unknown)"
-  install_tree "$back/files"
-  if [ -s "$back/new-files" ]; then
-    while read -r f; do rm -f "$ROOT/$f"; done <"$back/new-files"
-  fi
-  rm -rf "$back"
+restore_pending() {
+  local f remove_updater=0
+  [ -d "$PENDING/files" ] && [ -f "$PENDING/new-files" ] || die "无法读取未完成更新的备份"
+  say "恢复到 $(cat "$PENDING/release" 2>/dev/null || echo unknown)"
+  install_tree "$PENDING/files"
+  while IFS= read -r f; do
+    if [ "$f" = "$UPDATER" ]; then
+      remove_updater=1
+    else
+      rm -f "$ROOT/$f" "$ROOT/$f.agentos-new"
+    fi
+  done <"$PENDING/new-files"
+  # Leave a recovery-aware updater in place until the payload is restored
+  # and durable, including when the old release has no such updater.
+  sync
   reload
-  say "已回滚。重新登录（或重启）后桌面也会用回旧版本。"
+  if [ -f "$PENDING/files/$UPDATER" ]; then
+    install_file "$PENDING/files" "$UPDATER"
+  elif [ "$remove_updater" -eq 1 ]; then
+    rm -f "$ROOT/$UPDATER" "$ROOT/$UPDATER.agentos-new"
+  fi
+  sync
+
+  # An interrupted commit may have moved the earlier rollback here.
+  if [ -d "$PENDING/previous" ]; then
+    mv "$PENDING/previous" "$ROLLBACK"
+    sync
+  fi
+  # The restore can be retried until this rename. Never delete the live
+  # backup in place, since removal could leave a half-deleted transaction.
+  mv "$PENDING" "$work/restored"
+  sync
+  say "已恢复。重新登录（或重启）后桌面也会用回旧版本。"
 }
 
 system_upgrade() {
@@ -160,12 +188,9 @@ system_upgrade() {
     -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold full-upgrade
 }
 
-if [ "$mode" = rollback ]; then
-  do_rollback
-  exit 0
-fi
-
 if [ "$mode" = check ]; then
+  [ ! -d "$PENDING" ] || die "有未完成的更新或回滚，请运行 sudo agentos-update --rollback 恢复"
+  current=$(cat "$RELEASE_FILE" 2>/dev/null || echo unknown)
   info=$(release_info) || die "查不到发布信息（网络或 GitHub 不可用）"
   latest=${info%%$'\t'*}
   if [ "$latest" = "$current" ]; then
@@ -180,8 +205,28 @@ fi
 need_root
 mkdir -p "$STATE"
 chmod 0700 "$STATE"
+exec 9>"$STATE/update.lock"
+flock -x 9
+# A killed process cannot run its EXIT trap. The lock ensures no live update
+# is using these directories, and the recovery backup lives outside them.
+rm -rf "$STATE"/work.*
 work=$(mktemp -d "$STATE/work.XXXXXX")
 trap 'rm -rf "$work"' EXIT
+
+if [ -d "$PENDING" ]; then
+  restore_pending
+  if [ "$mode" = rollback ]; then exit 0; fi
+fi
+# A committed install may have stopped before removing the older backup.
+rm -rf "$ROLLBACK/previous"
+if [ "$mode" = rollback ]; then
+  [ -d "$ROLLBACK/files" ] || die "没有可回滚的版本"
+  mv "$ROLLBACK" "$PENDING"
+  sync
+  restore_pending
+  exit 0
+fi
+current=$(cat "$RELEASE_FILE" 2>/dev/null || echo unknown)
 
 if [ -n "$file" ]; then
   [ -r "$file" ] || die "读不到 $file"
@@ -218,7 +263,7 @@ health_check "$work/new"
 back="$work/rollback"
 mkdir -p "$back/files"
 : >"$back/new-files"
-(cd "$work/new" && find . -type f | sed 's|^\./||') | while read -r f; do
+(cd "$work/new" && find . -type f | sed 's|^\./||') | while IFS= read -r f; do
   if [ -e "$ROOT/$f" ]; then
     mkdir -p "$back/files/$(dirname "$f")"
     cp -p "$ROOT/$f" "$back/files/$f"
@@ -227,11 +272,28 @@ mkdir -p "$back/files"
   fi
 done
 echo "$current" >"$back/release"
-rm -rf "$STATE/rollback"
-mv "$back" "$STATE/rollback"
+# Publish and flush the backup before changing the first installed file.
+sync
+mv "$back" "$PENDING"
+sync
 
 say "安装 $new"
 install_tree "$work/new"
+sync
+if [ -f "$work/new/$UPDATER" ]; then
+  install_file "$work/new" "$UPDATER"
+fi
+sync
+
+# Moving the backup into rollback commits the install. Keep the earlier
+# rollback recoverable until that rename is durable.
+if [ -d "$ROLLBACK" ]; then
+  mv "$ROLLBACK" "$PENDING/previous"
+  sync
+fi
+mv "$PENDING" "$ROLLBACK"
+sync
+rm -rf "$ROLLBACK/previous"
 reload
 say "已更新到 $new（之前是 $current）。重新登录（或重启）后桌面也会用上新版本；有问题可以 sudo agentos-update --rollback。"
 

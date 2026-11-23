@@ -771,21 +771,15 @@ fn improve_settings(
     }))
 }
 
-/// Run a cycle whenever the machine has been idle long enough: nothing of
-/// the user's queued or running, and nothing changed for `idle`. The cycle
-/// itself stops when the user comes back.
+/// Run a cycle when there are no unfinished tasks and the activity has been
+/// quiet for `idle`. The cycle itself stops when new work arrives.
 async fn improve_loop(improver: Improver, tasks: Arc<TaskStore>, settings: ImproveSettings) {
     loop {
         tokio::time::sleep(settings.interval).await;
         let now = agentos_core::now_ms();
-        let quiet_since = tasks
-            .list()
-            .iter()
-            .map(|t| t.updated_at_ms)
-            .max()
-            .unwrap_or(0);
-        let idle = tasks.unfinished().is_empty()
-            && now.saturating_sub(quiet_since) >= settings.idle.as_millis() as u64;
+        let activity = tasks.activity();
+        let idle = !activity.has_unfinished
+            && now.saturating_sub(activity.latest_update_ms) >= settings.idle.as_millis() as u64;
         if !idle {
             continue;
         }

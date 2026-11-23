@@ -147,6 +147,72 @@ cp "$bundle" "$T/offline.tar.gz"
 [ "$(cat "$root/usr/share/agentos/release")" = "$new_release" ] || fail "offline update not applied"
 ok "offline --file install"
 
+# Simulate power loss after an actual rename, including during recovery.
+# The wrapper is test-local; the updater has no fault injection modes.
+mkdir "$T/fault-bin"
+export REAL_MV="$(command -v mv)"
+cat >"$T/fault-bin/mv" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+dest=${!#}
+if [ "$dest" = "$INTERRUPT_BEFORE" ]; then
+  kill -KILL "$(cat "$UPDATE_PID")"
+  exit 1
+fi
+"$REAL_MV" "$@"
+if [ "$dest" = "$INTERRUPT_AFTER" ]; then
+  kill -KILL "$(cat "$UPDATE_PID")"
+  exit 1
+fi
+EOF
+chmod +x "$T/fault-bin/mv"
+
+interrupt_update() {
+  local before="$1" after="$2" status=0
+  shift 2
+  UPDATE_PID="$T/update.pid" INTERRUPT_BEFORE="$before" INTERRUPT_AFTER="$after" \
+    PATH="$T/fault-bin:$PATH" bash -c 'echo "$$" >"$UPDATE_PID"; exec "$@"' bash "$UPDATE" "$@" \
+    >"$T/log" 2>&1 || status=$?
+  [ "$status" -eq 137 ] || { cat "$T/log"; fail "update was not interrupted ($status)"; }
+}
+
+mkdir "$T/next"
+tar -xzf "$bundle" -C "$T/next"
+echo v10.0.0 >"$T/next/usr/share/agentos/release"
+printf '#!/bin/sh\necho interrupted\n' >"$T/next/usr/local/bin/agentosd"
+echo new >"$T/next/usr/share/agentos/recovery-test"
+tar -czf "$T/next.tar.gz" -C "$T/next" usr etc
+(cd "$T" && sha256sum next.tar.gz >next.tar.gz.sha256)
+
+state="$root/var/lib/agentos-update"
+interrupt_update "" "$root/usr/local/bin/agentosd" --file "$T/next.tar.gz"
+grep -q interrupted "$root/usr/local/bin/agentosd" || fail "the interrupted install changed nothing"
+[ -d "$state/pending/files" ] || fail "the interrupted install lost its backup"
+if "$UPDATE" --check >"$T/log" 2>&1; then fail "--check missed the pending recovery"; fi
+grep -q "未完成" "$T/log" || fail "--check did not describe the pending recovery"
+
+interrupt_update "" "$root/usr/local/bin/agentosd" --rollback
+[ -d "$state/pending/files" ] || fail "the interrupted recovery lost its backup"
+"$UPDATE" --rollback >"$T/log" 2>&1 || { cat "$T/log"; fail "retrying recovery failed"; }
+[ ! -e "$state/pending" ] || fail "recovery left a pending transaction"
+[ "$(cat "$root/usr/share/agentos/release")" = "$new_release" ] || fail "interrupted update changed the release"
+cmp -s "$root/usr/local/bin/agentosd" <(tar -xzOf "$bundle" usr/local/bin/agentosd) ||
+  fail "recovery did not restore agentosd"
+ok "interrupted install and interrupted recovery can be rolled back"
+
+interrupt_update "$state/rollback" "" --file "$T/next.tar.gz"
+[ -f "$root/usr/share/agentos/recovery-test" ] || fail "the new file was not installed before commit"
+[ -d "$state/pending/previous/files" ] || fail "the older rollback backup was not preserved"
+"$UPDATE" --rollback >"$T/log" 2>&1 || { cat "$T/log"; fail "recovery after backup rotation failed"; }
+[ "$(cat "$root/usr/share/agentos/release")" = "$new_release" ] || fail "recovery did not restore the prior release"
+[ ! -e "$root/usr/share/agentos/recovery-test" ] || fail "recovery kept a new-only file"
+interrupt_update "" "$root/usr/local/bin/agentosd" --rollback
+[ -d "$state/pending/files" ] || fail "the interrupted manual rollback lost its backup"
+"$UPDATE" --rollback >"$T/log" 2>&1 || { cat "$T/log"; fail "retrying the prior rollback failed"; }
+[ "$(cat "$root/usr/share/agentos/release")" = v0.0.1 ] || fail "prior rollback did not restore the old release"
+grep -q keep-me "$root/etc/agentos/agentos.env" || fail "recovery touched settings"
+ok "recovery after backup rotation preserves the prior rollback, even across another interruption"
+
 # A machine still on v0.4.0 updates with the updater it has: that one wants
 # usr/local/bin/agentosd in the bundle and runs it as a self-test. The
 # stand-in must pass it, by running the bundle's own task service.

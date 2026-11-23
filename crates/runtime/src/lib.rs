@@ -297,6 +297,8 @@ struct State {
     next_id: u64,
     revision: u64,
     tasks: BTreeMap<TaskId, Task>,
+    unfinished: BTreeSet<TaskId>,
+    latest_update_ms: u64,
 }
 
 impl Default for State {
@@ -305,6 +307,8 @@ impl Default for State {
             next_id: 1,
             revision: 0,
             tasks: BTreeMap::new(),
+            unfinished: BTreeSet::new(),
+            latest_update_ms: 0,
         }
     }
 }
@@ -317,23 +321,47 @@ impl State {
             }
         }
         validate_snapshot(&snapshot)?;
-        Ok(Self {
+        let mut state = Self {
             next_id: snapshot.next_id,
             revision: if snapshot.schema_version == 1 {
                 snapshot.revision.max(snapshot.next_id - 1)
             } else {
                 snapshot.revision
             },
-            tasks: snapshot
+            ..Self::default()
+        };
+        for task in snapshot.tasks {
+            state.insert(task);
+        }
+        Ok(state)
+    }
+
+    fn insert(&mut self, task: Task) {
+        if task.state.is_terminal() {
+            self.unfinished.remove(&task.id);
+        } else {
+            self.unfinished.insert(task.id);
+        }
+        let updated = task.updated_at_ms;
+        let previous = self.tasks.insert(task.id, task);
+        // Runtime writes keep timestamps monotonic, but older journals were
+        // never required to do so. Recompute only if replay replaced the max.
+        if previous.is_some_and(|task| {
+            task.updated_at_ms == self.latest_update_ms && updated < task.updated_at_ms
+        }) {
+            self.latest_update_ms = self
                 .tasks
-                .into_iter()
-                .map(|task| (task.id, task))
-                .collect(),
-        })
+                .values()
+                .map(|task| task.updated_at_ms)
+                .max()
+                .unwrap_or(0);
+        } else {
+            self.latest_update_ms = self.latest_update_ms.max(updated);
+        }
     }
 
     fn apply(&mut self, task: Task, next_id: u64, revision: u64) {
-        self.tasks.insert(task.id, task);
+        self.insert(task);
         self.next_id = next_id;
         self.revision = revision;
     }
@@ -374,6 +402,13 @@ pub struct TaskStore {
     changes: broadcast::Sender<TaskChange>,
 }
 
+/// Task activity captured under one read lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskActivity {
+    pub latest_update_ms: u64,
+    pub has_unfinished: bool,
+}
+
 /// A bounded live invalidation hint. The task store remains authoritative;
 /// slow or reconnected subscribers must refresh pages instead of replaying work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -391,10 +426,10 @@ impl TaskStore {
         // damaged store is left exactly as it was found.
         let mut state = load(&directory)?;
         let recovered_at = now_ms();
-        let mut recovered = false;
-        for task in state.tasks.values_mut() {
-            if !task.state.is_terminal() {
-                recovered = true;
+        let unfinished = std::mem::take(&mut state.unfinished);
+        if !unfinished.is_empty() {
+            for id in unfinished {
+                let task = state.tasks.get_mut(&id).expect("indexed task exists");
                 task.state = TaskState::Interrupted;
                 task.confirmation = None;
                 task.question = None;
@@ -404,8 +439,7 @@ impl TaskStore {
                 );
                 interrupt_steps(&mut task.steps);
             }
-        }
-        if recovered {
+            state.latest_update_ms = state.latest_update_ms.max(recovered_at);
             state.revision = next_revision(state.revision)?;
         }
         validate_state(&state)?;
@@ -533,12 +567,17 @@ impl TaskStore {
 
     /// The tasks that have not reached an outcome, oldest first.
     pub fn unfinished(&self) -> Vec<TaskId> {
+        self.read().unfinished.iter().copied().collect()
+    }
+
+    /// Whether work is unfinished and when any task last changed. Idle
+    /// checks need neither task payloads nor a walk of the history.
+    pub fn activity(&self) -> TaskActivity {
         let state = self.read();
-        let open = state
-            .tasks
-            .values()
-            .filter(|task| !task.state.is_terminal());
-        open.map(|task| task.id).collect()
+        TaskActivity {
+            latest_update_ms: state.latest_update_ms,
+            has_unfinished: !state.unfinished.is_empty(),
+        }
     }
 
     /// Page history by descending task ID. `before` is exclusive and the next
@@ -1433,6 +1472,46 @@ mod tests {
     }
 
     #[test]
+    fn activity_tracks_an_older_task_update_and_cancellation() {
+        let store = TaskStore::memory();
+        assert_eq!(
+            store.activity(),
+            TaskActivity {
+                latest_update_ms: 0,
+                has_unfinished: false
+            }
+        );
+
+        let first = store.create(intent()).unwrap();
+        let second = store.create(intent()).unwrap();
+        assert_eq!(store.unfinished(), vec![first.id, second.id]);
+        let updated = store
+            .update(first.id, |task| {
+                task.state = TaskState::Succeeded;
+                task.updated_at_ms = second.updated_at_ms + 60_000;
+            })
+            .unwrap();
+        assert_eq!(
+            store.activity(),
+            TaskActivity {
+                latest_update_ms: updated.updated_at_ms,
+                has_unfinished: true
+            }
+        );
+        assert_eq!(store.unfinished(), vec![second.id]);
+
+        let cancelled = store.cancel(second.id).unwrap();
+        assert_eq!(
+            store.activity(),
+            TaskActivity {
+                latest_update_ms: updated.updated_at_ms.max(cancelled.updated_at_ms),
+                has_unfinished: false,
+            }
+        );
+        assert!(store.unfinished().is_empty());
+    }
+
+    #[test]
     fn restart_interrupts_every_unfinished_state_without_replaying() {
         let dir = TempDir::new();
         let store = TaskStore::open(&dir.0).unwrap();
@@ -1464,7 +1543,16 @@ mod tests {
         }
         drop(store);
         let store = TaskStore::open(&dir.0).unwrap();
-        for task in store.list() {
+        let tasks = store.list();
+        assert_eq!(
+            store.activity(),
+            TaskActivity {
+                latest_update_ms: tasks.iter().map(|task| task.updated_at_ms).max().unwrap(),
+                has_unfinished: false,
+            }
+        );
+        assert!(store.unfinished().is_empty());
+        for task in tasks {
             assert_eq!(task.state, TaskState::Interrupted);
             assert!(task.confirmation.is_none());
             assert!(task.message.unwrap().contains("不会自动重复"));
@@ -1518,6 +1606,7 @@ mod tests {
         let store = TaskStore::open(&dir.0).unwrap();
         let task = store.create(intent()).unwrap();
         let previous_revision = store.revision();
+        let previous_activity = store.activity();
         let mut changes = store.subscribe();
         // Neither the journal nor, once an append has failed, the snapshot
         // that replaces it can be written.
@@ -1529,6 +1618,7 @@ mod tests {
             .update(task.id, |task| task.state = TaskState::Failed)
             .is_err());
         assert_eq!(store.get(task.id).unwrap().state, TaskState::Queued);
+        assert_eq!(store.activity(), previous_activity);
         assert_eq!(store.revision(), previous_revision);
         assert!(matches!(
             changes.try_recv(),

@@ -89,7 +89,7 @@ pub struct Evaluation {
     /// Cases that became successes with the candidate in most runs, and not
     /// without it.
     pub improved: Vec<String>,
-    /// Cases that, in any run with the candidate, no longer succeeded.
+    /// Cases where any paired run succeeded only without the candidate.
     pub regressed: Vec<String>,
     pub diverged_baseline: usize,
     pub diverged_candidate: usize,
@@ -134,20 +134,27 @@ pub fn judge(gate: &Gate, results: &[(Vec<CaseResult>, Vec<CaseResult>)]) -> Eva
         e.candidate_tokens += cand.iter().map(|r| r.replayed_tokens).sum::<u64>();
         e.baseline_steps += base.iter().map(|r| r.replayed_steps).sum::<usize>();
         e.candidate_steps += cand.iter().map(|r| r.replayed_steps).sum::<usize>();
-        if count(cand, Verdict::Regressed) > 0 {
+        // The historical recording supplies tool results. The current
+        // baseline supplies the outcome against which a change is judged.
+        let mut outcomes = base.iter().zip(cand).map(|(b, c)| {
+            let diverged = b.verdict == Verdict::Diverged || c.verdict == Verdict::Diverged;
+            replay::verdict(b.replayed, c.replayed, diverged)
+        });
+        if outcomes.clone().any(|v| v == Verdict::Regressed) {
             e.regressed.push(name.clone());
         }
         let base_diverged = majority(count(base, Verdict::Diverged), runs);
         let cand_diverged = majority(count(cand, Verdict::Diverged), runs);
         e.diverged_baseline += usize::from(base_diverged);
         e.diverged_candidate += usize::from(cand_diverged);
-        if majority(count(cand, Verdict::Improved), runs)
-            && !majority(count(base, Verdict::Improved), runs)
-        {
+        if majority(
+            outcomes.clone().filter(|v| *v == Verdict::Improved).count(),
+            runs,
+        ) {
             e.improved.push(name);
         }
         if !base_diverged && !cand_diverged {
-            all_same &= cand.iter().all(|r| r.verdict == Verdict::Same);
+            all_same &= base.len() == cand.len() && outcomes.all(|v| v == Verdict::Same);
             comparable_base.0 += base.iter().map(|r| r.replayed_tokens).sum::<u64>();
             comparable_base.1 += base.iter().map(|r| r.replayed_steps).sum::<usize>();
             comparable_cand.0 += cand.iter().map(|r| r.replayed_tokens).sum::<u64>();
@@ -527,7 +534,7 @@ impl Improver {
 
     /// The user is using the system: anything of theirs queued or under way.
     fn user_is_back(&self) -> bool {
-        !self.tasks.unfinished().is_empty()
+        self.tasks.activity().has_unfinished
     }
 
     /// One cycle: first the watch over what was adopted, then at most one
@@ -1481,12 +1488,23 @@ mod tests {
         assert!(s.learned.current().1.items.is_empty());
     }
 
-    fn result(task: &str, verdict: Verdict, tokens: u64, steps: usize) -> CaseResult {
+    fn result(
+        task: &str,
+        recorded: TaskState,
+        verdict: Verdict,
+        tokens: u64,
+        steps: usize,
+    ) -> CaseResult {
+        let replayed = match verdict {
+            Verdict::Improved => TaskState::Succeeded,
+            Verdict::Regressed => TaskState::Failed,
+            _ => recorded,
+        };
         CaseResult {
             task: task.into(),
             intent: String::new(),
-            recorded: TaskState::Succeeded,
-            replayed: TaskState::Succeeded,
+            recorded,
+            replayed,
             verdict,
             recorded_steps: steps,
             replayed_steps: steps,
@@ -1503,8 +1521,15 @@ mod tests {
         base: &[(Verdict, u64, usize)],
         cand: &[(Verdict, u64, usize)],
     ) -> (Vec<CaseResult>, Vec<CaseResult>) {
+        let recorded = if base.iter().chain(cand).any(|r| r.0 == Verdict::Improved) {
+            TaskState::Failed
+        } else {
+            TaskState::Succeeded
+        };
         let runs = |r: &[(Verdict, u64, usize)]| {
-            r.iter().map(|(v, t, s)| result(task, *v, *t, *s)).collect()
+            r.iter()
+                .map(|(v, t, s)| result(task, recorded, *v, *t, *s))
+                .collect()
         };
         (runs(base), runs(cand))
     }
@@ -1567,6 +1592,25 @@ mod tests {
         assert!(judge(&gate, &[lean("a"), lean("b"), lean("c")]).passed);
         let slightly = |t: &str| case(t, &[(Same, 100, 4); 3], &[(Same, 95, 4); 3]);
         assert!(!judge(&gate, &[slightly("a"), slightly("b"), slightly("c")]).passed);
+    }
+
+    #[test]
+    fn the_gate_rejects_loss_of_a_success_the_baseline_had_already_recovered() {
+        use Verdict::{Improved, Same};
+        let gains = |task| case(task, &[(Same, 100, 1); 3], &[(Improved, 100, 1); 3]);
+        let loss = case("loss", &[(Improved, 100, 1); 3], &[(Same, 100, 1); 3]);
+        let mut comparisons = vec![gains("gain-1"), gains("gain-2"), loss];
+        for n in 4..=Gate::default().min_cases {
+            comparisons.push(case(
+                &n.to_string(),
+                &[(Same, 100, 1); 3],
+                &[(Same, 100, 1); 3],
+            ));
+        }
+        let evaluation = judge(&Gate::default(), &comparisons);
+        assert_eq!(evaluation.improved, ["gain-1", "gain-2"]);
+        assert_eq!(evaluation.regressed, ["loss"]);
+        assert!(!evaluation.passed);
     }
 
     #[tokio::test]

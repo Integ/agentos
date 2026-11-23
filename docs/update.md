@@ -19,8 +19,10 @@ sudo agentos-update --file agentos-update-x86_64.tar.gz   # 离线安装（旁�
 2. 下载 `agentos-update-x86_64.tar.gz` 和它的 `.sha256`，校验不一致就停止。
 3. 解包到临时目录并检查内容：只接受 `usr/…`、`etc/systemd/system/agentos-*` 和 `etc/udev/rules.d/*agentos*` 下的普通文件，有符号链接、设备文件或其他路径就整个拒绝；去掉 setuid 位。
 4. **自检**：启动一个临时的新 `agentos-taskd`（离线规划器），用新的 `agentos` 命令提交一条意图并等它完成。更新包里没有任务服务或 `agentos` 命令、或者自检失败，就停止，本机什么都没改。
-5. 把即将被覆盖的文件备份到 `/var/lib/agentos-update/rollback/`（只保留上一个版本），然后逐个文件"写到旁边再改名"地替换，正在运行的程序不会读到写了一半的文件。
+5. 先持久化即将被覆盖的文件和新增文件清单，再逐个文件替换。安装完成后把本次备份保留为上一版本，供 `--rollback` 使用。安装与回滚共用一把锁。
 6. 重新加载 systemd 和 udev 配置，重启正在运行的 `agentos-taskd`（它的用户单元拉起新版本；重启前未完成的任务标为“已中断”）。图形桌面 `agentos-shell` 在下次登录或重启后换成新版本。
+
+更新或回滚中断后，下一次运行更新器会先恢复上一个完整版本。`sudo agentos-update --rollback` 可只执行这次恢复。恢复中断后可以再次运行同一条命令。`--check` 会报告待恢复状态。
 
 从 v0.4 及更早的版本更新上来时，跑的是机器上原有的 `agentos-update`：它要求更新包里有 `agentosd`，并拿它做自检。所以更新包里还放着一个同名的垫片脚本，它用更新包自己的任务服务完成这次自检；更新完成后，重新登录之前的旧桌面会话调用它时，它只是安静等待。重新登录后桌面连接任务服务，任务服务第一次启动时把 `~/.local/share/agentos` 里的数据迁过来（见[持久任务](persistent-workspace.md)）。旧的 `agentos-daemon` 脚本会留在 `/usr/local/bin` 里（更新不删除文件），已经没有谁调用它。垫片会在下一个版本删除。
 

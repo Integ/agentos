@@ -4,11 +4,16 @@ name: Image
 # on): self-check from the "USB stick", unattended install onto a second disk,
 # then self-check again from the installed disk.
 #
-# Runs only when a GitHub release is published (both Debian and Ubuntu,
-# images attached to the release) or when started by hand from Actions →
-# Image → Run workflow. Pushes and pull requests do not build images.
+# Image-related pull requests smoke-test Debian. Releases build both Debian
+# and Ubuntu and attach their images. Manual runs choose a distribution.
 
 on:
+  pull_request:
+    paths:
+      - 'image/**'
+      - '.github/workflows/image.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
   release:
     types: [published]
   workflow_dispatch:
@@ -20,7 +25,7 @@ on:
         default: debian
 
 permissions:
-  contents: write # attach images to the release
+  contents: read
 
 jobs:
   image:
@@ -29,15 +34,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        distro: ${{ fromJSON((github.event_name == 'release' || inputs.distro == 'both') && '["debian","ubuntu"]' || format('["{0}"]', inputs.distro)) }}
+        distro: ${{ fromJSON((github.event_name == 'release' || inputs.distro == 'both') && '["debian","ubuntu"]' || format('["{0}"]', inputs.distro || 'debian')) }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Build image
         env:
           DISTRO: ${{ matrix.distro }}
           AGENTOS_RELEASE: ${{ github.event.release.tag_name }}
-          COMPRESS: "1"
+          COMPRESS: ${{ github.event_name == 'pull_request' && '0' || '1' }}
           # archive.ubuntu.com is slow from GitHub's runners (~1.4 MB/s);
           # the in-region Azure mirror is the one the runners themselves use.
           MIRROR: ${{ matrix.distro == 'ubuntu' && 'http://azure.archive.ubuntu.com/ubuntu' || '' }}
@@ -69,6 +76,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload image
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: agentos-${{ matrix.distro }}-x86_64
@@ -78,19 +86,38 @@ jobs:
           compression-level: 0
           retention-days: 14
 
+  publish-images:
+    if: ${{ !cancelled() && github.event_name == 'release' }}
+    needs: image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [debian, ubuntu]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: agentos-${{ matrix.distro }}-x86_64
+          path: out
+
       - name: Attach to release
-        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
+          DISTRO: ${{ matrix.distro }}
         run: |
           gh release upload "$TAG" --clobber --repo "$GITHUB_REPOSITORY" \
-            out/agentos-${{ matrix.distro }}-x86_64.img.xz \
-            out/agentos-${{ matrix.distro }}-x86_64.img.xz.sha256
+            "out/agentos-${DISTRO}-x86_64.img.xz" \
+            "out/agentos-${DISTRO}-x86_64.img.xz.sha256"
 
   # The update bundle `agentos-update` installs on existing machines. Same
   # binaries for both bases (built on Debian 12, like the images).
   bundle:
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: write
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
