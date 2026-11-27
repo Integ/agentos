@@ -238,6 +238,13 @@ pub enum AuditEvent {
         previous: String,
         reason: String,
     },
+    /// The PIN file was set, replaced (`set: true`) or removed (`false`)
+    /// beside the running service, which enforces the change from here on.
+    /// Recorded when the service notices, at its next PIN check. Never
+    /// contains the PIN.
+    PinChanged {
+        set: bool,
+    },
 }
 
 /// Serializable snapshot of an [`Intent`].

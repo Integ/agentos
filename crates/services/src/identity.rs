@@ -10,7 +10,14 @@
 //! and keeps a short-lived *grant* for that task, then forwards a plain "y".
 //!
 //! Stored as `{salt, rounds, hash}` (iterated SHA-256) in a 0600 file. Five
-//! wrong PINs lock entry for five minutes. This keeps out a prompt injection,
+//! wrong PINs lock entry for five minutes.
+//!
+//! The file is the truth, read again at every check: `agentos-taskd
+//! --set-pin` and `--clear-pin` run as their own processes beside the
+//! service, and a PIN the user just set must not be refused, nor a cleared one
+//! still demanded, until some restart. A file that disappears means no PIN. A
+//! file that is there but cannot be read keeps the last PIN that could be:
+//! falling back to "no PIN" would let standing changes through without one. This keeps out a prompt injection,
 //! a guest at the screen and casual brute force; it is not protection against
 //! someone who already runs code as the desktop user (they can replace the
 //! file). Moving the vault to a separate privileged service is future work.
@@ -63,6 +70,9 @@ impl PinCheck {
 #[derive(Default)]
 struct State {
     record: Option<PinRecord>,
+    /// Why the file could not be read the last time it was looked at. The
+    /// record above is then the last one that could be.
+    unreadable: Option<String>,
     failures: u32,
     locked_until_ms: u64,
     /// (task, expires_ms). `None` vouches for whichever task is answered next.
@@ -115,20 +125,27 @@ fn random_salt() -> std::io::Result<String> {
     Ok(hex(&b))
 }
 
+/// The record in the file at `path`; `None` when there is no file.
+fn read_record(path: &Path) -> std::io::Result<Option<PinRecord>> {
+    match std::fs::read(path) {
+        Ok(b) => Ok(Some(serde_json::from_slice(&b).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} 不是有效的 PIN 文件：{e}", path.display()),
+            )
+        })?)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 impl PinVault {
-    /// Load the vault at `path` (a missing file means no PIN is set).
+    /// Load the vault at `path` (a missing file means no PIN is set). A file
+    /// that cannot be read is an error here: at startup there is no earlier
+    /// PIN to fall back on, so the service must not start believing none.
     pub fn open(path: impl Into<PathBuf>) -> std::io::Result<Self> {
         let path = path.into();
-        let record = match std::fs::read(&path) {
-            Ok(b) => Some(serde_json::from_slice(&b).map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("{} 不是有效的 PIN 文件：{e}", path.display()),
-                )
-            })?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e),
-        };
+        let record = read_record(&path)?;
         Ok(Self {
             path,
             state: Mutex::new(State {
@@ -153,8 +170,44 @@ impl PinVault {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Bring the vault in line with the file, which another process may
+    /// have replaced or removed. Returns the state, refreshed.
+    fn refresh(&self) -> std::sync::MutexGuard<'_, State> {
+        let read = read_record(&self.path);
+        let mut s = self.lock();
+        let changed = match read {
+            Ok(record) => {
+                s.unreadable = None;
+                (record != s.record).then(|| {
+                    s.record = record;
+                    // A PIN entered under the old setting must not approve
+                    // anything under the new one. A lockout stays: it is
+                    // there to slow guessing, and a new PIN is no reason to
+                    // let the guessing resume early.
+                    s.grants.clear();
+                    s.record.is_some()
+                })
+            }
+            Err(e) => {
+                s.unreadable = Some(e.to_string());
+                None
+            }
+        };
+        if let (Some(set), Some(audit)) = (changed, &self.audit) {
+            let _ = audit.append(AuditEvent::PinChanged { set });
+        }
+        s
+    }
+
+    /// Whether a PIN is in force, as the file says now.
     pub fn is_set(&self) -> bool {
-        self.lock().record.is_some()
+        self.refresh().record.is_some()
+    }
+
+    /// Why the PIN file could not be read just now, if it could not; the
+    /// vault then keeps enforcing the last PIN it read.
+    pub fn unreadable(&self) -> Option<String> {
+        self.refresh().unreadable.clone()
     }
 
     /// Set (or replace) the PIN.
@@ -201,7 +254,7 @@ impl PinVault {
     fn verify(&self, pin: &str, task: Option<u64>, vouch: bool) -> PinCheck {
         let now = now_ms();
         let result = {
-            let mut s = self.lock();
+            let mut s = self.refresh();
             let s = &mut *s;
             match &s.record {
                 None => PinCheck::NotSet,
@@ -252,7 +305,8 @@ impl PinVault {
     /// Use up a grant for `task`, if a recent PIN entry vouched for it.
     pub fn take_grant(&self, task: u64) -> bool {
         let now = now_ms();
-        let mut s = self.lock();
+        // A PIN changed since the entry that earned the grant voids it.
+        let mut s = self.refresh();
         s.grants.retain(|(_, exp)| *exp > now);
         let pos = s
             .grants
@@ -406,5 +460,105 @@ mod tests {
         assert!(vault.take_grant(7));
         assert!(!vault.take_grant(7));
         let _ = std::fs::remove_file(path);
+    }
+
+    /// `agentos-taskd --set-pin` / `--clear-pin`: another process, another
+    /// vault on the same file.
+    fn beside(p: &Path) -> PinVault {
+        PinVault::open(p).unwrap()
+    }
+
+    #[test]
+    fn a_pin_set_or_cleared_by_another_process_is_in_force_without_a_restart() {
+        // Contract: the running service enforces what the PIN file says now.
+        let p = temp("beside");
+        let service = PinVault::open(&p).unwrap();
+        assert!(!service.is_set());
+        beside(&p).set("2468").unwrap();
+        assert!(service.is_set());
+        assert_eq!(service.check("2468"), PinCheck::Ok);
+        beside(&p).set("1357").unwrap();
+        assert!(matches!(service.check("2468"), PinCheck::Wrong { .. }));
+        assert_eq!(service.check("1357"), PinCheck::Ok);
+        std::fs::remove_file(&p).unwrap();
+        assert!(!service.is_set());
+        assert_eq!(service.verify_for(Some(1), "1357"), PinCheck::NotSet);
+        cleanup(&p);
+    }
+
+    #[test]
+    fn a_damaged_pin_file_keeps_the_last_pin_and_never_reads_as_no_pin() {
+        // Contract: an unreadable file fails closed. Reading it as "no PIN"
+        // would let standing changes (preauthorizations, callers) through
+        // without one.
+        let p = temp("damaged");
+        let service = PinVault::open(&p).unwrap();
+        service.set("2468").unwrap();
+        std::fs::write(&p, "{not json").unwrap();
+        assert!(service.is_set());
+        assert!(service
+            .unreadable()
+            .unwrap()
+            .contains("不是有效的 PIN 文件"));
+        assert_eq!(service.check("2468"), PinCheck::Ok);
+        assert!(matches!(service.check("0000"), PinCheck::Wrong { .. }));
+        // Mended: the new PIN is in force and the problem is gone.
+        std::fs::remove_file(&p).unwrap();
+        beside(&p).set("1357").unwrap();
+        assert_eq!(service.unreadable(), None);
+        assert_eq!(service.check("1357"), PinCheck::Ok);
+        // At startup there is no last PIN to keep: the service must not start.
+        std::fs::write(&p, "{not json").unwrap();
+        assert!(PinVault::open(&p).is_err());
+        cleanup(&p);
+    }
+
+    #[test]
+    fn a_changed_pin_voids_earlier_grants_but_not_a_lockout() {
+        let p = temp("voids");
+        let service = PinVault::open(&p).unwrap();
+        service.set("2468").unwrap();
+        // A grant earned under the old PIN approves nothing under the new.
+        assert_eq!(service.verify_for(Some(3), "2468"), PinCheck::Ok);
+        beside(&p).set("1357").unwrap();
+        assert!(!service.take_grant(3));
+        // Guessing stays slowed down after the PIN is replaced.
+        for _ in 0..MAX_FAILURES {
+            service.check("0000");
+        }
+        beside(&p).set("9753").unwrap();
+        assert!(matches!(
+            service.verify_for(Some(4), "9753"),
+            PinCheck::Locked { .. }
+        ));
+        assert!(!service.take_grant(4));
+        cleanup(&p);
+    }
+
+    #[test]
+    fn a_pin_change_the_service_notices_is_audited_once_without_the_pin() {
+        let p = temp("changed");
+        let audit_path = p.with_file_name("audit.jsonl");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let audit = Arc::new(AuditLog::open(&audit_path).unwrap());
+        let service = PinVault::open(&p).unwrap().with_audit(audit);
+        beside(&p).set("2468").unwrap();
+        assert!(service.is_set());
+        assert!(service.is_set(), "no change, no second record");
+        std::fs::remove_file(&p).unwrap();
+        assert!(!service.is_set());
+        let changes: Vec<bool> = AuditLog::replay(&audit_path)
+            .unwrap()
+            .iter()
+            .filter_map(|e| match &e.event {
+                AuditEvent::PinChanged { set } => Some(*set),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(changes, vec![true, false]);
+        assert!(!std::fs::read_to_string(&audit_path)
+            .unwrap()
+            .contains("2468"));
+        cleanup(&p);
     }
 }

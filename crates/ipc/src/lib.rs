@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
+pub mod status;
+
 pub const VERSION: u32 = 1;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_TEXT_BYTES: usize = 65_536;

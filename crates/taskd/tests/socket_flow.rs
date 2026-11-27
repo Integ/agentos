@@ -1252,6 +1252,110 @@ async fn an_irreversible_step_is_approved_over_the_socket_only_with_the_pin() {
 }
 
 #[tokio::test]
+async fn a_pin_set_or_cleared_beside_the_running_service_takes_effect_without_a_restart() {
+    use agentos_services::expression::ExpressionHub;
+    use agentos_services::identity::PinVault;
+    use agentos_taskd::butler::Butler;
+
+    let dir = TempDir::new();
+    let path = dir.0.join("control.sock");
+    let pin_path = dir.0.join("pin.json");
+    let tasks = Arc::new(TaskStore::memory());
+    let audit_path = dir.0.join("audit.jsonl");
+    let audit = Arc::new(AuditLog::open(&audit_path).unwrap());
+    let wipe = Arc::new(ExternalCapability {
+        spec: CapabilitySpec {
+            name: CapabilityName::new("disk.wipe"),
+            description: "test only".into(),
+            risk: RiskLevel::Irreversible,
+            input_schema: json!({"type":"object"}),
+        },
+        calls: AtomicUsize::new(0),
+    });
+    let mut registry = CapabilityRegistry::new();
+    registry.register(wipe.clone());
+    let id = AgentId::new("butler");
+    let mut policy = PolicyEngine::new();
+    grant_manifest(&mut policy, &id, &[CapabilityName::new("disk.wipe")]);
+    // The service starts without a PIN.
+    let pins = Arc::new(PinVault::open(&pin_path).unwrap().with_audit(audit.clone()));
+    let butler = Butler::with_store(
+        id,
+        registry,
+        policy,
+        Box::new(WipePlanner),
+        audit.clone(),
+        ExpressionHub::new(audit.clone()),
+        tasks.clone(),
+    )
+    .with_pin_vault(pins.clone());
+    let server = Service::with_butler(butler, audit, Some(pins))
+        .bind(&path)
+        .await
+        .unwrap();
+    let (shutdown, receiver) = oneshot::channel::<()>();
+    let server = tokio::spawn(server.run_until(async {
+        let _ = receiver.await;
+    }));
+    let settled = |id: TaskId| {
+        let tasks = tasks.clone();
+        async move {
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(task) = tasks.get(id).filter(|t| {
+                        t.state.is_terminal() || t.state == TaskState::AwaitingConfirmation
+                    }) {
+                        return task;
+                    }
+                    sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("task state deadline")
+        }
+    };
+    let mut client = Connection::connect(&path).await;
+
+    // No PIN: the irreversible step is refused outright.
+    let refused = settled(client.submit("清除磁盘").await).await;
+    assert_eq!(refused.state, TaskState::Failed);
+
+    // `agentos-taskd --set-pin` beside it: its own process, its own vault.
+    PinVault::open(&pin_path).unwrap().set("246813579").unwrap();
+    let id = client.submit("清除磁盘").await;
+    let task = settled(id).await;
+    assert_eq!(task.state, TaskState::AwaitingConfirmation);
+    let confirmation = task.confirmation.unwrap();
+    assert!(confirmation.verify_identity);
+    assert!(matches!(
+        client
+            .ok(Command::Approve {
+                id,
+                step: 1,
+                confirmation: confirmation.token,
+                pin: Some("246813579".into()),
+            })
+            .await,
+        Reply::ApprovalQueued { .. }
+    ));
+    assert_eq!(settled(id).await.state, TaskState::Succeeded);
+    assert_eq!(wipe.calls.load(Ordering::SeqCst), 1);
+
+    // `agentos-taskd --clear-pin` beside it: refused again, at once.
+    fs::remove_file(&pin_path).unwrap();
+    let refused = settled(client.submit("清除磁盘").await).await;
+    assert_eq!(refused.state, TaskState::Failed);
+    assert_eq!(wipe.calls.load(Ordering::SeqCst), 1);
+
+    shutdown.send(()).unwrap();
+    server.await.unwrap().unwrap();
+    // Both changes are on record, the PIN itself is not.
+    let audit = fs::read_to_string(&audit_path).unwrap();
+    assert_eq!(audit.matches("\"event\":\"pin_changed\"").count(), 2);
+    assert!(!audit.contains("246813579"));
+}
+
+#[tokio::test]
 async fn a_task_waiting_for_its_planner_does_not_hold_up_other_tasks() {
     let gate = Arc::new(Gate::default());
     let mut harness = Harness::start(Box::new(SlowPlanner(gate.clone())), vec![]).await;

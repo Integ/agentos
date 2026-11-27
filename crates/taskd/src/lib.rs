@@ -17,4 +17,5 @@ pub mod migrate;
 pub mod preauth;
 pub mod replay;
 pub mod service;
+pub mod status;
 pub mod voice;

@@ -12,7 +12,7 @@ use agentos_runtime::{TaskId, TaskState};
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(300);
 const MAX_WAIT_SECONDS: u64 = 86_400;
 
-pub const HELP: &str = "AgentOS · 独立任务工作台\n\n用法：agentos [--socket 路径 | --state-dir 路径] [--json] <命令>\n\n  workbench                         实时终端工作台（默认）\n  submit [--thread task-N] [--wait] [--timeout 秒] <意图>\n                                    提交任务，客户端退出后仍继续；--wait 等到任务结束再返回；\n                                    --thread 接着某个线程说（用它第一个任务的编号）\n  tasks [--before task-N] [--limit N] [--state 状态] [--thread task-N]\n  task task-N                       查看计划、结果与批准令牌\n  cancel task-N                     取消任务的后续步骤\n  reply task-N 步骤 <回答>          回答任务在这一步提出的问题\n  approve task-N 步骤 --confirmation 令牌 [--pin-stdin]\n                                    批准一步；不可逆的步骤加 --pin-stdin，从标准输入读取 PIN\n  reject task-N 步骤 --confirmation 令牌\n                                    只拒绝这一步：它不执行，任务换别的办法继续；不需要 PIN\n  preauthorize <能力> [规则…] [--any-other-args] [--expires 时长] [--caller id] [--pin-stdin]\n                                    预授权：符合规则的调用不再逐次确认。规则：\n                                    --equals 字段=值　--one-of 字段=值1,值2　--prefix 字段=文本\n                                    --under 字段=目录　--any 字段；时长如 30m、2h、7d\n  preauthorizations                 查看仍然有效的预授权\n  revoke pre-N                      撤销一条预授权，立即生效\n  callers                           查看已注册的外部调用方\n  caller add <id> --name 名字 [--allow 能力或前缀]… [--max-risk L0|L1|L2] [--pin-stdin]\n                                    注册外部调用方，或整体替换它的清单；默认什么都不给\n  caller remove <id>                撤销调用方，它的预授权一并撤销\n  mcp --caller <id>                 以这个调用方的身份提供 MCP 服务（标准输入输出）\n  wechat login                      用微信扫码绑定 ClawBot（微信：我 → 设置 → 插件）\n  wechat                            收发微信消息：你发的文字交给 AgentOS，结果发回微信\n  capabilities                      查看能力与风险\n  read <能力> [JSON 参数]           直接读取只读（L0）能力，不创建任务\n  watch [--after revision]           持续接收变更/重新同步通知\n  --help                            查看帮助\n  --version                         查看版本\n\n--json 应放在命令前，输出结构化 JSON。批准步骤从 1 开始。\n工作台 /quit 只关闭客户端，不停止后台服务。\n\n退出码：0 成功；1 连接、协议或后台错误；2 用法错误。\nsubmit --wait 另有：3 任务结束但未成功（未能处理、失败、已取消或已中断）；\n4 任务在等待批准；5 等待超时（任务仍在后台继续）；6 任务在等待回答。";
+pub const HELP: &str = "AgentOS · 独立任务工作台\n\n用法：agentos [--socket 路径 | --state-dir 路径] [--json] <命令>\n\n  workbench                         实时终端工作台（默认）\n  submit [--thread task-N] [--wait] [--timeout 秒] <意图>\n                                    提交任务，客户端退出后仍继续；--wait 等到任务结束再返回；\n                                    --thread 接着某个线程说（用它第一个任务的编号）\n  tasks [--before task-N] [--limit N] [--state 状态] [--thread task-N]\n  task task-N                       查看计划、结果与批准令牌\n  cancel task-N                     取消任务的后续步骤\n  reply task-N 步骤 <回答>          回答任务在这一步提出的问题\n  approve task-N 步骤 --confirmation 令牌 [--pin-stdin]\n                                    批准一步；不可逆的步骤加 --pin-stdin，从标准输入读取 PIN\n  reject task-N 步骤 --confirmation 令牌\n                                    只拒绝这一步：它不执行，任务换别的办法继续；不需要 PIN\n  preauthorize <能力> [规则…] [--any-other-args] [--expires 时长] [--caller id] [--pin-stdin]\n                                    预授权：符合规则的调用不再逐次确认。规则：\n                                    --equals 字段=值　--one-of 字段=值1,值2　--prefix 字段=文本\n                                    --under 字段=目录　--any 字段；时长如 30m、2h、7d\n  preauthorizations                 查看仍然有效的预授权\n  revoke pre-N                      撤销一条预授权，立即生效\n  callers                           查看已注册的外部调用方\n  caller add <id> --name 名字 [--allow 能力或前缀]… [--max-risk L0|L1|L2] [--pin-stdin]\n                                    注册外部调用方，或整体替换它的清单；默认什么都不给\n  caller remove <id>                撤销调用方，它的预授权一并撤销\n  mcp --caller <id>                 以这个调用方的身份提供 MCP 服务（标准输入输出）\n  wechat login                      用微信扫码绑定 ClawBot（微信：我 → 设置 → 插件）\n  wechat                            收发微信消息：你发的文字交给 AgentOS，结果发回微信\n  capabilities                      查看能力与风险\n  doctor                            诊断：任务服务是否在运行、规划器、沙箱、PIN、上次崩溃，每个问题怎么办\n  read <能力> [JSON 参数]           直接读取只读（L0）能力，不创建任务\n  watch [--after revision]           持续接收变更/重新同步通知\n  --help                            查看帮助\n  --version                         查看版本\n\n--json 应放在命令前，输出结构化 JSON。批准步骤从 1 开始。\n工作台 /quit 只关闭客户端，不停止后台服务。\n\n退出码：0 成功；1 连接、协议或后台错误；2 用法错误。\nsubmit --wait 另有：3 任务结束但未成功（未能处理、失败、已取消或已中断）；\n4 任务在等待批准；5 等待超时（任务仍在后台继续）；6 任务在等待回答。\ndoctor 另有：3 任务服务在运行，但有需要处理的问题。";
 
 pub const WORKBENCH_HELP: &str = "普通输入：提交意图，接着本次对话说；任务在后台继续\n/new：开始一段新的对话\n/tasks 或 /refresh：刷新当前页　/next：更早任务　/prev：返回上一页\n/latest：最近任务　/task task-N：选中并展示完整计划与结果\n/cancel task-N：取消后续步骤　/approve task-N 步骤：批准当前已展示的确认请求\n/reject task-N 步骤：只拒绝这一步，任务继续\n/reply task-N 步骤 回答：回答任务提出的问题\n/capabilities：查看能力　/help：帮助　/quit：退出工作台";
 
@@ -37,6 +37,8 @@ pub enum Action {
         timeout: Duration,
     },
     Watch(Option<u64>),
+    /// Check the service and say what needs attention.
+    Doctor,
     /// Serve MCP on standard input and output as a registered caller.
     Mcp {
         caller: String,
@@ -443,6 +445,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
         Some("wechat") if rest.len() == 1 => Action::Wechat { login: false },
         Some("wechat") if rest.len() == 2 && rest[1] == "login" => Action::Wechat { login: true },
         Some("capabilities") if rest.len() == 1 => Action::Request(Command::Capabilities {}),
+        Some("doctor") if rest.len() == 1 => Action::Doctor,
         Some("read") if rest.len() == 2 || rest.len() == 3 => {
             let name = rest[1].trim();
             if name.is_empty() || name.len() > MAX_CAPABILITY_NAME_BYTES || name.starts_with("--") {
@@ -735,6 +738,14 @@ mod tests {
         ] {
             assert!(argv(&args).is_err(), "{args:?}");
         }
+    }
+
+    #[test]
+    fn doctor_takes_no_arguments_and_may_answer_in_json() {
+        assert!(matches!(argv(&["doctor"]).unwrap().action, Action::Doctor));
+        let options = argv(&["--json", "doctor"]).unwrap();
+        assert!(options.json && matches!(options.action, Action::Doctor));
+        assert!(argv(&["doctor", "--fix"]).is_err());
     }
 
     #[test]

@@ -141,6 +141,12 @@ impl Planner for RulePlanner {
         {
             return step("improve.report", json!({}));
         }
+        // How the service itself is running, as opposed to the history
+        // above: "体检" is taken by the report on past tasks.
+        if offered("system.status") && mentions(&["系统状态", "服务状态", "诊断", "system status"])
+        {
+            return step("system.status", json!({}));
+        }
         if offered("evolve.list") && mentions(&["插件", "plugins", "新能力"]) {
             return step("evolve.list", json!({}));
         }
@@ -214,6 +220,7 @@ mod tests {
         "improve.report",
         "improve.learned",
         "improve.rollback",
+        "system.status",
         "home.list",
         "agent.notes",
     ];
@@ -354,6 +361,8 @@ mod tests {
             ("停用 unit.convert", "evolve.disable"),
             ("看看插件", "evolve.list"),
             ("看看体检报告", "improve.report"),
+            ("看看系统状态", "system.status"),
+            ("诊断一下", "system.status"),
             ("你学到了什么", "improve.learned"),
             ("撤回 lesson-3", "improve.rollback"),
             ("家里的设备有哪些", "home.list"),

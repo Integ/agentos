@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use agentos_audit::AuditLog;
 use agentos_core::AgentId;
+use agentos_ipc::status::SystemStatus;
 use agentos_planner::claude::{ClaudeConfig, ClaudePlanner};
 use agentos_planner::llm::TextModel;
 use agentos_planner::openai::{OpenAiConfig, OpenAiPlanner};
@@ -36,6 +37,7 @@ use agentos_taskd::migrate;
 use agentos_taskd::preauth::PreauthStore;
 use agentos_taskd::replay::{self, Pick, Replayer, Summary};
 use agentos_taskd::service::Service;
+use agentos_taskd::status::{Findings, StatusCapability};
 use agentos_taskd::voice::{SpeechOutput, Voice, VoiceConfig};
 
 const HELP: &str = "\
@@ -239,8 +241,10 @@ fn set_pin(path: &Path) -> io::Result<()> {
         return Err(invalid("两次输入的 PIN 不一致"));
     }
     PinVault::open(path)?.set(&first)?;
+    // A running service reads the PIN file at every check (see
+    // identity.rs), so this is in force without a restart.
     println!(
-        "PIN 已设置（{}）。不可逆的操作现在需要输入它才能批准。",
+        "PIN 已设置（{}）。不可逆的操作现在需要输入它才能批准，正在运行的任务服务也一样，不需要重启。",
         path.display()
     );
     Ok(())
@@ -248,7 +252,10 @@ fn set_pin(path: &Path) -> io::Result<()> {
 
 fn clear_pin(path: &Path) -> io::Result<()> {
     match std::fs::remove_file(path) {
-        Ok(()) => println!("已删除 PIN（{}）。不可逆的操作将被拒绝。", path.display()),
+        Ok(()) => println!(
+            "已删除 PIN（{}）。不可逆的操作现在一律拒绝，正在运行的任务服务也一样。",
+            path.display()
+        ),
         Err(e) if e.kind() == io::ErrorKind::NotFound => println!("没有设置过 PIN。"),
         Err(e) => return Err(e),
     }
@@ -451,6 +458,10 @@ async fn serve() -> io::Result<()> {
         Mode::VerifyAudit => return verify_audit(&audit_path),
         Mode::Replay => return replay(&state_dir, options.planner, pick).await,
     }
+    // What starting up found, for `system.status`: the journal is not where
+    // a user (or the agent) looks when something does not work.
+    let mut found = Findings::default();
+    let mut startup = Vec::new();
     if !explicit_state_dir {
         if let Some(legacy) = migrate::legacy_dir(|name| std::env::var(name).ok()) {
             // Before anything opens these files. A failure is reported and
@@ -460,13 +471,18 @@ async fn serve() -> io::Result<()> {
                     eprintln!("已从 agentosd 迁移数据（{} 未改动）：", legacy.display());
                     for line in report.lines() {
                         eprintln!("  {line}");
+                        startup.push(format!("从 agentosd 迁移：{line}"));
                     }
                 }
                 Ok(None) => {}
-                Err(error) => eprintln!(
-                    "从 agentosd 迁移数据失败（{}），下次启动时重试：{error}",
-                    legacy.display()
-                ),
+                Err(error) => {
+                    let line = format!(
+                        "从 agentosd 迁移数据失败（{}），下次启动时重试：{error}",
+                        legacy.display()
+                    );
+                    eprintln!("{line}");
+                    startup.push(line);
+                }
             }
         }
     }
@@ -474,6 +490,8 @@ async fn serve() -> io::Result<()> {
     crash::install(&state_dir);
     let planner_choice = options.planner.clone();
     let (planner, text_model, label) = make_planner(options.planner)?;
+    // Only the offline planner comes without a text model.
+    found.rule_planner = text_model.is_none();
     let socket = options
         .socket
         .unwrap_or_else(|| agentos_ipc::default_socket_path(&state_dir));
@@ -485,18 +503,20 @@ async fn serve() -> io::Result<()> {
     // A damaged or altered log must not keep the machine from starting: it
     // is set aside untouched and a new one begins, saying so.
     let (audit, set_aside) = AuditLog::open_or_set_aside(audit_path)?;
-    if let Some(old) = set_aside {
+    if let Some(old) = &set_aside {
         eprintln!(
             "审计日志无法继续写入（已损坏或被改动），原文件保留为 {}，已开始新的日志。",
             old.display()
         );
     }
+    found.audit_set_aside = set_aside;
     let audit = Arc::new(audit);
     if let Some(summary) = crash::take_last(&state_dir) {
         eprintln!(
             "上次 agentos-taskd 异常退出：{summary}\n  完整报告：{}（也在 journalctl -t agentos-taskd 里）",
             state_dir.join("crash.prev.txt").display()
         );
+        found.crash = Some(summary.clone());
         audit.append(agentos_audit::AuditEvent::DaemonCrashed { summary })?;
     }
     let pins = Arc::new(
@@ -538,6 +558,7 @@ async fn serve() -> io::Result<()> {
         }
         Err(error) => {
             eprintln!("文件工作区不可用，没有注册 files.*：{error}");
+            found.files_error = Some(error.to_string());
             format!("不可用（{error}）")
         }
     };
@@ -548,6 +569,10 @@ async fn serve() -> io::Result<()> {
         ScheduleStore::open(&state_dir),
     )?);
     schedule::register_all(&mut registry, schedules.clone());
+    // The service's account of itself; its report is filled in below, once
+    // everything has started.
+    let status = Arc::new(StatusCapability::new(pins.clone(), schedules.clone()));
+    registry.register(status.clone());
 
     // Self-evolution: plugins the system wrote for itself, sandboxed.
     let sandbox = SandboxMode::detect();
@@ -559,9 +584,11 @@ async fn serve() -> io::Result<()> {
     )?);
     // A damaged plugin does not stop the service, but it must not vanish
     // without a word either.
-    for problem in plugins.problems() {
+    found.plugin_problems = plugins.problems();
+    for problem in &found.plugin_problems {
         eprintln!("{problem}");
     }
+    found.sandboxed = sandbox == SandboxMode::Bubblewrap;
     let text_model = text_model.or_else(fallback_text_model);
     let generator: Arc<dyn PluginGenerator> = match text_model.clone() {
         Some(model) => Arc::new(LlmGenerator::new(model)),
@@ -581,11 +608,34 @@ async fn serve() -> io::Result<()> {
     );
     match McpConfig::load(&state_dir.join("mcp.json")) {
         Ok(config) => {
+            // The notes may quote a server (its errors, its tool names), so
+            // they go to the journal only; the status report counts tools.
             for note in mcp::register_all(&mut registry, &config, &containment).await {
                 eprintln!("{note}");
             }
+            let specs = registry.specs();
+            let mut names: Vec<_> = config
+                .servers
+                .iter()
+                .filter(|(_, server)| !server.disabled)
+                .map(|(name, _)| name.clone())
+                .collect();
+            names.sort();
+            for name in names {
+                let prefix = format!("mcp.{}.", mcp::sanitize(&name));
+                let tools = specs
+                    .iter()
+                    .filter(|spec| spec.name.as_str().starts_with(&prefix))
+                    .count();
+                found
+                    .mcp_servers
+                    .push(agentos_ipc::status::McpServer { name, tools });
+            }
         }
-        Err(e) => eprintln!("{e}"),
+        Err(e) => {
+            eprintln!("{e}");
+            found.mcp_config_error = Some(e.to_string());
+        }
     }
     // HASS_URL + HASS_TOKEN: the smart home, through Home Assistant.
     let home = match HassConfig::from_env().map(Hass::new) {
@@ -594,7 +644,10 @@ async fn serve() -> io::Result<()> {
             homeassistant::register_all(&mut registry, Arc::new(hass));
             label
         }
-        Some(Err(e)) => format!("无法创建 Home Assistant 客户端：{e}"),
+        Some(Err(e)) => {
+            found.smart_home_error = Some(e.to_string());
+            format!("无法创建 Home Assistant 客户端：{e}")
+        }
         None => "未配置".into(),
     };
 
@@ -606,6 +659,7 @@ async fn serve() -> io::Result<()> {
     let mut agents = AgentDirectory::with_builtin();
     for note in agents.load_dir(&state_dir.join("agents")) {
         eprintln!("{note}");
+        startup.push(note);
     }
     let agent_names: Vec<String> = agents
         .all()
@@ -619,6 +673,7 @@ async fn serve() -> io::Result<()> {
     let (voice_config, voice_notes) = VoiceConfig::from_env();
     for note in voice_notes {
         eprintln!("{note}");
+        startup.push(note);
     }
     let voice = Voice::new(voice_config, audit.clone());
     let mut expr = ExpressionHub::new(audit.clone());
@@ -660,7 +715,10 @@ async fn serve() -> io::Result<()> {
             butler = butler.with_judge(Arc::new(LlmJudge::new(model.clone())));
             "已启用"
         }
-        (None, true) => "需要配置一个模型，未启用",
+        (None, true) => {
+            found.judge_without_model = true;
+            "需要配置一个模型，未启用"
+        }
         _ => "未启用",
     };
 
@@ -673,7 +731,10 @@ async fn serve() -> io::Result<()> {
     {
         None => "未启用（AGENTOS_IMPROVE=1 开启，会消耗 token）".to_string(),
         Some(settings) => match (make_planner(planner_choice)?, text_model.clone()) {
-            ((_, None, _), _) | (_, None) => "需要模型规划器，未启用".to_string(),
+            ((_, None, _), _) | (_, None) => {
+                found.improve_without_model = true;
+                "需要模型规划器，未启用".to_string()
+            }
             ((planner, Some(_), planner_label), Some(model)) => {
                 let label = format!(
                     "已启用，空闲 {} 秒后每 {} 秒一轮，{}",
@@ -702,29 +763,38 @@ async fn serve() -> io::Result<()> {
             }
         },
     };
+    let audit_label = audit.path().display().to_string();
     let server = Service::with_butler(butler, audit, Some(pins.clone()))
         .with_voice(voice)
         .with_schedules(schedules.clone())
         .bind(&socket)
         .await?;
-    println!(
-        "AgentOS v{} · {label}\n状态目录：{}\nUnix socket：{}",
-        env!("CARGO_PKG_VERSION"),
-        state_dir.display(),
-        server.path().display()
+    status.publish(
+        SystemStatus {
+            version: env!("CARGO_PKG_VERSION").into(),
+            started_at_ms: agentos_core::now_ms(),
+            state_dir: state_dir.display().to_string(),
+            socket: server.path().display().to_string(),
+            audit: audit_label,
+            planner: label,
+            sandbox: sandbox.label().into(),
+            files: files_label,
+            smart_home: home,
+            voice: voice_label,
+            judge: judge.into(),
+            improve,
+            budget: budget_label(budget),
+            agents: agent_names,
+            startup,
+            ..SystemStatus::default()
+        },
+        &found,
     );
-    println!(
-        "子 Agent：{}\n插件：{}\n文件工作区：{files_label}\n定时任务：{} 个\n智能家居：{home}\n语音：{voice_label}\n裁判：{judge}\n自我改进：{improve}\n每个任务的预算：{}\nPIN：{}",
-        agent_names.join("、"),
-        sandbox.label(),
-        schedules.list().len(),
-        budget_label(budget),
-        if pins.is_set() {
-            "已设置，不可逆的操作批准时需要输入"
-        } else {
-            "未设置，不可逆的操作会被拒绝（agentos-taskd --set-pin）"
-        }
-    );
+    // The same report `agentos doctor` and the agent read, so the journal
+    // and the user never see two versions of the service's state.
+    if let Some(report) = status.current() {
+        println!("{}", report.render());
+    }
     println!("后台服务已就绪。使用 agentos --socket <路径> workbench 连接。");
     server
         .run_until(async move {

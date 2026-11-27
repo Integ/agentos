@@ -30,6 +30,7 @@ node --test crates/web-shell/assets/*.test.mjs
 | 协议方法、帧、错误码 | `crates/ipc/`，服务端在 `crates/taskd/src/service.rs`，同时更新 `docs/protocol-v1.md` |
 | 管家循环：规划、策略、委派、批准 | `crates/taskd/src/butler.rs` |
 | 审计事件 | `crates/audit/` |
+| 任务服务对自己的报告（`system.status`）和 `agentos doctor` | `crates/taskd/src/status.rs`（启动时在 `main.rs` 里收集）、`crates/cli/src/doctor.rs`，共享的结构在 `crates/ipc/src/status.rs`；报告里只放任务服务自己的话，外部程序说的只进日志 |
 | 终端、浏览器、原生桌面 | `crates/cli/`、`crates/web-shell/`、`crates/shell/` |
 | 按住说话、朗读、崩溃报告、旧数据迁移 | `crates/taskd/src/voice.rs`、`crash.rs`、`migrate.rs` |
 | 定时任务 | 存储和能力在 `crates/services/src/schedule.rs`，到期提交在 `crates/taskd/src/service.rs` |

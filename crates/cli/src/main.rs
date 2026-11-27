@@ -3,7 +3,7 @@ use std::io;
 use agentos_cli::args::{self, Action};
 use agentos_cli::client::{Client, ClientError};
 use agentos_cli::wait::wait_for_task;
-use agentos_cli::{mcp, render, wechat, workbench};
+use agentos_cli::{doctor, mcp, render, wechat, workbench};
 use agentos_ipc::{Command, Reply};
 
 #[tokio::main]
@@ -26,6 +26,22 @@ async fn main() -> io::Result<()> {
             Ok(())
         }
         Action::Workbench => return workbench::run(client).await,
+        Action::Doctor => {
+            // The default socket lives in the state directory, which is
+            // where a crash report waits while the service is down.
+            let state_dir = options
+                .state_dir
+                .clone()
+                .or_else(|| client.path().parent().map(Into::into));
+            let report = doctor::examine(&client, state_dir.as_deref()).await;
+            if options.json {
+                println!("{}", report.json());
+            } else {
+                // Parts of the report come from outside programs.
+                println!("{}", render::safe_text(&report.text()));
+            }
+            std::process::exit(report.exit_code());
+        }
         Action::Mcp { caller } => return mcp::serve(client.as_caller(caller)).await,
         Action::Wechat { login } => {
             let dir = wechat::state_dir(options.state_dir)?;

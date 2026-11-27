@@ -2,6 +2,7 @@
 
 pub mod args;
 pub mod client;
+pub mod doctor;
 pub mod mcp;
 pub mod render;
 pub mod wait;

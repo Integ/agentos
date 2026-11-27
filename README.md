@@ -44,7 +44,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 - **一等公民的 Agent（v0.4）**：任务并行执行（默认同时 4 个）；会话线程让你接着上一句话说；缺信息时 Agent 用 `ask.user` 停下来问你；每个任务有规划轮数、token 和执行时长预算，用量写进任务和审计；`agentos preauthorize` 事先许可一类 L1/L2 调用；`agentos mcp --caller …` 让别的 Agent 通过 MCP 使用 AgentOS。见 [docs/v0.4-design.md](docs/v0.4-design.md)。
 - **持久任务与多个界面（v0.3）**：`agentos-taskd` 把任务放在后台服务里，命令行、终端工作台、浏览器和原生桌面通过同一个 Unix socket 协议连接；关掉界面任务照常进行，历史可分页，变更实时通知，批准绑定到具体任务的具体步骤。见 [docs/persistent-workspace.md](docs/persistent-workspace.md)。
 - **情景式 Web Shell（v0.3）**：语音优先的浏览器界面，模型根据真实任务和笔记组织画面（只能选组件、顺序和宽度）；WebRTC 实时语音可连续对话、开口打断，但语音不能代替批准。见 [docs/ambient-shell.md](docs/ambient-shell.md)。
-- **稳健性与运维**：任务服务崩溃时写入 journal 和 `crash.txt`、由用户服务退避重启，并在桌面「最近活动」里提示；journal 跨重启保留；`sudo agentos-update` 在线更新，先自检再替换，可回滚。
+- **稳健性与运维**：`agentos doctor` 一条命令诊断任务服务（连接、版本、规划器、沙箱、PIN、MCP、上次崩溃），每个问题写明怎么办，管家读的是同一份报告（说“诊断一下”）；任务服务崩溃时写入 journal 和 `crash.txt`、由用户服务退避重启，并在桌面「最近活动」里提示；journal 跨重启保留；`sudo agentos-update` 在线更新，先自检再替换，可回滚。见[排障](docs/troubleshooting.md)。
 
 更多文档：
 
@@ -55,6 +55,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 - 任务服务、命令行与工作台：[docs/persistent-workspace.md](docs/persistent-workspace.md)
 - 历史设计：[docs/v0.3-design.md](docs/v0.3-design.md)、[docs/v0.2-design.md](docs/v0.2-design.md)
 - 安装：[docs/install.md](docs/install.md)，在线更新：[docs/update.md](docs/update.md)
+- 排障：[docs/troubleshooting.md](docs/troubleshooting.md)（先运行 `agentos doctor`）
 
 ## 安装到 PC
 
@@ -109,7 +110,7 @@ cargo run -p agentos-taskd -- --planner rule --state-dir /tmp/agentos-dev
 cargo run -p agentos-cli -- --state-dir /tmp/agentos-dev workbench
 ```
 
-各程序都支持 `--help` 和 `--version`（例如 `cargo run -p agentos-taskd -- --help`），写错的参数会报错退出，而不是被忽略。
+各程序都支持 `--help` 和 `--version`（例如 `cargo run -p agentos-taskd -- --help`），写错的参数会报错退出，而不是被忽略。连不上或者行为不对时，运行 `cargo run -p agentos-cli -- --state-dir /tmp/agentos-dev doctor`，它会列出问题和办法（见[排障](docs/troubleshooting.md)）。
 
 然后在工作台里输入意图，例如：
 

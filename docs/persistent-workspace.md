@@ -104,6 +104,7 @@ agentos task task-1
 agentos cancel task-2
 agentos --json tasks
 agentos watch
+agentos doctor
 ```
 
 默认连接相同的状态目录；可在命令前指定 `--state-dir` 或 `--socket`。`--json` 适合脚本，`watch --after <revision>` 接收实时变更与重新同步通知。
@@ -119,6 +120,9 @@ agentos watch
 | 4 | `submit --wait`：任务在等待批准，需要人来处理 |
 | 5 | `submit --wait`：等待超时，任务仍在后台继续 |
 | 6 | `submit --wait`：任务在等待回答，需要人用 `agentos reply` 回答 |
+| 3 | `doctor`：任务服务在运行，但有需要处理的问题 |
+
+`doctor` 诊断这台机器上的 AgentOS：先确认连得上任务服务、两边版本一致，再读任务服务对自己的报告（只读能力 `system.status`：规划器、沙箱、PIN、上次崩溃、每个 MCP server 有没有起来），把每个问题和办法列出来；连不上时说明是没在运行、socket 不对，还是崩溃后没有重新启动。它只读、不发送任何东西，`--json` 输出同样的内容。对管家说“诊断一下”或“系统状态”读的是同一份报告。见[排障](troubleshooting.md)。
 
 `submit --thread task-N` 接着一段对话说（`task-N` 是这段对话第一个任务的编号，`submit` 的输出里会给出）；`tasks --thread task-N` 只列出这段对话的任务。Agent 提问时任务显示为“等待回答”，用 `agentos reply task-N 步骤 <回答>` 回答。
 
@@ -150,7 +154,7 @@ agentos approve task-3 1 --confirmation <令牌>
 agentos reject task-3 1 --confirmation <令牌>
 ```
 
-不可逆（L3）的步骤还需要 PIN 来证明是谁在批准。先用 `agentos-taskd --state-dir <目录> --set-pin` 设置；没有设置 PIN 时，L3 步骤直接拒绝执行。批准时加 `--pin-stdin`，PIN 从标准输入读取，不会出现在命令行里：
+不可逆（L3）的步骤还需要 PIN 来证明是谁在批准。先用 `agentos-taskd --state-dir <目录> --set-pin` 设置；没有设置 PIN 时，L3 步骤直接拒绝执行。任务服务每次核对都重新读 PIN 文件，所以服务运行时设置、更换或删除 PIN 立即生效，不需要重启，审计里记一条 `pin_changed`（不含 PIN）。批准时加 `--pin-stdin`，PIN 从标准输入读取，不会出现在命令行里：
 
 ```sh
 agentos approve task-3 1 --confirmation <令牌> --pin-stdin
