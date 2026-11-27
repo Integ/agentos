@@ -54,7 +54,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 - 提示注入评测：[docs/injection-eval.md](docs/injection-eval.md)
 - 任务服务、命令行与工作台：[docs/persistent-workspace.md](docs/persistent-workspace.md)
 - 历史设计：[docs/v0.3-design.md](docs/v0.3-design.md)、[docs/v0.2-design.md](docs/v0.2-design.md)
-- 安装：[docs/install.md](docs/install.md)，在线更新：[docs/update.md](docs/update.md)
+- 安装：[docs/install.md](docs/install.md)，不写镜像装到已有的 Linux：[docs/install-standalone.md](docs/install-standalone.md)，在线更新：[docs/update.md](docs/update.md)
 - 排障：[docs/troubleshooting.md](docs/troubleshooting.md)（先运行 `agentos doctor`）
 
 ## 安装到 PC
@@ -64,6 +64,16 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 - 镜像自带 Intel、NVIDIA、MediaTek 显卡固件、声卡 SOF 固件和 CPU 微码，Intel N100 这类核显小主机可以直接进桌面。
 - 内置 fcitx5 拼音输入法；笔记本触摸板默认开启轻触点击。
 - 图形桌面起不来时自动退回文本模式（fbterm，中文正常显示），原因记在 `journalctl -t agentos-sway`。
+
+### 装到已有的 Linux（不写镜像）
+
+只想要任务内核（后台任务服务和 `agentos` 命令），不想重装系统：
+
+```sh
+git clone https://github.com/Integ/agentos && cd agentos && ./install.sh
+```
+
+装给当前用户（`~/.local/bin` 和 systemd 用户服务），不需要 sudo，最后运行 `agentos doctor` 告诉你还缺什么。可以重复运行，`./install.sh --uninstall` 卸载，状态目录和审计日志都保留。详见 [docs/install-standalone.md](docs/install-standalone.md)。
 
 ### 升级
 
@@ -96,6 +106,7 @@ crates/
   shell/     原生桌面 agentos-shell：玻璃风格桌面与设置助理
   eval/      评测 agentos-eval：提示注入评测（替身能力、脚本化的最坏情况与真实模型）
 image/       可启动磁盘镜像：构建脚本、系统集成文件（设置助理、会话脚本、agentos-update）、OTA 更新包、QEMU 冒烟测试
+install.sh   独立安装：不写镜像，把任务内核装给已有 Linux 上的当前用户
 docs/        各部分的文档；docs/media/intro-video/ 是介绍视频的源文件
 ```
 

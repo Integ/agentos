@@ -31,6 +31,9 @@ jobs:
       # and agentos; already built by the tests), and the v0.4.0 updater
       # against the same bundle.
       - run: cargo build -p agentos-taskd -p agentos-cli && image/test/update-test.sh
+      # The standalone install.sh end to end against the runner's systemd user
+      # manager, with the same debug binaries.
+      - run: tests/install-standalone.sh target/debug
 
   # The declared rust-version is a promise for every crate, including the
   # sandboxed services and the graphical shell that the test matrix below

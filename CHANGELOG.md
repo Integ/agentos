@@ -6,6 +6,7 @@
 
 - **许可证**：采用 Apache License 2.0（仓库根目录的 `LICENSE`），各 crate 的 `Cargo.toml` 也写明了。
 - **冻结外围功能**：开发集中在任务内核的安全、能力和单独安装。Web Shell、原生桌面、语音、智能家居、自我改进和镜像只修 bug 和安全问题，不加新功能，见 [AGENTS.md](AGENTS.md#当前重点与冻结)。
+- **不写镜像也能安装**：在已有的 Linux 上运行仓库根目录的 `./install.sh`，把 `agentos-taskd` 和 `agentos` 装给当前用户（默认 `~/.local/bin`，不需要 sudo），装上 systemd 用户服务 `agentos-taskd` 并启动，最后运行 `agentos doctor` 列出还缺什么。设置在 `~/.config/agentos/agentos.env`，只写一次模板、之后不覆盖；任务服务只认这个文件，启动前清掉环境里 `AGENTOS_`、`ANTHROPIC_`、`OPENAI_`、`HASS_` 开头的变量，登录环境里给别的工具设的 key 不会让它改用付费模型。可以重复运行，没有变化时不重启任务服务；`--from` 用编译好的程序（例如 Releases 里更新包中的），`--uninstall` 卸载，设置和状态目录（包括只追加的审计日志）都保留。镜像机器和 root 运行会被拒绝。见 [docs/install-standalone.md](docs/install-standalone.md)。思路参考 Omarchy：一条命令装好，默认值合理。
 - **MCP server 在沙箱里运行**（行为变化）：MCP server 默认在 bubblewrap 沙箱里运行，能看到的只有只读的系统目录、一个自己的私有主目录（实际在状态目录的 `mcp/<server>/` 里）、`mcp.json` 里 `sandbox.read` 和 `sandbox.write` 开放的路径；默认可以联网，`"network": false` 关掉。AgentOS 的状态目录、旧 agentosd 的数据目录、控制 socket 和审计日志永远不在沙箱里：此前 server 以桌面用户的全部权限运行，能改写策略文件，或者连上控制 socket 拿到批准令牌，自己批准它的输出引出的步骤。`env` 改为通过环境变量交给 server，不出现在命令行上。见 [docs/mcp.md](docs/mcp.md#沙箱)。**升级注意**：
   - 装在主目录里的命令（nvm 装的 `npx`、uv 装的 `uvx`），以及 server 要读写的目录，要写进 `sandbox`；
   - 没有可用沙箱的机器（macOS、没装 bubblewrap）上，只有写了 `"sandbox": false` 的 server 才会启动；
