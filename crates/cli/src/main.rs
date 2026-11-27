@@ -3,7 +3,7 @@ use std::io;
 use agentos_cli::args::{self, Action};
 use agentos_cli::client::{Client, ClientError};
 use agentos_cli::wait::wait_for_task;
-use agentos_cli::{doctor, help, mcp, render, style, wechat, workbench};
+use agentos_cli::{doctor, help, mcp, render, style, theme, wechat, workbench};
 use agentos_ipc::{Command, Reply};
 
 #[tokio::main]
@@ -30,6 +30,17 @@ async fn main() -> io::Result<()> {
             println!("agentos {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        // A preference of this user's: no task service involved.
+        Action::Theme(choice) => match theme::command(choice.as_deref(), options.json) {
+            Ok(text) => {
+                println!("{text}");
+                Ok(())
+            }
+            Err(error) => {
+                eprintln!("无法切换主题：{}", render::safe_text(&error.to_string()));
+                std::process::exit(1);
+            }
+        },
         Action::Workbench => return workbench::run(client).await,
         Action::Doctor => {
             // The default socket lives in the state directory, which is

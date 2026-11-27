@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use agentos_cli::client::{Client, ClientError};
+use agentos_cli::workbench::{waiting_on_user, Waiting};
 use agentos_core::{CapabilitySpec, RiskLevel};
 use agentos_ipc::{Command, EventKind, ListenAction, NoticeLevel, Reply, SpeakMode};
 use agentos_runtime::{StepState, Task, TaskId, TaskState};
@@ -42,6 +43,28 @@ pub enum Request {
         mode: Option<SpeakMode>,
         stop: bool,
     },
+    /// Show what a read-only capability says (notes, plugins, the service's
+    /// report): a protocol `read`, never an intent in the user's name.
+    Read(&'static str),
+}
+
+/// The capabilities the page may read directly. The service only serves
+/// read-only ones with trusted output anyway; the list keeps the page to
+/// what it has a place for.
+pub const READS: [&str; 3] = ["notes.list", "evolve.list", agentos_ipc::status::CAPABILITY];
+
+/// The menu bar's facts, from the same look-up the workbench's status line
+/// uses: what runs, what waits on the user, problems and the planner.
+pub fn status_event(glance: &Waiting) -> Value {
+    json!({
+        "type": "status",
+        "running": glance.running,
+        "running_more": glance.running_more,
+        "waiting": glance.tasks.len(),
+        "waiting_more": glance.more,
+        "problems": glance.problems,
+        "planner": glance.planner,
+    })
 }
 
 /// What the person decided about the step they were shown.
@@ -282,6 +305,12 @@ impl Session {
                 .shown
                 .get(&id)
                 .is_none_or(|before| !before.state.is_terminal());
+        // The menu bar counts tasks by state: only a change of state can
+        // change it, not a step's progress.
+        let moved = self
+            .shown
+            .get(&id)
+            .is_none_or(|before| before.state != task.state);
         for event in translate(self.shown.get(&id), &task, &self.specs) {
             emit(event);
         }
@@ -291,7 +320,46 @@ impl Session {
         if ended {
             self.activity(emit).await?;
         }
+        if moved {
+            self.glance(emit).await?;
+        }
         Ok(())
+    }
+
+    /// The menu bar's facts, read fresh. Returns what was found, so a
+    /// resync can also surface waiting tasks older than its first page.
+    async fn glance(&self, emit: &impl Fn(Value) -> bool) -> Result<Waiting, ClientError> {
+        let glance = waiting_on_user(&self.client).await?;
+        emit(status_event(&glance));
+        Ok(glance)
+    }
+
+    /// What a read-only capability says, as a note in the panel.
+    async fn read(
+        &self,
+        capability: &'static str,
+        emit: &impl Fn(Value) -> bool,
+    ) -> Result<(), ClientError> {
+        let command = Command::Read {
+            capability: agentos_core::CapabilityName::new(capability),
+            args: json!({}),
+        };
+        match self.client.request(command).await {
+            Ok(Reply::Value { value, .. }) => {
+                emit(
+                    json!({"type": "read", "capability": capability, "ok": true, "text": result_text(&value)}),
+                );
+                Ok(())
+            }
+            Ok(_) => Ok(()),
+            Err(ClientError::Remote(error)) => {
+                emit(
+                    json!({"type": "read", "capability": capability, "ok": false, "text": error.message}),
+                );
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Recent activity as the audit log records it.
@@ -372,6 +440,19 @@ impl Session {
                 }
             }
             self.shown.insert(id, task);
+        }
+        // A task that has waited on the user since before the first page
+        // still needs its approval or question on screen.
+        let glance = self.glance(emit).await?;
+        for summary in glance.tasks.iter().rev() {
+            let id = summary.id.0;
+            if !self.shown.contains_key(&id) {
+                let task = self.task(id).await?;
+                for event in translate(None, &task, &self.specs) {
+                    emit(event);
+                }
+                self.shown.insert(id, task);
+            }
         }
         self.activity(emit).await
     }
@@ -463,6 +544,7 @@ impl Session {
                 }
             }
             Request::Confirm { answer, task, pin } => self.confirm(answer, task, pin, emit).await,
+            Request::Read(capability) => self.read(capability, emit).await,
         };
         if let Err(error) = result {
             emit(json!({"type": "expression", "kind": "error", "text": error.to_string()}));
@@ -682,6 +764,24 @@ mod tests {
                 other => other.to_string(),
             })
             .collect()
+    }
+
+    #[test]
+    fn the_menu_bar_gets_the_same_facts_as_the_workbench_status_line() {
+        let glance = Waiting {
+            running: 2,
+            problems: Some(1),
+            planner: Some("规则规划器".into()),
+            ..Waiting::default()
+        };
+        let event = status_event(&glance);
+        assert_eq!(event["type"], "status");
+        assert_eq!(event["running"], 2);
+        assert_eq!(event["waiting"], 0);
+        assert_eq!(event["problems"], 1);
+        assert_eq!(event["planner"], "规则规划器");
+        // An older service without the report says nothing, not zero.
+        assert!(status_event(&Waiting::default())["problems"].is_null());
     }
 
     #[test]
@@ -1029,6 +1129,48 @@ mod tests {
             .unwrap()
             .iter()
             .any(|item| item["kind"] == "device"));
+        drop(requests);
+        bridge.join().unwrap();
+        stop();
+    }
+
+    #[test]
+    fn the_menu_bar_counts_and_reads_come_from_a_real_task_service() {
+        use std::sync::mpsc as std_mpsc;
+        let (socket, stop) = serve("bar", None);
+        let (requests, receiver) = mpsc::unbounded_channel();
+        let (events_tx, events) = std_mpsc::channel::<Value>();
+        let bridge = std::thread::spawn(move || {
+            run(socket, receiver, move |event| events_tx.send(event).is_ok())
+        });
+        let next = |wanted: &str| loop {
+            let event = events
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap_or_else(|_| panic!("no {wanted} event"));
+            if event["type"] == wanted {
+                return event;
+            }
+        };
+        // Connecting brings the menu bar up to date, nothing waiting yet.
+        let first = next("status");
+        assert_eq!(
+            (first["running"].as_u64(), first["waiting"].as_u64()),
+            (Some(0), Some(0))
+        );
+        requests
+            .send(Request::Intent("记一下 牛奶".into()))
+            .unwrap();
+        assert_eq!(next("done")["state"], "done");
+        // Showing the notes is a read: no task, the note as the service has it.
+        requests.send(Request::Read("notes.list")).unwrap();
+        let read = next("read");
+        assert_eq!(read["ok"], true);
+        assert!(read["text"].as_str().unwrap().contains("牛奶"), "{read}");
+        // A service without the status report answers that it has none.
+        requests
+            .send(Request::Read(agentos_ipc::status::CAPABILITY))
+            .unwrap();
+        assert_eq!(next("read")["ok"], false);
         drop(requests);
         bridge.join().unwrap();
         stop();

@@ -44,6 +44,11 @@ pub const GROUPS: &[Group] = &[
         title: "诊断与查看",
         summary: "哪里不对、最近做了什么、有哪些能力",
     },
+    Group {
+        key: "desktop",
+        title: "桌面与外观",
+        summary: "主题，桌面和终端一起换",
+    },
 ];
 
 pub const COMMANDS: &[Entry] = &[
@@ -230,6 +235,17 @@ pub const COMMANDS: &[Entry] = &[
         usage: &["ping"],
         summary: "检查连接，显示任务服务的版本",
         details: &[],
+    },
+    Entry {
+        name: "theme",
+        group: "desktop",
+        usage: &["theme", "theme <名字>"],
+        summary: "查看或切换主题：桌面、终端、窗口边框和工作台一起换",
+        details: &[
+            "名字可以写英文 id 或中文名，例如 agentos theme forest 或 agentos theme 森林。",
+            "选择存在 ~/.config/agentos/theme；正在运行的桌面和 sway 马上换好，之后打开的终端用新配色，已经开着的终端窗口不变。",
+            "不需要任务服务；--json 输出当前主题和全部主题。",
+        ],
     },
 ];
 

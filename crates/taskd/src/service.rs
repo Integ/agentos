@@ -1220,18 +1220,30 @@ impl Controller {
             let view = self.view();
             match view.readable.get(&capability) {
                 Some(target) => target.clone(),
-                None if view.specs.iter().any(|spec| spec.name == capability) => {
-                    return Err(protocol_error(
-                        "not_readable",
-                        format!("{capability} 不是只读能力，不能直接读取；请用 submit 提交意图"),
-                    ));
-                }
-                None => {
-                    return Err(protocol_error(
-                        "not_found",
-                        format!("没有能力 {capability}"),
-                    ));
-                }
+                None => match view.specs.iter().find(|spec| spec.name == capability) {
+                    // Read-only, yet refused: its output is outside content,
+                    // and only a task can carry the taint that comes with it.
+                    Some(spec) if spec.risk == RiskLevel::ReadOnly => {
+                        return Err(protocol_error(
+                            "not_readable",
+                            format!("{capability} 的结果算外部内容，只能在任务里读（读它的任务会带上污点）；请用 submit 提交意图"),
+                        ));
+                    }
+                    Some(_) => {
+                        return Err(protocol_error(
+                            "not_readable",
+                            format!(
+                                "{capability} 不是只读能力，不能直接读取；请用 submit 提交意图"
+                            ),
+                        ));
+                    }
+                    None => {
+                        return Err(protocol_error(
+                            "not_found",
+                            format!("没有能力 {capability}"),
+                        ));
+                    }
+                },
             }
         };
         match timeout(READ_TIMEOUT, target.invoke(args)).await {

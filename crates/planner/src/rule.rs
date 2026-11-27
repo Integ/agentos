@@ -141,6 +141,11 @@ impl Planner for RulePlanner {
         {
             return step("improve.report", json!({}));
         }
+        // A crash is asked about by name, and before the status below:
+        // "诊断一下崩溃" means the report, not the state as it is now.
+        if offered("system.crash") && mentions(&["崩溃", "异常退出", "crash"]) {
+            return step("system.crash", json!({}));
+        }
         // How the service itself is running, as opposed to the history
         // above: "体检" is taken by the report on past tasks.
         if offered("system.status") && mentions(&["系统状态", "服务状态", "诊断", "system status"])
@@ -221,6 +226,7 @@ mod tests {
         "improve.learned",
         "improve.rollback",
         "system.status",
+        "system.crash",
         "home.list",
         "agent.notes",
     ];
@@ -363,6 +369,8 @@ mod tests {
             ("看看体检报告", "improve.report"),
             ("看看系统状态", "system.status"),
             ("诊断一下", "system.status"),
+            ("诊断一下崩溃", "system.crash"),
+            ("为什么崩溃了？", "system.crash"),
             ("你学到了什么", "improve.learned"),
             ("撤回 lesson-3", "improve.rollback"),
             ("家里的设备有哪些", "home.list"),
@@ -387,6 +395,24 @@ mod tests {
             .plan(&intent("@notes 清空笔记"), &specs(EVERYTHING))
             .await;
         assert_eq!(plan.steps[0].args, json!({"task": "清空笔记"}));
+    }
+
+    #[tokio::test]
+    async fn a_crash_is_read_when_named_and_never_takes_a_note_away() {
+        // A note that mentions a crash is still a note.
+        assert_eq!(
+            first_with("记一下 电脑崩溃了要修", EVERYTHING)
+                .await
+                .as_deref(),
+            Some("notes.append")
+        );
+        // A service without the report still answers with its status.
+        assert_eq!(
+            first_with("诊断一下崩溃", &["system.status"])
+                .await
+                .as_deref(),
+            Some("system.status")
+        );
     }
 
     #[tokio::test]

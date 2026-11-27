@@ -70,7 +70,7 @@ pub fn problems(found: &Findings, status: &SystemStatus) -> Vec<Problem> {
                 format!("这次启动之前，任务服务异常退出过：{summary}"),
             )
             .fix(format!(
-                "完整报告在 {}/crash.prev.txt，也在 journalctl -t agentos-taskd 里；可以附在 issue 里报告",
+                "说“诊断一下崩溃”，管家会读完整报告解释原因和受影响的任务；报告在 {}/crash.prev.txt，也在 journalctl -t agentos-taskd 里，可以附在 issue 里报告",
                 status.state_dir
             )),
         );

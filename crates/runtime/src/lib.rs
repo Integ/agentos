@@ -400,6 +400,9 @@ pub struct TaskStore {
     state: RwLock<State>,
     _lock: Option<File>,
     changes: broadcast::Sender<TaskChange>,
+    /// The tasks opening found unfinished and marked interrupted, oldest
+    /// first: what the previous run left undone when it stopped or crashed.
+    interrupted_on_open: Vec<TaskId>,
 }
 
 /// Task activity captured under one read lock.
@@ -427,6 +430,7 @@ impl TaskStore {
         let mut state = load(&directory)?;
         let recovered_at = now_ms();
         let unfinished = std::mem::take(&mut state.unfinished);
+        let interrupted_on_open: Vec<TaskId> = unfinished.iter().copied().collect();
         if !unfinished.is_empty() {
             for id in unfinished {
                 let task = state.tasks.get_mut(&id).expect("indexed task exists");
@@ -455,6 +459,7 @@ impl TaskStore {
             state: RwLock::new(state),
             _lock: Some(lock),
             changes: broadcast::channel(256).0,
+            interrupted_on_open,
         })
     }
 
@@ -491,7 +496,14 @@ impl TaskStore {
             state: RwLock::new(State::default()),
             _lock: None,
             changes: broadcast::channel(256).0,
+            interrupted_on_open: Vec::new(),
         }
+    }
+
+    /// The tasks this store marked interrupted when it was opened, oldest
+    /// first. After a crash these are the tasks it cut short.
+    pub fn interrupted_on_open(&self) -> &[TaskId] {
+        &self.interrupted_on_open
     }
 
     // A poisoned lock is still used: a change is applied in one step after
@@ -642,20 +654,27 @@ impl TaskStore {
     }
 
     /// Earlier tasks of the same thread as `id`, oldest first, at most the
-    /// `limit` most recent ones.
-    pub fn earlier_in_thread(&self, id: TaskId, limit: usize) -> Vec<Task> {
+    /// `limit` most recent ones, as `view` makes them. Like [`Self::page_as`],
+    /// a reader that needs only what each task said should not copy every
+    /// result its steps hold.
+    pub fn earlier_in_thread<T>(
+        &self,
+        id: TaskId,
+        limit: usize,
+        view: impl Fn(&Task) -> T,
+    ) -> Vec<T> {
         let guard = self.read();
         let Some(thread) = guard.tasks.get(&id).map(|task| task.thread) else {
             return Vec::new();
         };
-        let mut earlier: Vec<Task> = guard
+        let mut earlier: Vec<T> = guard
             .tasks
             .range(..id)
             .rev()
             .map(|(_, task)| task)
             .filter(|task| task.thread == thread)
             .take(limit)
-            .cloned()
+            .map(view)
             .collect();
         earlier.reverse();
         earlier
@@ -1097,12 +1116,18 @@ fn replay_journal(directory: &Path, state: &mut State) -> io::Result<()> {
         }
         let mut task = entry.task;
         if entry.kept_steps > 0 {
-            let kept = state
+            let before = state
                 .tasks
-                .get(&task.id)
-                .and_then(|before| before.steps.get(..entry.kept_steps))
+                .get_mut(&task.id)
+                .filter(|before| before.steps.len() >= entry.kept_steps)
                 .ok_or_else(|| invalid_data("task journal keeps steps the task never had"))?;
-            let mut steps = kept.to_vec();
+            // The kept steps are moved out of the version this line replaces
+            // rather than copied: a long task's journal keeps its earlier
+            // steps on every line, so copying them made replay cost the
+            // square of its steps. If the line is then refused, the state is
+            // left without them, but a refused journal fails the whole load.
+            let mut steps = std::mem::take(&mut before.steps);
+            steps.truncate(entry.kept_steps);
             steps.append(&mut task.steps);
             task.steps = steps;
         }
@@ -1543,6 +1568,11 @@ mod tests {
         }
         drop(store);
         let store = TaskStore::open(&dir.0).unwrap();
+        // What a crash cut short is named exactly, for diagnosing it.
+        assert_eq!(
+            store.interrupted_on_open(),
+            &[TaskId(1), TaskId(2), TaskId(3), TaskId(4)]
+        );
         let tasks = store.list();
         assert_eq!(
             store.activity(),
@@ -1572,6 +1602,12 @@ mod tests {
                 assert_eq!(task.steps[0].state, StepState::Skipped);
             }
         }
+        // Once marked, they are outcomes; the next start cuts nothing short.
+        drop(store);
+        assert!(TaskStore::open(&dir.0)
+            .unwrap()
+            .interrupted_on_open()
+            .is_empty());
     }
 
     #[test]
@@ -1883,14 +1919,13 @@ mod tests {
         let other = store.create(intent()).unwrap();
         assert_eq!(other.thread, other.id);
         assert_eq!(
-            store
-                .earlier_in_thread(third.id, 8)
-                .iter()
-                .map(|task| task.id)
-                .collect::<Vec<_>>(),
+            store.earlier_in_thread(third.id, 8, |task| task.id),
             vec![first.id, second.id]
         );
-        assert_eq!(store.earlier_in_thread(third.id, 1)[0].id, second.id);
+        assert_eq!(
+            store.earlier_in_thread(third.id, 1, |task| task.id),
+            vec![second.id]
+        );
         // A thread is named by its first task: a later task of it, or a task
         // that does not exist, names no thread.
         for missing in [second.id, TaskId(99)] {

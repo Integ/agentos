@@ -267,9 +267,10 @@ impl Frame {
 /// The blackboard is the user's shared memory; the self-improvement
 /// capabilities sum up or are learned from every task of the user's, and
 /// undoing what was learned is the user's decision, while a caller may only
-/// see its own tasks.
+/// see its own tasks. A crash report can quote whatever task the service was
+/// working on when it failed.
 fn caller_excluded(name: &str) -> bool {
-    name == "board.write" || name.starts_with("improve.")
+    name == "board.write" || name.starts_with("improve.") || name == crate::crash::CAPABILITY
 }
 
 /// Words the butler puts in a failed task's message for why it stopped. The
@@ -649,10 +650,12 @@ impl Butler {
     }
 
     pub fn awaiting_confirmation(&self) -> bool {
+        // Only an unfinished task can be waiting; copying the whole history,
+        // every step's result included, to find out would cost far more.
         self.tasks
-            .list()
-            .iter()
-            .any(|t| t.state == TaskState::AwaitingConfirmation)
+            .unfinished()
+            .into_iter()
+            .any(|id| self.tasks.state(id) == Some(TaskState::AwaitingConfirmation))
     }
 
     /// Bring the registry and grants in line with the active plugins.
@@ -813,7 +816,9 @@ impl Butler {
         // What a tainted task said was shaped by outside content. Within the
         // thread it is needed ("note down what you found") and taints the
         // task that reads it; elsewhere it is left out instead.
-        let earlier = self.tasks.earlier_in_thread(current, THREAD_TASKS);
+        let earlier = self
+            .tasks
+            .earlier_in_thread(current, THREAD_TASKS, Task::without_steps);
         let mut tainted = false;
         if !earlier.is_empty() {
             text.push_str(&format!(

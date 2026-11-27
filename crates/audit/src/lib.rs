@@ -295,10 +295,16 @@ pub const GENESIS: &str = "00000000000000000000000000000000000000000000000000000
 
 fn line_hash(line: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    Sha256::digest(line)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    // Every line of the log is hashed each time it is opened, and the log
+    // grows without bound. Formatting each byte as its own string cost more
+    // than the hash itself.
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = String::with_capacity(64);
+    for byte in Sha256::digest(line) {
+        hex.push(char::from(HEX[usize::from(byte >> 4)]));
+        hex.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    hex
 }
 
 /// What [`AuditLog::verify`] found.
@@ -847,6 +853,20 @@ mod tests {
     fn append_raw(path: &Path, bytes: &[u8]) {
         let mut f = OpenOptions::new().append(true).open(path).unwrap();
         f.write_all(bytes).unwrap();
+    }
+
+    #[test]
+    fn a_link_is_the_lowercase_hex_sha256_of_the_line() {
+        // Logs written by every earlier version link with this exact text;
+        // any other spelling of the same hash would break their chains.
+        assert_eq!(
+            line_hash(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            line_hash(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]

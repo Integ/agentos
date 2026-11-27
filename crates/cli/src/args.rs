@@ -17,7 +17,7 @@ pub const DEFAULT_ACTIVITY: usize = 20;
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(300);
 const MAX_WAIT_SECONDS: u64 = 86_400;
 
-pub const WORKBENCH_HELP: &str = "普通输入：提交意图，接着本次对话说；任务在后台继续\n/new：开始一段新的对话\n/tasks 或 /refresh：刷新当前页　/next：更早任务　/prev：返回上一页\n/latest：最近任务　/task task-N：选中并展示完整计划与结果\n/cancel task-N：取消后续步骤　/approve task-N 步骤：批准当前已展示的确认请求\n/reject task-N 步骤：只拒绝这一步，任务继续\n/reply task-N 步骤 回答：回答任务提出的问题\n/activity：最近活动（能力调用、批准、崩溃、自动采用的经验）\n/capabilities：查看能力　/help：帮助　/quit：退出工作台";
+pub const WORKBENCH_HELP: &str = "普通输入：提交意图，接着本次对话说；任务在后台继续\n/new：开始一段新的对话\n/tasks 或 /refresh：刷新当前页　/next：更早任务　/prev：返回上一页\n/latest：最近任务　/task task-N：选中并展示完整计划与结果\n/cancel task-N：取消后续步骤　/approve task-N 步骤：批准当前已展示的确认请求\n/reject task-N 步骤：只拒绝这一步，任务继续\n/reply task-N 步骤 回答：回答任务提出的问题\n/activity：最近活动（能力调用、批准、崩溃、自动采用的经验）\n/menu 或 /：菜单，输入编号执行，不用记命令　/theme [名字]：查看或切换主题\n/doctor：诊断任务服务哪里不对、怎么办\n/capabilities：查看能力　/help：帮助　/quit：退出工作台";
 
 #[derive(Debug)]
 pub struct Options {
@@ -54,6 +54,8 @@ pub enum Action {
     /// The overview, or the page for a group or command (already checked).
     Help(Option<String>),
     Version,
+    /// List the themes, or switch to the one named.
+    Theme(Option<String>),
 }
 
 fn task_id(text: &str) -> Result<TaskId, String> {
@@ -512,6 +514,11 @@ fn command(rest: &[String], pin_stdin: &mut bool) -> Result<Action, String> {
                 args,
             })
         }
+        Some("theme") if rest.len() == 1 => Action::Theme(None),
+        Some("theme") if rest.len() == 2 => match crate::theme::find(&rest[1]) {
+            Some(theme) => Action::Theme(Some(theme.id.into())),
+            None => return Err(format!("没有主题 {}；agentos theme 查看全部", rest[1])),
+        },
         Some("ping") if rest.len() == 1 => Action::Request(Command::Ping {}),
         Some("watch") if rest.len() == 1 => Action::Watch(None),
         Some("watch") if rest.len() == 3 && rest[1] == "--after" => Action::Watch(Some(
@@ -557,6 +564,12 @@ pub enum WorkbenchCommand {
     New,
     Capabilities,
     Activity,
+    /// The numbered menu of everything the workbench can do.
+    Menu,
+    /// What `agentos doctor` says.
+    Doctor,
+    /// List the themes, or switch to the one named (already checked).
+    Theme(Option<String>),
     Help,
     Quit,
 }
@@ -609,6 +622,13 @@ pub fn parse_workbench(text: &str) -> Result<WorkbenchCommand, String> {
         ["/new"] => WorkbenchCommand::New,
         ["/capabilities"] => WorkbenchCommand::Capabilities,
         ["/activity"] => WorkbenchCommand::Activity,
+        ["/menu"] | ["/"] => WorkbenchCommand::Menu,
+        ["/doctor"] => WorkbenchCommand::Doctor,
+        ["/theme"] => WorkbenchCommand::Theme(None),
+        ["/theme", name] => match crate::theme::find(name) {
+            Some(theme) => WorkbenchCommand::Theme(Some(theme.id.into())),
+            None => return Err(format!("没有主题 {name}；/theme 查看全部")),
+        },
         ["/help"] => WorkbenchCommand::Help,
         ["/quit"] | ["/exit"] => WorkbenchCommand::Quit,
         _ => return Err("未知工作台命令，输入 /help 查看用法".into()),
@@ -803,6 +823,18 @@ mod tests {
             assert!(argv(&args).is_err(), "{args:?}");
         }
         assert!(argv(&["--json", "activity"]).unwrap().json);
+        assert_eq!(parse_workbench("/").unwrap(), WorkbenchCommand::Menu);
+        assert_eq!(parse_workbench("/menu").unwrap(), WorkbenchCommand::Menu);
+        assert_eq!(
+            parse_workbench("/theme 森林").unwrap(),
+            WorkbenchCommand::Theme(Some("forest".into()))
+        );
+        assert!(parse_workbench("/theme neon").is_err());
+        assert!(matches!(
+            argv(&["theme", "Dusk"]).unwrap().action,
+            Action::Theme(Some(ref id)) if id == "dusk"
+        ));
+        assert!(argv(&["theme", "neon"]).is_err());
         assert_eq!(
             parse_workbench("/activity").unwrap(),
             WorkbenchCommand::Activity

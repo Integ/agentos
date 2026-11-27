@@ -14,7 +14,7 @@ AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层�
 
 - **版本**：最新发布版是 **v0.4.0**（2026-11-13），[Releases](https://github.com/Integ/agentos/releases/tag/v0.4.0) 里有 Debian 和 Ubuntu 两种镜像和在线更新包，内容见[更新日志](CHANGELOG.md)。v0.3.0 没有单独发布，它的内容包含在 v0.4.0 里。`main` 分支在 v0.4.0 之上还有尚未发布的合并（见更新日志的“未发布”）。
 - **一个任务内核**：`agentos-taskd` 是唯一的后台服务：持久任务、多轮规划、子 Agent、黑板、MCP、插件、智能家居、PIN、哈希链审计、按住说话和朗读都在这里。镜像里它作为桌面用户的服务随登录启动；图形桌面 `agentos-shell`、终端工作台 `agentos`、Web Shell 和 `agentos mcp` 都通过同一个协议连接它。旧的 `agentosd` 已删除，它在 `~/.local/share/agentos` 里的笔记、PIN、插件、黑板和配置会在任务服务第一次启动时迁到 `~/.local/state/agentos`；见[架构](docs/architecture.md)。给写代码的 Agent 的说明在 [AGENTS.md](AGENTS.md)。
-- **当前重点**：任务内核的安全、能力和单独安装。Web Shell、原生桌面、语音、智能家居、自我改进和镜像已冻结，只修 bug 和安全问题，不加新功能（见 [AGENTS.md](AGENTS.md#当前重点与冻结)）。
+- **当前重点**：任务内核的安全、能力和单独安装；原生桌面为[主题、键盘菜单、状态栏和唤起管家](https://github.com/Integ/agentos/issues/60)解冻。Web Shell、设置助理、语音、智能家居、自我改进和镜像已冻结，只修 bug 和安全问题，不加新功能（见 [AGENTS.md](AGENTS.md#当前重点与冻结)）。
 - **CI 覆盖**：Ubuntu 上的格式、Clippy、全部测试和在线更新模拟测试；macOS 和 Rust 1.88 上任务内核一侧的测试；Web Shell 的前端测试；cargo-deny。
 - **还没有验证**：
   - 合并 `agentosd` 之后（尚未发布）：任务服务上的按住说话和朗读只用脚本化的录音、识别和播放命令测过，没有接真实麦克风、扬声器和语音接口；桌面窗口没有实际打开看过；从 v0.4.0 在线升级只在模拟的安装根目录里测过；没有跑镜像构建和 QEMU 冒烟测试。

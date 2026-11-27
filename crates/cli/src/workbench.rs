@@ -13,15 +13,19 @@ use tokio::sync::mpsc;
 use crate::args::{parse_workbench, WorkbenchCommand, WORKBENCH_HELP};
 use crate::client::{Client, ClientError};
 use crate::render;
+use crate::style::{paint, Tone};
+use crate::theme::{self, Theme};
 
 const PAGE_SIZE: usize = 12;
 /// How much `/activity` shows: about a screen.
 const ACTIVITY_SHOWN: usize = 12;
 
-/// What waits on the user, from every page rather than the one on screen.
-/// A task waiting for an approval must not drop out of sight because newer
-/// tasks filled its page, the way a build failure must not be pushed off
-/// screen by a chatty channel.
+/// What the user should see at a glance, from every page rather than the
+/// one on screen: what waits on them, what is running, and how the service
+/// itself is doing. A task waiting for an approval must not drop out of
+/// sight because newer tasks filled its page, the way a build failure must
+/// not be pushed off screen by a chatty channel. The workbench's status line
+/// and the desktop's menu bar both show this.
 #[derive(Debug, Default, Clone)]
 pub struct Waiting {
     /// Tasks awaiting an approval or an answer, newest first.
@@ -31,24 +35,28 @@ pub struct Waiting {
     /// Warnings and errors in the service's own report (`system.status`);
     /// `None` from a service too old to have one.
     pub problems: Option<usize>,
+    /// Tasks queued, planning or running.
+    pub running: usize,
+    /// More are running than one page of each state held.
+    pub running_more: bool,
+    /// Which planner plans tasks, from the service's own report.
+    pub planner: Option<String>,
 }
 
-/// Look up everything that waits on the user. Only reads: `list` filtered by
-/// state and the service's report, never an intent.
+/// Look up everything the user should see at a glance. Only reads: `list`
+/// filtered by state and the service's report, never an intent.
 pub async fn waiting_on_user(client: &Client) -> Result<Waiting, ClientError> {
     let mut waiting = Waiting::default();
+    let page = |state| Command::List {
+        before: None,
+        limit: MAX_PAGE_SIZE,
+        state: Some(state),
+        thread: None,
+    };
     for state in [TaskState::AwaitingConfirmation, TaskState::AwaitingInput] {
-        let reply = client
-            .request(Command::List {
-                before: None,
-                limit: MAX_PAGE_SIZE,
-                state: Some(state),
-                thread: None,
-            })
-            .await?;
         if let Reply::Tasks {
             tasks, next_before, ..
-        } = reply
+        } = client.request(page(state)).await?
         {
             waiting.more |= next_before.is_some();
             waiting.tasks.extend(tasks);
@@ -57,25 +65,35 @@ pub async fn waiting_on_user(client: &Client) -> Result<Waiting, ClientError> {
     waiting
         .tasks
         .sort_by_key(|task| std::cmp::Reverse(task.id.0));
+    for state in [TaskState::Queued, TaskState::Planning, TaskState::Running] {
+        if let Reply::Tasks {
+            tasks, next_before, ..
+        } = client.request(page(state)).await?
+        {
+            waiting.running_more |= next_before.is_some();
+            waiting.running += tasks.len();
+        }
+    }
     let read = Command::Read {
         capability: CapabilityName::new(status::CAPABILITY),
         args: serde_json::json!({}),
     };
-    waiting.problems =
-        match client.request(read).await {
-            Ok(Reply::Value { value, .. }) => serde_json::from_value::<SystemStatus>(value)
-                .ok()
-                .map(|report| {
-                    report
-                        .problems
-                        .iter()
-                        .filter(|problem| problem.severity >= Severity::Warning)
-                        .count()
-                }),
-            // An older service without the report; the tasks still count.
-            Err(ClientError::Remote(_)) | Ok(_) => None,
-            Err(error) => return Err(error),
-        };
+    let report = match client.request(read).await {
+        Ok(Reply::Value { value, .. }) => serde_json::from_value::<SystemStatus>(value).ok(),
+        // An older service without the report; the tasks still count.
+        Err(ClientError::Remote(_)) | Ok(_) => None,
+        Err(error) => return Err(error),
+    };
+    if let Some(report) = report {
+        waiting.problems = Some(
+            report
+                .problems
+                .iter()
+                .filter(|problem| problem.severity >= Severity::Warning)
+                .count(),
+        );
+        waiting.planner = Some(report.planner).filter(|planner| !planner.is_empty());
+    }
     Ok(waiting)
 }
 
@@ -154,6 +172,9 @@ struct View {
     /// The conversation plain input continues; `None` starts a new one.
     thread: Option<TaskId>,
     waiting: Waiting,
+    theme: &'static Theme,
+    /// The menu was the last thing shown, so a number picks from it.
+    menu_open: bool,
 }
 
 impl View {
@@ -169,6 +190,8 @@ impl View {
             connected: false,
             thread: None,
             waiting: Waiting::default(),
+            theme: theme::current(),
+            menu_open: false,
         }
     }
 
@@ -242,10 +265,71 @@ impl View {
                 self.previous.len() + 1,
                 self.next_before.is_some(),
                 &self.waiting,
+                self.theme.name,
             )
         );
         prompt();
     }
+}
+
+/// The menu: everything the workbench can do, grouped and numbered, so a
+/// number and Enter is all it takes. Nothing here speaks to the butler on
+/// the user's behalf; what needs the butler is said by the user.
+pub fn menu_entries() -> Vec<(&'static str, String, WorkbenchCommand)> {
+    use WorkbenchCommand as C;
+    let mut entries = vec![
+        ("任务", "刷新任务".to_string(), C::Refresh),
+        ("任务", "回到最近的任务".into(), C::Latest),
+        ("任务", "更早的任务".into(), C::Next),
+        ("任务", "开始一段新的对话".into(), C::New),
+        ("查看", "诊断：任务服务哪里不对、怎么办".into(), C::Doctor),
+        ("查看", "最近活动".into(), C::Activity),
+        ("查看", "能力和风险等级".into(), C::Capabilities),
+    ];
+    for theme in theme::THEMES {
+        entries.push((
+            "主题",
+            format!("{}（{}）", theme.name, theme.summary),
+            C::Theme(Some(theme.id.into())),
+        ));
+    }
+    entries.push(("工作台", "帮助".into(), C::Help));
+    entries.push(("工作台", "退出工作台（后台任务继续）".into(), C::Quit));
+    entries
+}
+
+/// The menu as text, entries numbered from 1 under their groups.
+pub fn menu_text(current: &Theme) -> String {
+    let mut lines = vec![paint(
+        "── 菜单：输入编号回车执行，直接输入别的就是对管家说话 ──",
+        Tone::Accent,
+    )];
+    let mut group = "";
+    for (n, (in_group, label, action)) in menu_entries().into_iter().enumerate() {
+        if in_group != group {
+            group = in_group;
+            lines.push(paint(&format!("  {group}"), Tone::Strong));
+        }
+        let mark = match &action {
+            WorkbenchCommand::Theme(Some(id)) if id == current.id => " ●",
+            _ => "",
+        };
+        lines.push(format!("  {:>3}  {label}{mark}", n + 1));
+    }
+    lines.push(paint(
+        "  要管家去做的事直接说，例如“诊断一下崩溃”；/quit 退出",
+        Tone::Quiet,
+    ));
+    lines.join("\n")
+}
+
+/// The entry numbered `text` (from 1), if `text` is just a number in range.
+pub fn menu_pick(text: &str) -> Option<WorkbenchCommand> {
+    let n: usize = text.trim().parse().ok()?;
+    menu_entries()
+        .into_iter()
+        .nth(n.checked_sub(1)?)
+        .map(|(_, _, action)| action)
 }
 
 fn prompt() {
@@ -330,13 +414,23 @@ fn request_error(view: &mut View, error: ClientError) -> String {
     error.to_string()
 }
 
+/// What the loop does after a command.
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    /// Redraw the view.
+    Show,
+    /// Leave the screen as it is: the menu was just shown.
+    Keep,
+    Quit,
+}
+
 async fn perform(
     view: &mut View,
     client: &Client,
     action: WorkbenchCommand,
-) -> Result<bool, String> {
+) -> Result<Outcome, String> {
     match action {
-        WorkbenchCommand::Quit => return Ok(false),
+        WorkbenchCommand::Quit => return Ok(Outcome::Quit),
         WorkbenchCommand::Help => println!("\n{WORKBENCH_HELP}"),
         WorkbenchCommand::Refresh => {}
         WorkbenchCommand::Next => {
@@ -457,9 +551,28 @@ async fn perform(
                 .map_err(|e| request_error(view, e))?;
             println!("\n{}", render::reply_text(&reply));
         }
+        WorkbenchCommand::Menu => {
+            println!("\n{}", menu_text(view.theme));
+            view.menu_open = true;
+            // The menu stays on screen: no refresh redraws it away.
+            return Ok(Outcome::Keep);
+        }
+        WorkbenchCommand::Doctor => {
+            // The default socket lives in the state directory, where a crash
+            // report waits while the service is down.
+            let report = crate::doctor::examine(client, client.path().parent()).await;
+            println!("\n{}", report.text());
+        }
+        WorkbenchCommand::Theme(choice) => {
+            let text = theme::command(choice.as_deref(), false).map_err(|e| e.to_string())?;
+            if let Some(chosen) = choice.as_deref().and_then(theme::find) {
+                view.theme = chosen;
+            }
+            println!("\n{text}");
+        }
     }
     view.refresh(client).await.map_err(|e| e.to_string())?;
-    Ok(true)
+    Ok(Outcome::Show)
 }
 
 pub async fn run(client: Client) -> io::Result<()> {
@@ -480,10 +593,14 @@ pub async fn run(client: Client) -> io::Result<()> {
             line=lines.recv() => {
                 let Some(line)=line else {break};
                 let line=match line {Ok(line)=>line,Err(error)=>{eprintln!("{}",render::safe_text(&error.to_string()));break}};
-                match parse_workbench(&line) {
+                // Right after the menu, a bare number picks from it.
+                let picked = if view.menu_open { menu_pick(&line) } else { None };
+                view.menu_open = false;
+                match picked.map_or_else(|| parse_workbench(&line), Ok) {
                     Ok(action)=>match perform(&mut view,&client,action).await {
-                        Ok(false)=>break,
-                        Ok(true)=>view.show(),
+                        Ok(Outcome::Quit)=>break,
+                        Ok(Outcome::Show)=>view.show(),
+                        Ok(Outcome::Keep)=>prompt(),
                         Err(error)=>{eprintln!("\n{}",render::safe_text(&error));prompt();}
                     },
                     Err(error)=>{eprintln!("\n{}",render::safe_text(&error));prompt();}
@@ -579,6 +696,31 @@ mod tests {
             panic!("not a rejection")
         };
         assert_eq!(confirmation, "shown-token");
+    }
+
+    #[test]
+    fn the_menu_numbers_every_entry_and_only_a_number_in_range_picks_one() {
+        let entries = menu_entries();
+        let text = crate::style::with_color(false, || menu_text(theme::find("森林").unwrap()));
+        for (n, (_, label, _)) in entries.iter().enumerate() {
+            assert!(text.contains(&format!("{:>3}  {label}", n + 1)), "{label}");
+        }
+        // The current theme is marked, and only it.
+        assert_eq!(text.matches(" ●").count(), 1);
+        assert!(text.contains("森林（墨绿和青，安静） ●"));
+        assert_eq!(menu_pick("1"), Some(WorkbenchCommand::Refresh));
+        assert_eq!(menu_pick(" 5 "), Some(WorkbenchCommand::Doctor));
+        assert_eq!(
+            menu_pick(&entries.len().to_string()),
+            Some(WorkbenchCommand::Quit)
+        );
+        for text in ["0", "999", "记一下 1", "-1", ""] {
+            assert_eq!(menu_pick(text), None, "{text}");
+        }
+        // Guards "the interface never speaks for the user": no entry submits.
+        assert!(entries
+            .iter()
+            .all(|(_, _, action)| !matches!(action, WorkbenchCommand::Submit(_))));
     }
 
     #[test]
