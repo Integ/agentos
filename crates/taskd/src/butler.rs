@@ -649,10 +649,12 @@ impl Butler {
     }
 
     pub fn awaiting_confirmation(&self) -> bool {
+        // Only an unfinished task can be waiting; copying the whole history,
+        // every step's result included, to find out would cost far more.
         self.tasks
-            .list()
-            .iter()
-            .any(|t| t.state == TaskState::AwaitingConfirmation)
+            .unfinished()
+            .into_iter()
+            .any(|id| self.tasks.state(id) == Some(TaskState::AwaitingConfirmation))
     }
 
     /// Bring the registry and grants in line with the active plugins.
@@ -813,7 +815,9 @@ impl Butler {
         // What a tainted task said was shaped by outside content. Within the
         // thread it is needed ("note down what you found") and taints the
         // task that reads it; elsewhere it is left out instead.
-        let earlier = self.tasks.earlier_in_thread(current, THREAD_TASKS);
+        let earlier = self
+            .tasks
+            .earlier_in_thread(current, THREAD_TASKS, Task::without_steps);
         let mut tainted = false;
         if !earlier.is_empty() {
             text.push_str(&format!(
