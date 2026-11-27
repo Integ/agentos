@@ -31,7 +31,7 @@ node --test crates/web-shell/assets/*.test.mjs
 | 管家循环：规划、策略、委派、批准 | `crates/taskd/src/butler.rs` |
 | 审计事件 | `crates/audit/` |
 | 任务服务对自己的报告（`system.status`）和 `agentos doctor` | `crates/taskd/src/status.rs`（启动时在 `main.rs` 里收集）、`crates/cli/src/doctor.rs`，共享的结构在 `crates/ipc/src/status.rs`；报告里只放任务服务自己的话，外部程序说的只进日志 |
-| 终端、浏览器、原生桌面 | `crates/cli/`、`crates/web-shell/`、`crates/shell/` |
+| 终端、浏览器、原生桌面 | `crates/cli/`、`crates/web-shell/`、`crates/shell/`；`agentos` 的新命令同时写进 `crates/cli/src/help.rs` 的表（分组帮助、`<命令> --help` 和 `--json help` 都读它），终端颜色只经过 `crates/cli/src/style.rs` |
 | 按住说话、朗读、崩溃报告、旧数据迁移 | `crates/taskd/src/voice.rs`、`crash.rs`、`migrate.rs` |
 | 定时任务 | 存储和能力在 `crates/services/src/schedule.rs`，到期提交在 `crates/taskd/src/service.rs` |
 | 不写镜像的独立安装 | `install.sh`（用户级：`~/.local/bin`、`~/.config/agentos/agentos.env`、systemd 用户服务），说明在 `docs/install-standalone.md`；永远不碰状态目录。CI 用 `tests/install-standalone.sh` 在真实的 systemd 用户实例上测它，这个测试会装进当前用户的主目录，只在 `CI=true` 时运行 |

@@ -43,7 +43,7 @@ cargo run -p agentos-taskd -- --planner rule --state-dir /tmp/agentos-demo
 cargo run -p agentos-cli -- --state-dir /tmp/agentos-demo workbench
 ```
 
-工作台显示连接状态、任务页、步骤进度及选中任务详情，并随后台变化刷新。输入自然语言提交任务：
+工作台显示连接状态、任务页、步骤进度及选中任务详情，并随后台变化刷新。有任务在等你批准或回答、或者任务服务报告了需要处理的问题时，任务页上方多出一栏“需要你处理”：它列出所有页上在等你的任务，不只是当前这一页，所以新任务再多也挤不走它；没有这些事时这一栏不出现。输入自然语言提交任务：
 
 ```text
 记一下 买牛奶
@@ -69,6 +69,7 @@ cargo run -p agentos-cli -- --state-dir /tmp/agentos-demo workbench
 | `/reject task-1 1` | 只拒绝这一步：它不执行，任务换别的办法继续或说明没做成；不需要 PIN |
 | `/reply task-1 1 周三` | 回答任务在第 1 步提出的问题；任务在原地继续 |
 | `/new` | 另起一段对话；不输入它时，工作台里的每句话都接着同一段对话说 |
+| `/activity` | 最近活动：能力调用、批准与拒绝、录音、崩溃、自动采用的经验，来自审计日志 |
 | `/capabilities`、`/help` | 查看能力与帮助 |
 | `/quit` | 退出工作台，任务服务继续运行 |
 
@@ -105,9 +106,14 @@ agentos cancel task-2
 agentos --json tasks
 agentos watch
 agentos doctor
+agentos activity --limit 50
 ```
 
 默认连接相同的状态目录；可在命令前指定 `--state-dir` 或 `--socket`。`--json` 适合脚本，`watch --after <revision>` 接收实时变更与重新同步通知。
+
+`agentos help` 按分组列出命令：任务（tasks）、批准与授权（approvals）、外部调用方与渠道（callers）、诊断与查看（inspect）。`agentos help <分组或命令>` 或 `agentos <命令> --help` 看详细说明和这条命令自己的退出码（`agentos help 任务` 也可以）；`agentos --json help` 以 JSON 给出同一张表，方便脚本和 Agent 使用。`--help` 只在紧跟命令名时算数，所以 `agentos submit --help` 显示帮助，不会提交一个叫 `--help` 的意图；意图本身以 `-` 开头时写 `agentos submit -- <意图>`。
+
+输出到终端时，工作台、`doctor` 和 `activity` 用少量颜色标出状态：等待批准和回答是黄色，失败、中断和未能处理是红色，完成是绿色，提示是暗色。输出被管道或重定向、设置了 `NO_COLOR`、或 `TERM=dumb` 时不用颜色，`--json` 从不带颜色。颜色只加在已经清理过的文字外面，任务内容和外部程序返回的文字仍然不能带入终端控制序列。
 
 `submit` 默认只返回“已接收”。加上 `--wait` 会等到任务结束再返回，并打印最终任务（`--json` 时与 `agentos --json task` 的结构相同）；`--timeout 秒` 设置最长等待时间，默认 300 秒。这两个选项要写在意图之前，意图里出现的同名文字不会被当成选项。等待只读取任务，不会重发、批准或取消；放弃等待后任务仍在后台继续。
 

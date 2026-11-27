@@ -4,7 +4,12 @@ use agentos_ipc::{
 };
 use agentos_runtime::{StepState, Task, TaskId, TaskState};
 
+use crate::style::{self, paint, Tone};
 use crate::wait::WaitOutcome;
+use crate::workbench::Waiting;
+
+/// How many waiting tasks the workbench lists before saying how many more.
+const WAITING_SHOWN: usize = 6;
 
 /// Treat terminal output as a device boundary: data cannot contain escape
 /// sequences, carriage returns, C1 controls, or invisible direction overrides.
@@ -49,6 +54,16 @@ pub fn state_label(state: TaskState) -> &'static str {
         TaskState::Failed => "失败",
         TaskState::Cancelled => "已取消",
         TaskState::Interrupted => "已中断",
+    }
+}
+
+/// A state label padded to `width` characters, then colored: padding
+/// counts characters, so color codes must not be inside it.
+pub fn state_cell(state: TaskState, width: usize) -> String {
+    let cell = format!("{:<width$}", state_label(state));
+    match style::state_tone(state) {
+        Some(tone) => paint(&cell, tone),
+        None => cell,
     }
 }
 
@@ -102,12 +117,18 @@ pub fn task_detail(task: &Task, include_token: bool) -> String {
     // A task that read outside content says so in its heading, where it is
     // seen before any step, result or approval request.
     let marker = if task.tainted {
-        format!(" · {}", agentos_runtime::OUTSIDE_CONTENT_TASK_MARKER)
+        format!(
+            " · {}",
+            paint(
+                agentos_runtime::OUTSIDE_CONTENT_TASK_MARKER,
+                Tone::Attention
+            )
+        )
     } else {
         String::new()
     };
     let mut lines = vec![
-        format!("{} · {}{marker}", task.id, state_label(task.state)),
+        format!("{} · {}{marker}", task.id, state_cell(task.state, 0)),
         format!("  意图：{}", one_line(&task.intent.text, 300)),
     ];
     if let Some(c) = &task.confirmation {
@@ -328,14 +349,14 @@ pub fn task_rows(tasks: &[TaskSummary], selected: Option<TaskId>) -> String {
         .iter()
         .map(|task| {
             format!(
-                "{} {:<9} {:<6} {:>2}/{:<2}  {}",
+                "{} {:<9} {} {:>2}/{:<2}  {}",
                 if selected == Some(task.id) {
                     "▶"
                 } else {
                     " "
                 },
                 task.id.to_string(),
-                state_label(task.state),
+                state_cell(task.state, 6),
                 task.completed_steps,
                 task.total_steps,
                 one_line(&task.text, 66)
@@ -345,6 +366,52 @@ pub fn task_rows(tasks: &[TaskSummary], selected: Option<TaskId>) -> String {
         .join("\n")
 }
 
+/// What waits on the user, across every page, or nothing when nothing
+/// does: the strip appears only when it has something to say.
+pub fn waiting_strip(waiting: &Waiting) -> Option<String> {
+    let problems = waiting.problems.unwrap_or(0);
+    if waiting.tasks.is_empty() && problems == 0 {
+        return None;
+    }
+    let mut lines = vec![paint(
+        "── 需要你处理 ───────────────────────────────────────────",
+        Tone::Attention,
+    )];
+    for task in waiting.tasks.iter().take(WAITING_SHOWN) {
+        lines.push(format!(
+            "  {:<9} {} {}",
+            task.id.to_string(),
+            state_cell(task.state, 6),
+            one_line(&task.text, 56)
+        ));
+    }
+    let hidden = waiting.tasks.len().saturating_sub(WAITING_SHOWN);
+    if waiting.more {
+        lines.push(
+            "  还有更多：agentos tasks --state awaiting_confirmation（或 awaiting_input）".into(),
+        );
+    } else if hidden > 0 {
+        lines.push(format!(
+            "  还有 {hidden} 个：agentos tasks --state awaiting_confirmation（或 awaiting_input）"
+        ));
+    }
+    if !waiting.tasks.is_empty() {
+        lines.push(paint(
+            "  /task 编号 查看，然后批准、拒绝这一步或回答",
+            Tone::Quiet,
+        ));
+    }
+    if problems > 0 {
+        lines.push(paint(
+            &format!(
+                "  ⚠ 任务服务有 {problems} 件事需要处理：运行 agentos doctor，或者说“诊断一下”"
+            ),
+            Tone::Attention,
+        ));
+    }
+    Some(lines.join("\n"))
+}
+
 pub fn dashboard(
     tasks: &[TaskSummary],
     selected: Option<&Task>,
@@ -352,6 +419,7 @@ pub fn dashboard(
     connected: bool,
     page_number: usize,
     has_older: bool,
+    waiting: &Waiting,
 ) -> String {
     let active = tasks
         .iter()
@@ -361,14 +429,6 @@ pub fn dashboard(
                 TaskState::Queued | TaskState::Planning | TaskState::Running
             )
         })
-        .count();
-    let waiting = tasks
-        .iter()
-        .filter(|t| t.state == TaskState::AwaitingConfirmation)
-        .count();
-    let asking = tasks
-        .iter()
-        .filter(|t| t.state == TaskState::AwaitingInput)
         .count();
     let done = tasks
         .iter()
@@ -383,7 +443,19 @@ pub fn dashboard(
             )
         })
         .count();
-    let mut out = format!("\n╭─ AgentOS v{} · 任务工作台 ─────────────────────────────\n│ {}  · 快照 #{revision} · 第 {page_number} 页\n│ 本页 {} 项  进行中 {active}  待批准 {waiting}  待回答 {asking}  已完成 {done}  需查看 {attention}\n╰────────────────────────────────────────────────────────\n  任务       状态     步骤  意图\n{}\n",env!("CARGO_PKG_VERSION"),if connected { "● 已连接后台" } else { "○ 连接中断，正在重连视图" },tasks.len(),task_rows(tasks,selected.map(|t|t.id)));
+    let mut out = format!("\n╭─ AgentOS v{} · 任务工作台 ─────────────────────────────\n│ {}  · 快照 #{revision} · 第 {page_number} 页\n│ 本页 {} 项  进行中 {active}  已完成 {done}  {}\n╰────────────────────────────────────────────────────────\n",env!("CARGO_PKG_VERSION"),if connected { paint("● 已连接后台", Tone::Good) } else { paint("○ 连接中断，正在重连视图", Tone::Bad) },tasks.len(),{
+        let needs = format!("需查看 {attention}");
+        if attention > 0 { paint(&needs, Tone::Bad) } else { needs }
+    });
+    // Above the page, so it stays in view whichever page is shown.
+    if let Some(strip) = waiting_strip(waiting) {
+        out.push_str(&strip);
+        out.push_str("\n\n");
+    }
+    out.push_str(&format!(
+        "  任务       状态     步骤  意图\n{}\n",
+        task_rows(tasks, selected.map(|t| t.id))
+    ));
     out.push_str(&format!(
         "\n  /prev 上一页  {}  /latest 最近任务\n",
         if has_older {
@@ -399,6 +471,115 @@ pub fn dashboard(
     }
     out.push_str("\n\n── 输入意图或命令 ─────────────────────────────────────────\n  /task 编号 · /cancel 编号 · /help · /quit（后台任务继续）\n");
     out
+}
+
+/// How long ago, in the words the desktop uses for its activity feed.
+pub fn ago(at_ms: u64, now_ms: u64) -> String {
+    let seconds = now_ms.saturating_sub(at_ms) / 1000;
+    match seconds {
+        0..=59 => "刚刚".into(),
+        60..=3_599 => format!("{} 分钟前", seconds / 60),
+        3_600..=86_399 => format!("{} 小时前", seconds / 3_600),
+        _ => format!("{} 天前", seconds / 86_400),
+    }
+}
+
+/// Where a recording went, as the desktop says it.
+fn recording_destination(sent_to: &str) -> String {
+    if sent_to == "本机" {
+        "本机识别".into()
+    } else if let Some(rest) = sent_to.strip_prefix("本机") {
+        format!("未发送{rest}")
+    } else {
+        format!("发往 {sent_to}")
+    }
+}
+
+/// The service's recent activity, oldest first so the newest ends up next
+/// to the prompt. Items are what the audit log says (`activity` in the
+/// protocol); every string in them is shown as untrusted text.
+pub fn activity_text(items: &[serde_json::Value], now_ms: u64) -> String {
+    if items.is_empty() {
+        return "还没有活动记录。".into();
+    }
+    let mut lines = vec!["最近活动（来自审计日志，最新的在最下面）：".to_string()];
+    for item in items {
+        let text = |key: &str| {
+            item.get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+        };
+        let ok = item
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let kind = text("kind");
+        let (what, hint) = match kind {
+            "invoked" => (
+                format!("{}{}", text("capability"), if ok { "" } else { "（失败）" }),
+                None,
+            ),
+            "confirmation" => (
+                format!(
+                    "{}：{}",
+                    if ok { "你批准了" } else { "你拒绝了" },
+                    text("capability")
+                ),
+                None,
+            ),
+            "device" => {
+                let detail = item.get("detail");
+                let seconds = detail
+                    .and_then(|d| d.get("duration_ms"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as f64
+                    / 1000.0;
+                let sent_to = detail
+                    .and_then(|d| d.get("sent_to"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("未知");
+                (
+                    format!("麦克风录音 {seconds:.1} 秒 · {}", recording_destination(sent_to)),
+                    None,
+                )
+            }
+            // Adopted without anyone approving it, so the feed is where the
+            // user learns of it and how to undo it.
+            "improvement" => (
+                format!("{}（{}）", text("summary"), text("id")),
+                ok.then(|| format!("不想要的话，说“撤回 {}”", text("id"))),
+            ),
+            "crash" => (
+                format!("任务服务异常退出，已自动重启：{}", text("summary")),
+                Some(
+                    "完整报告在状态目录的 crash.prev.txt；说“诊断一下”或运行 agentos doctor 看现在的状态"
+                        .to_string(),
+                ),
+            ),
+            other => (format!("{other} {}", text("capability")), None),
+        };
+        let mark = if !ok && matches!(kind, "invoked" | "crash") {
+            paint("!", Tone::Bad)
+        } else {
+            "·".to_string()
+        };
+        let at = item
+            .get("at_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(now_ms);
+        lines.push(format!(
+            "  {mark} {} · {}",
+            ago(at, now_ms),
+            one_line(&what, 120)
+        ));
+        if let Some(hint) = hint {
+            lines.push(paint(
+                &format!("      {}", one_line(&hint, 160)),
+                Tone::Quiet,
+            ));
+        }
+    }
+    lines.join("\n")
 }
 
 pub fn reply_text(reply: &Reply) -> String {
@@ -502,7 +683,7 @@ pub fn reply_text(reply: &Reply) -> String {
             voice.speak.as_str()
         ),
         Reply::Listening { recording } => format!("录音 #{recording}"),
-        Reply::Activity { items } => format!("最近活动 {} 条", items.len()),
+        Reply::Activity { items } => activity_text(items, now_ms()),
     }
 }
 
@@ -587,7 +768,15 @@ mod tests {
                 t.message = Some("已记下：牛奶".into());
             })
             .unwrap();
-        let view = dashboard(&[TaskSummary::from(&task)], Some(&task), 3, true, 1, false);
+        let view = dashboard(
+            &[TaskSummary::from(&task)],
+            Some(&task),
+            3,
+            true,
+            1,
+            false,
+            &Waiting::default(),
+        );
         assert!(
             view.contains("已完成") && view.contains("已记下：牛奶") && view.contains("快照 #3")
         );
@@ -674,7 +863,15 @@ mod tests {
         let detail = task_detail(&task, true);
         assert!(detail.contains("未能处理") && detail.contains("没有对应的能力"));
         assert!(!detail.contains("已完成"));
-        let view = dashboard(&[TaskSummary::from(&task)], Some(&task), 2, true, 1, false);
+        let view = dashboard(
+            &[TaskSummary::from(&task)],
+            Some(&task),
+            2,
+            true,
+            1,
+            false,
+            &Waiting::default(),
+        );
         assert!(view.contains("已完成 0") && view.contains("需查看 1"));
         assert_eq!(WaitOutcome::Settled(task.clone()).exit_code(), 3);
         let done = store
@@ -761,5 +958,150 @@ mod tests {
         assert!(reply_text(&raw).contains("\"count\": 2"));
         assert_eq!(risk_label(RiskLevel::ReadOnly), "L0 只读");
         assert_eq!(risk_label(RiskLevel::Irreversible), "L3 不可逆");
+    }
+
+    fn summary(id: u64, state: TaskState, text: &str) -> TaskSummary {
+        TaskSummary {
+            id: TaskId(id),
+            thread: TaskId(id),
+            text: text.into(),
+            state,
+            completed_steps: 0,
+            total_steps: 1,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn the_waiting_strip_appears_only_when_something_waits_on_the_user() {
+        assert_eq!(waiting_strip(&Waiting::default()), None);
+        assert_eq!(
+            waiting_strip(&Waiting {
+                problems: Some(0),
+                ..Waiting::default()
+            }),
+            None
+        );
+        let strip = waiting_strip(&Waiting {
+            tasks: vec![
+                summary(9, TaskState::AwaitingInput, "订周三的会议室"),
+                summary(3, TaskState::AwaitingConfirmation, "发给 alice \x1b[2J"),
+            ],
+            more: false,
+            problems: Some(2),
+        })
+        .unwrap();
+        assert!(strip.contains("task-9") && strip.contains("待回答"));
+        assert!(strip.contains("task-3") && strip.contains("待批准"));
+        assert!(strip.contains("2 件事") && strip.contains("agentos doctor"));
+        assert!(!strip.contains('\x1b'), "task text is untrusted");
+        assert!(!strip.contains("还有"));
+    }
+
+    #[test]
+    fn a_long_queue_of_waiting_tasks_says_how_many_are_not_listed() {
+        let tasks: Vec<_> = (1..=8)
+            .map(|id| summary(id, TaskState::AwaitingConfirmation, "x"))
+            .collect();
+        let strip = waiting_strip(&Waiting {
+            tasks: tasks.clone(),
+            more: false,
+            problems: None,
+        })
+        .unwrap();
+        assert!(strip.contains("还有 2 个"));
+        let strip = waiting_strip(&Waiting {
+            tasks,
+            more: true,
+            problems: None,
+        })
+        .unwrap();
+        assert!(strip.contains("还有更多"));
+    }
+
+    #[test]
+    fn the_dashboard_keeps_a_waiting_task_in_view_when_it_is_not_on_the_page() {
+        // Contract: a task waiting for an approval stays visible whichever
+        // page is on screen.
+        let waiting = Waiting {
+            tasks: vec![summary(3, TaskState::AwaitingConfirmation, "发给 alice")],
+            ..Waiting::default()
+        };
+        let page = [summary(20, TaskState::Succeeded, "现在几点")];
+        let view = dashboard(&page, None, 1, true, 1, true, &waiting);
+        let strip = view.find("需要你处理").unwrap();
+        assert!(view.contains("task-3") && strip < view.find("task-20").unwrap());
+    }
+
+    #[test]
+    fn activity_reads_like_the_desktop_feed_and_says_how_to_follow_up() {
+        let now = 10_000_000;
+        let items = vec![
+            serde_json::json!({"seq": 1, "at_ms": now - 30_000, "kind": "invoked", "capability": "clock.now", "ok": true}),
+            serde_json::json!({"seq": 2, "at_ms": now - 120_000, "kind": "invoked", "capability": "web.fetch", "ok": false}),
+            serde_json::json!({"seq": 3, "at_ms": now - 7_200_000, "kind": "confirmation", "capability": "mail.send", "ok": false}),
+            serde_json::json!({"seq": 4, "at_ms": now, "kind": "device", "device": "mic", "detail": {"duration_ms": 2500, "sent_to": "本机"}, "ok": true}),
+            serde_json::json!({"seq": 5, "at_ms": now, "kind": "improvement", "id": "lesson-3", "summary": "学到一条经验", "ok": true}),
+            serde_json::json!({"seq": 6, "at_ms": now, "kind": "improvement", "id": "lesson-2", "summary": "撤回了 lesson-2：变差了", "ok": false}),
+            serde_json::json!({"seq": 7, "at_ms": now, "kind": "crash", "summary": "agentos-taskd 崩溃：boom\x1b]52;c;x\x07", "ok": false}),
+        ];
+        let text = activity_text(&items, now);
+        assert!(text.contains("· 刚刚 · clock.now"));
+        assert!(text.contains("! 2 分钟前 · web.fetch（失败）"));
+        assert!(text.contains("· 2 小时前 · 你拒绝了：mail.send"));
+        assert!(text.contains("麦克风录音 2.5 秒 · 本机识别"));
+        // An adopted lesson says how to undo it; a withdrawn one does not.
+        assert!(text.contains("说“撤回 lesson-3”"));
+        assert!(!text.contains("撤回 lesson-2”"));
+        assert!(text.contains("! 刚刚 · 任务服务异常退出") && text.contains("诊断一下"));
+        assert!(!text.contains('\x1b') && !text.contains('\x07'));
+        assert_eq!(activity_text(&[], now), "还没有活动记录。");
+    }
+
+    /// Every escape in `text` starts a plain SGR color code (`ESC [ digits;… m`):
+    /// nothing else can move the cursor, set a title or touch the clipboard.
+    fn only_color_codes(text: &str) -> bool {
+        text.match_indices('\x1b').all(|(at, _)| {
+            let rest = &text[at + 1..];
+            rest.strip_prefix('[').is_some_and(|code| {
+                let end = code.find('m').unwrap_or(usize::MAX);
+                end != usize::MAX && code[..end].chars().all(|c| c.is_ascii_digit() || c == ';')
+            })
+        })
+    }
+
+    #[test]
+    fn color_marks_states_but_never_comes_from_task_text() {
+        // Contract: terminal output stays a device boundary with color on.
+        let tasks = [
+            summary(
+                3,
+                TaskState::AwaitingConfirmation,
+                "发给 \x1b[31malice\x1b]0;title\x07",
+            ),
+            summary(4, TaskState::Running, "x"),
+        ];
+        let rows = crate::style::with_color(true, || task_rows(&tasks, None));
+        // The label is padded first, then colored, so columns stay aligned.
+        assert!(rows.contains("\x1b[1;33m等待批准  \x1b[0m"), "{rows:?}");
+        assert!(rows.contains("\\u{1b}[31malice") && rows.contains("\\u{7}"));
+        assert_eq!(rows.matches('\x1b').count(), 2, "running tasks stay plain");
+        assert!(only_color_codes(&rows));
+        let plain = crate::style::with_color(false, || task_rows(&tasks, None));
+        assert!(!plain.contains('\x1b'));
+    }
+
+    #[test]
+    fn ago_uses_minutes_hours_then_days() {
+        assert_eq!(ago(0, 59_999), "刚刚");
+        assert_eq!(ago(0, 60_000), "1 分钟前");
+        assert_eq!(ago(0, 3_600_000), "1 小时前");
+        assert_eq!(ago(0, 86_400_000 * 3), "3 天前");
+        assert_eq!(
+            ago(5_000, 0),
+            "刚刚",
+            "a clock behind the service is not negative"
+        );
     }
 }

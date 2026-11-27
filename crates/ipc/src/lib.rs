@@ -23,6 +23,8 @@ pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_TEXT_BYTES: usize = 65_536;
 pub const MAX_PAGE_SIZE: usize = 50;
 pub const MAX_CAPABILITY_NAME_BYTES: usize = 128;
+/// The most activity items one `activity` request may ask for.
+pub const MAX_ACTIVITY: usize = 100;
 
 fn empty_object() -> Value {
     Value::Object(serde_json::Map::new())

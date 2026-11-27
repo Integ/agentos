@@ -18,7 +18,7 @@ use agentos_core::{
 use agentos_ipc::{
     current_uid, read_frame, write_frame, Caller, Command, Event, EventKind, ListenAction,
     MicState, ProtocolError, Reply, Request, Response, SpeakMode, TaskSummary, VoiceStatus,
-    MAX_CAPABILITY_NAME_BYTES, MAX_PAGE_SIZE, MAX_TEXT_BYTES, VERSION,
+    MAX_ACTIVITY, MAX_CAPABILITY_NAME_BYTES, MAX_PAGE_SIZE, MAX_TEXT_BYTES, VERSION,
 };
 use agentos_policy::{PolicyEngine, Subject};
 use agentos_runtime::{Task, TaskId, TaskState, TaskStore};
@@ -42,7 +42,6 @@ use agentos_services::schedule::{Schedule, ScheduleStore};
 const MAX_CONNECTIONS: usize = 64;
 /// How often due schedules are looked for: a run is at most this late.
 const SCHEDULE_TICK: Duration = Duration::from_secs(20);
-const MAX_ACTIVITY: usize = 100;
 const QUEUE_CAPACITY: usize = 64;
 /// Tasks (and approvals being carried out) that run at the same time unless
 /// the embedder says otherwise. Each may hold a model request open.

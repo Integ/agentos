@@ -320,7 +320,7 @@ PIN 由服务端核对，不保存、不写入任务或审计；核对通过只�
 
 ## 最近活动
 
-`activity` 给桌面的“最近活动”面板用：每一项有 `seq`、`at_ms`、`kind` 和 `ok`，按 `kind` 另带字段——`invoked`（能力调用，包括超过时限、后来在后台结束的调用）和 `confirmation`（人工确认）带 `capability`，`device`（麦克风）带 `device` 和 `detail`，`crash` 带 `summary`，`improvement`（系统自己采用或撤回了一条经验、一个技能）带 `id` 和 `summary`，`ok` 为 `false` 表示撤回。服务崩溃时把报告写进状态目录的 `crash.txt` 并退出，用户服务把它重新拉起；新的一次运行把报告的第一行记为审计事件 `daemon_crashed`，这里就能看到。只读日志末尾的一段，更早的活动不会出现。
+`activity` 给桌面的“最近活动”面板、`agentos activity` 和工作台的 `/activity` 用：每一项有 `seq`、`at_ms`、`kind` 和 `ok`，按 `kind` 另带字段——`invoked`（能力调用，包括超过时限、后来在后台结束的调用）和 `confirmation`（人工确认）带 `capability`，`device`（麦克风）带 `device` 和 `detail`，`crash` 带 `summary`，`improvement`（系统自己采用或撤回了一条经验、一个技能）带 `id` 和 `summary`，`ok` 为 `false` 表示撤回。服务崩溃时把报告写进状态目录的 `crash.txt` 并退出，用户服务把它重新拉起；新的一次运行把报告的第一行记为审计事件 `daemon_crashed`，这里就能看到。只读日志末尾的一段，更早的活动不会出现。
 
 ## 资源界限与背压
 

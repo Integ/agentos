@@ -3,8 +3,10 @@
 pub mod args;
 pub mod client;
 pub mod doctor;
+pub mod help;
 pub mod mcp;
 pub mod render;
+pub mod style;
 pub mod wait;
 pub mod wechat;
 pub mod workbench;

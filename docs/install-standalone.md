@@ -105,6 +105,7 @@ agentos                                  # 终端工作台
 agentos submit --wait "现在几点"          # 提交一个任务
 journalctl --user -u agentos-taskd       # 任务服务的日志，包括崩溃报告（看不到时试 journalctl -t agentos-taskd）
 systemctl --user status agentos-taskd    # 有没有在运行
+agentos activity                         # 最近活动：调用、批准、崩溃、自动采用的经验（没有桌面时看这里）
 ```
 
 ## 更新

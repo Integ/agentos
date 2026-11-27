@@ -3,18 +3,21 @@ use std::time::Duration;
 
 use agentos_core::{CapabilityName, RiskLevel};
 use agentos_ipc::{
-    default_socket_path, default_state_dir, ArgRule, Command, Matcher, MAX_CAPABILITY_NAME_BYTES,
-    MAX_PAGE_SIZE,
+    default_socket_path, default_state_dir, ArgRule, Command, Matcher, MAX_ACTIVITY,
+    MAX_CAPABILITY_NAME_BYTES, MAX_PAGE_SIZE,
 };
 use agentos_runtime::{TaskId, TaskState};
+
+use crate::help;
+
+/// How many activity items `agentos activity` shows without `--limit`.
+pub const DEFAULT_ACTIVITY: usize = 20;
 
 /// How long `submit --wait` waits when `--timeout` is not given.
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(300);
 const MAX_WAIT_SECONDS: u64 = 86_400;
 
-pub const HELP: &str = "AgentOS · 独立任务工作台\n\n用法：agentos [--socket 路径 | --state-dir 路径] [--json] <命令>\n\n  workbench                         实时终端工作台（默认）\n  submit [--thread task-N] [--wait] [--timeout 秒] <意图>\n                                    提交任务，客户端退出后仍继续；--wait 等到任务结束再返回；\n                                    --thread 接着某个线程说（用它第一个任务的编号）\n  tasks [--before task-N] [--limit N] [--state 状态] [--thread task-N]\n  task task-N                       查看计划、结果与批准令牌\n  cancel task-N                     取消任务的后续步骤\n  reply task-N 步骤 <回答>          回答任务在这一步提出的问题\n  approve task-N 步骤 --confirmation 令牌 [--pin-stdin]\n                                    批准一步；不可逆的步骤加 --pin-stdin，从标准输入读取 PIN\n  reject task-N 步骤 --confirmation 令牌\n                                    只拒绝这一步：它不执行，任务换别的办法继续；不需要 PIN\n  preauthorize <能力> [规则…] [--any-other-args] [--expires 时长] [--caller id] [--pin-stdin]\n                                    预授权：符合规则的调用不再逐次确认。规则：\n                                    --equals 字段=值　--one-of 字段=值1,值2　--prefix 字段=文本\n                                    --under 字段=目录　--any 字段；时长如 30m、2h、7d\n  preauthorizations                 查看仍然有效的预授权\n  revoke pre-N                      撤销一条预授权，立即生效\n  callers                           查看已注册的外部调用方\n  caller add <id> --name 名字 [--allow 能力或前缀]… [--max-risk L0|L1|L2] [--pin-stdin]\n                                    注册外部调用方，或整体替换它的清单；默认什么都不给\n  caller remove <id>                撤销调用方，它的预授权一并撤销\n  mcp --caller <id>                 以这个调用方的身份提供 MCP 服务（标准输入输出）\n  wechat login                      用微信扫码绑定 ClawBot（微信：我 → 设置 → 插件）\n  wechat                            收发微信消息：你发的文字交给 AgentOS，结果发回微信\n  capabilities                      查看能力与风险\n  doctor                            诊断：任务服务是否在运行、规划器、沙箱、PIN、上次崩溃，每个问题怎么办\n  read <能力> [JSON 参数]           直接读取只读（L0）能力，不创建任务\n  watch [--after revision]           持续接收变更/重新同步通知\n  --help                            查看帮助\n  --version                         查看版本\n\n--json 应放在命令前，输出结构化 JSON。批准步骤从 1 开始。\n工作台 /quit 只关闭客户端，不停止后台服务。\n\n退出码：0 成功；1 连接、协议或后台错误；2 用法错误。\nsubmit --wait 另有：3 任务结束但未成功（未能处理、失败、已取消或已中断）；\n4 任务在等待批准；5 等待超时（任务仍在后台继续）；6 任务在等待回答。\ndoctor 另有：3 任务服务在运行，但有需要处理的问题。";
-
-pub const WORKBENCH_HELP: &str = "普通输入：提交意图，接着本次对话说；任务在后台继续\n/new：开始一段新的对话\n/tasks 或 /refresh：刷新当前页　/next：更早任务　/prev：返回上一页\n/latest：最近任务　/task task-N：选中并展示完整计划与结果\n/cancel task-N：取消后续步骤　/approve task-N 步骤：批准当前已展示的确认请求\n/reject task-N 步骤：只拒绝这一步，任务继续\n/reply task-N 步骤 回答：回答任务提出的问题\n/capabilities：查看能力　/help：帮助　/quit：退出工作台";
+pub const WORKBENCH_HELP: &str = "普通输入：提交意图，接着本次对话说；任务在后台继续\n/new：开始一段新的对话\n/tasks 或 /refresh：刷新当前页　/next：更早任务　/prev：返回上一页\n/latest：最近任务　/task task-N：选中并展示完整计划与结果\n/cancel task-N：取消后续步骤　/approve task-N 步骤：批准当前已展示的确认请求\n/reject task-N 步骤：只拒绝这一步，任务继续\n/reply task-N 步骤 回答：回答任务提出的问题\n/activity：最近活动（能力调用、批准、崩溃、自动采用的经验）\n/capabilities：查看能力　/help：帮助　/quit：退出工作台";
 
 #[derive(Debug)]
 pub struct Options {
@@ -48,7 +51,8 @@ pub enum Action {
     Wechat {
         login: bool,
     },
-    Help,
+    /// The overview, or the page for a group or command (already checked).
+    Help(Option<String>),
     Version,
 }
 
@@ -142,7 +146,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
                     socket: PathBuf::new(),
                     state_dir: None,
                     json,
-                    action: Action::Help,
+                    action: Action::Help(None),
                     pin_stdin: false,
                 })
             }
@@ -171,7 +175,40 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
     };
     let rest = &args[i..];
     let mut pin_stdin = false;
-    let action = match rest.first().map(String::as_str) {
+    let action = match help_request(rest) {
+        Some(topic) => Action::Help(Some(topic)),
+        None => command(rest, &mut pin_stdin)?,
+    };
+    if json
+        && matches!(
+            action,
+            Action::Workbench | Action::Mcp { .. } | Action::Wechat { .. }
+        )
+    {
+        return Err("--json 用于单次命令或 watch；工作台、mcp 和 wechat 不使用它".into());
+    }
+    Ok(Options {
+        socket,
+        state_dir,
+        json,
+        action,
+        pin_stdin,
+    })
+}
+
+/// `agentos <command> --help`, and `caller add --help`-style for the
+/// commands that take a word first. Only right after the command name: an
+/// intent may contain "-h" anywhere else.
+fn help_request(rest: &[String]) -> Option<String> {
+    let asks = |word: Option<&String>| word.is_some_and(|w| w == "--help" || w == "-h");
+    let command = rest.first()?;
+    let nested = matches!(command.as_str(), "caller" | "wechat") && rest.len() == 3;
+    let asked = (rest.len() == 2 && asks(rest.get(1))) || (nested && asks(rest.get(2)));
+    (asked && help::find(command).is_some()).then(|| command.clone())
+}
+
+fn command(rest: &[String], pin_stdin: &mut bool) -> Result<Action, String> {
+    Ok(match rest.first().map(String::as_str) {
         None => Action::Workbench,
         Some("workbench") if rest.len() == 1 => Action::Workbench,
         Some("submit") if rest.len() > 1 => {
@@ -291,7 +328,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             if (rest.len() == 5 || (rest.len() == 6 && rest[5] == "--pin-stdin"))
                 && rest[3] == "--confirmation" =>
         {
-            pin_stdin = rest.len() == 6;
+            *pin_stdin = rest.len() == 6;
             let step = rest[2]
                 .parse::<usize>()
                 .ok()
@@ -346,7 +383,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
                 };
                 match word.as_str() {
                     "--any-other-args" => other_args = true,
-                    "--pin-stdin" => pin_stdin = true,
+                    "--pin-stdin" => *pin_stdin = true,
                     "--expires" => expires_in_seconds = Some(duration_seconds(value()?)?),
                     "--caller" => caller = Some(caller_id(value()?)?),
                     "--any" => args.push(ArgRule {
@@ -413,7 +450,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
                         .ok_or_else(|| format!("{word} 缺少值"))
                 };
                 match word.as_str() {
-                    "--pin-stdin" => pin_stdin = true,
+                    "--pin-stdin" => *pin_stdin = true,
                     "--name" => name = Some(value()?.to_string()),
                     "--allow" => capabilities.push(value()?.to_string()),
                     "--max-risk" => {
@@ -446,6 +483,18 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
         Some("wechat") if rest.len() == 2 && rest[1] == "login" => Action::Wechat { login: true },
         Some("capabilities") if rest.len() == 1 => Action::Request(Command::Capabilities {}),
         Some("doctor") if rest.len() == 1 => Action::Doctor,
+        Some("activity") => {
+            let limit = match rest {
+                [_] => DEFAULT_ACTIVITY,
+                [_, flag, count] if flag == "--limit" => count
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| (1..=MAX_ACTIVITY).contains(n))
+                    .ok_or_else(|| format!("--limit 需要 1–{MAX_ACTIVITY} 之间的整数"))?,
+                _ => return Err("用法：agentos activity [--limit N]".into()),
+            };
+            Action::Request(Command::Activity { limit })
+        }
         Some("read") if rest.len() == 2 || rest.len() == 3 => {
             let name = rest[1].trim();
             if name.is_empty() || name.len() > MAX_CAPABILITY_NAME_BYTES || name.starts_with("--") {
@@ -468,23 +517,17 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
         Some("watch") if rest.len() == 3 && rest[1] == "--after" => Action::Watch(Some(
             rest[2].parse().map_err(|_| "revision 必须是非负整数")?,
         )),
-        Some("help") if rest.len() == 1 => Action::Help,
-        _ => return Err("未知命令或参数错误，使用 agentos --help 查看用法".into()),
-    };
-    if json
-        && matches!(
-            action,
-            Action::Workbench | Action::Mcp { .. } | Action::Wechat { .. }
-        )
-    {
-        return Err("--json 用于单次命令或 watch；工作台、mcp 和 wechat 不使用它".into());
-    }
-    Ok(Options {
-        socket,
-        state_dir,
-        json,
-        action,
-        pin_stdin,
+        Some("help") if rest.len() == 1 => Action::Help(None),
+        Some("help") if rest.len() == 2 => match help::find(&rest[1]) {
+            Some(_) => Action::Help(Some(rest[1].clone())),
+            None => {
+                return Err(format!(
+                    "没有这个命令或分组：{}；agentos help 查看全部",
+                    rest[1]
+                ))
+            }
+        },
+        _ => return Err("未知命令或参数错误，使用 agentos help 查看用法".into()),
     })
 }
 
@@ -513,6 +556,7 @@ pub enum WorkbenchCommand {
     /// Later intents start a new thread.
     New,
     Capabilities,
+    Activity,
     Help,
     Quit,
 }
@@ -564,6 +608,7 @@ pub fn parse_workbench(text: &str) -> Result<WorkbenchCommand, String> {
         },
         ["/new"] => WorkbenchCommand::New,
         ["/capabilities"] => WorkbenchCommand::Capabilities,
+        ["/activity"] => WorkbenchCommand::Activity,
         ["/help"] => WorkbenchCommand::Help,
         ["/quit"] | ["/exit"] => WorkbenchCommand::Quit,
         _ => return Err("未知工作台命令，输入 /help 查看用法".into()),
@@ -738,6 +783,85 @@ mod tests {
         ] {
             assert!(argv(&args).is_err(), "{args:?}");
         }
+    }
+
+    #[test]
+    fn activity_shows_twenty_items_unless_told_otherwise_within_the_protocol_limit() {
+        let limit = |args: &[&str]| match argv(args).unwrap().action {
+            Action::Request(Command::Activity { limit }) => limit,
+            other => panic!("not an activity request: {other:?}"),
+        };
+        assert_eq!(limit(&["activity"]), DEFAULT_ACTIVITY);
+        assert_eq!(limit(&["activity", "--limit", "5"]), 5);
+        assert_eq!(limit(&["activity", "--limit", "100"]), MAX_ACTIVITY);
+        for args in [
+            vec!["activity", "--limit", "0"],
+            vec!["activity", "--limit", "101"],
+            vec!["activity", "--limit"],
+            vec!["activity", "5"],
+        ] {
+            assert!(argv(&args).is_err(), "{args:?}");
+        }
+        assert!(argv(&["--json", "activity"]).unwrap().json);
+        assert_eq!(
+            parse_workbench("/activity").unwrap(),
+            WorkbenchCommand::Activity
+        );
+    }
+
+    #[test]
+    fn every_documented_command_answers_its_own_help_flag() {
+        for entry in help::COMMANDS {
+            for flag in ["--help", "-h"] {
+                match argv(&[entry.name, flag]).unwrap().action {
+                    Action::Help(Some(topic)) => assert_eq!(topic, entry.name),
+                    other => panic!("{} {flag}: {other:?}", entry.name),
+                }
+            }
+        }
+        for args in [["caller", "add", "--help"], ["wechat", "login", "-h"]] {
+            assert!(matches!(argv(&args).unwrap().action, Action::Help(Some(_))));
+        }
+    }
+
+    #[test]
+    fn asking_submit_for_help_never_submits_an_intent() {
+        // Before grouped help, `agentos submit --help` submitted "--help".
+        assert!(matches!(
+            argv(&["submit", "--help"]).unwrap().action,
+            Action::Help(Some(topic)) if topic == "submit"
+        ));
+        // The intent itself can still start with a dash, after `--`.
+        assert!(matches!(
+            argv(&["submit", "--", "--help"]).unwrap().action,
+            Action::Request(Command::Submit { text, .. }) if text == "--help"
+        ));
+        // Help is only asked right after the command: words of an intent
+        // that happen to be "-h" stay part of the intent.
+        assert!(matches!(
+            argv(&["submit", "加", "-h", "参数"]).unwrap().action,
+            Action::Request(Command::Submit { .. })
+        ));
+    }
+
+    #[test]
+    fn help_takes_a_group_or_command_and_refuses_anything_else() {
+        assert!(matches!(
+            argv(&["help"]).unwrap().action,
+            Action::Help(None)
+        ));
+        assert!(matches!(
+            argv(&["--help"]).unwrap().action,
+            Action::Help(None)
+        ));
+        for topic in ["tasks", "任务", "submit", "inspect"] {
+            assert!(matches!(
+                argv(&["help", topic]).unwrap().action,
+                Action::Help(Some(t)) if t == topic
+            ));
+        }
+        assert!(argv(&["help", "nonsense"]).is_err());
+        assert!(argv(&["--json", "help"]).unwrap().json);
     }
 
     #[test]

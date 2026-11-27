@@ -3,11 +3,12 @@ use std::io;
 use agentos_cli::args::{self, Action};
 use agentos_cli::client::{Client, ClientError};
 use agentos_cli::wait::wait_for_task;
-use agentos_cli::{doctor, mcp, render, wechat, workbench};
+use agentos_cli::{doctor, help, mcp, render, style, wechat, workbench};
 use agentos_ipc::{Command, Reply};
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    style::init();
     let options = match args::parse(std::env::args().skip(1)) {
         Ok(options) => options,
         Err(error) => {
@@ -17,8 +18,12 @@ async fn main() -> io::Result<()> {
     };
     let client = Client::new(options.socket);
     let result = match options.action {
-        Action::Help => {
-            println!("{}", args::HELP);
+        Action::Help(topic) => {
+            if options.json {
+                println!("{}", help::json(topic.as_deref()));
+            } else {
+                println!("{}", help::text(topic.as_deref()));
+            }
             Ok(())
         }
         Action::Version => {
@@ -37,8 +42,9 @@ async fn main() -> io::Result<()> {
             if options.json {
                 println!("{}", report.json());
             } else {
-                // Parts of the report come from outside programs.
-                println!("{}", render::safe_text(&report.text()));
+                // `text` makes each piece from outside safe before coloring;
+                // escaping the whole would turn the color into visible text.
+                println!("{}", report.text());
             }
             std::process::exit(report.exit_code());
         }

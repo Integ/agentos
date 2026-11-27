@@ -4,8 +4,9 @@
 use std::io::{self, BufRead, Write};
 use std::time::Duration;
 
-use agentos_core::now_ms;
-use agentos_ipc::{Command, Event, Reply, TaskSummary};
+use agentos_core::{now_ms, CapabilityName};
+use agentos_ipc::status::{self, Severity, SystemStatus};
+use agentos_ipc::{Command, Event, Reply, TaskSummary, MAX_PAGE_SIZE};
 use agentos_runtime::{Confirmation, Task, TaskId, TaskState};
 use tokio::sync::mpsc;
 
@@ -14,6 +15,69 @@ use crate::client::{Client, ClientError};
 use crate::render;
 
 const PAGE_SIZE: usize = 12;
+/// How much `/activity` shows: about a screen.
+const ACTIVITY_SHOWN: usize = 12;
+
+/// What waits on the user, from every page rather than the one on screen.
+/// A task waiting for an approval must not drop out of sight because newer
+/// tasks filled its page, the way a build failure must not be pushed off
+/// screen by a chatty channel.
+#[derive(Debug, Default, Clone)]
+pub struct Waiting {
+    /// Tasks awaiting an approval or an answer, newest first.
+    pub tasks: Vec<TaskSummary>,
+    /// More are waiting than one page of each state held.
+    pub more: bool,
+    /// Warnings and errors in the service's own report (`system.status`);
+    /// `None` from a service too old to have one.
+    pub problems: Option<usize>,
+}
+
+/// Look up everything that waits on the user. Only reads: `list` filtered by
+/// state and the service's report, never an intent.
+pub async fn waiting_on_user(client: &Client) -> Result<Waiting, ClientError> {
+    let mut waiting = Waiting::default();
+    for state in [TaskState::AwaitingConfirmation, TaskState::AwaitingInput] {
+        let reply = client
+            .request(Command::List {
+                before: None,
+                limit: MAX_PAGE_SIZE,
+                state: Some(state),
+                thread: None,
+            })
+            .await?;
+        if let Reply::Tasks {
+            tasks, next_before, ..
+        } = reply
+        {
+            waiting.more |= next_before.is_some();
+            waiting.tasks.extend(tasks);
+        }
+    }
+    waiting
+        .tasks
+        .sort_by_key(|task| std::cmp::Reverse(task.id.0));
+    let read = Command::Read {
+        capability: CapabilityName::new(status::CAPABILITY),
+        args: serde_json::json!({}),
+    };
+    waiting.problems =
+        match client.request(read).await {
+            Ok(Reply::Value { value, .. }) => serde_json::from_value::<SystemStatus>(value)
+                .ok()
+                .map(|report| {
+                    report
+                        .problems
+                        .iter()
+                        .filter(|problem| problem.severity >= Severity::Warning)
+                        .count()
+                }),
+            // An older service without the report; the tasks still count.
+            Err(ClientError::Remote(_)) | Ok(_) => None,
+            Err(error) => return Err(error),
+        };
+    Ok(waiting)
+}
 
 /// The confirmation of `id` at `step` as the workbench displayed it, if it is
 /// still the one waiting and has not expired.
@@ -89,6 +153,7 @@ struct View {
     connected: bool,
     /// The conversation plain input continues; `None` starts a new one.
     thread: Option<TaskId>,
+    waiting: Waiting,
 }
 
 impl View {
@@ -103,6 +168,7 @@ impl View {
             revision: 0,
             connected: false,
             thread: None,
+            waiting: Waiting::default(),
         }
     }
 
@@ -136,6 +202,9 @@ impl View {
         self.tasks = tasks;
         self.next_before = next_before;
         self.revision = revision;
+        self.waiting = waiting_on_user(client)
+            .await
+            .inspect_err(|_| self.disconnect())?;
         self.connected = true;
         if self.selected_id.is_none() {
             self.selected_id = self.tasks.first().map(|task| task.id);
@@ -171,7 +240,8 @@ impl View {
                 self.revision,
                 self.connected,
                 self.previous.len() + 1,
-                self.next_before.is_some()
+                self.next_before.is_some(),
+                &self.waiting,
             )
         );
         prompt();
@@ -374,6 +444,15 @@ async fn perform(
         WorkbenchCommand::Capabilities => {
             let reply = client
                 .request(Command::Capabilities {})
+                .await
+                .map_err(|e| request_error(view, e))?;
+            println!("\n{}", render::reply_text(&reply));
+        }
+        WorkbenchCommand::Activity => {
+            let reply = client
+                .request(Command::Activity {
+                    limit: ACTIVITY_SHOWN,
+                })
                 .await
                 .map_err(|e| request_error(view, e))?;
             println!("\n{}", render::reply_text(&reply));

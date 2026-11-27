@@ -15,6 +15,8 @@ use agentos_ipc::{current_uid, Command, Reply};
 use serde_json::{json, Value};
 
 use crate::client::{Client, ClientError};
+use crate::render::safe_text;
+use crate::style::{paint, Tone};
 
 /// Where to read more, for someone who installed binaries without the repo.
 pub const TROUBLESHOOTING: &str =
@@ -63,31 +65,55 @@ impl Report {
         })
     }
 
+    /// The report for a terminal. Everything that came from the service
+    /// or the file system is made safe here, piece by piece, before color is
+    /// added around it, so the result is printed as it is.
     pub fn text(&self) -> String {
-        let mut lines = vec![format!("AgentOS 诊断 · agentos v{}", self.client_version)];
+        let socket = safe_text(&self.socket.display().to_string());
+        let mut lines = vec![paint(
+            &format!("AgentOS 诊断 · agentos v{}", self.client_version),
+            Tone::Strong,
+        )];
         lines.push(match &self.server_version {
-            Some(version) => format!("连接：{}（任务服务 v{version}）", self.socket.display()),
-            None => format!("连接：没有连上 {}", self.socket.display()),
+            Some(version) => format!("连接：{socket}（任务服务 v{}）", safe_text(version)),
+            None => format!("连接：{}", paint(&format!("没有连上 {socket}"), Tone::Bad)),
         });
         if let Some(report) = &self.status {
-            lines.push(report.render_facts());
+            lines.push(safe_text(&report.render_facts()));
         }
-        lines.push(status::render_problems(&self.problems));
-        if self
+        let problems: Vec<Problem> = self
             .problems
             .iter()
-            .any(|p| p.severity >= Severity::Warning)
-        {
-            lines.push(
+            .map(|problem| Problem {
+                severity: problem.severity,
+                text: safe_text(&problem.text),
+                fix: problem.fix.as_deref().map(safe_text),
+            })
+            .collect();
+        lines.push(status::render_problems_with(
+            &problems,
+            |severity, label| {
+                let tone = match severity {
+                    Severity::Error => Tone::Bad,
+                    Severity::Warning => Tone::Attention,
+                    Severity::Info => Tone::Quiet,
+                };
+                paint(label, tone)
+            },
+        ));
+        let mut footer = Vec::new();
+        if problems.iter().any(|p| p.severity >= Severity::Warning) {
+            footer.push(
                 "重启任务服务：镜像里运行 systemctl --user restart agentos-taskd；自己运行的，停止后用同样的参数再启动。"
-                    .into(),
+                    .to_string(),
             );
-            lines.push(format!("更多排障办法：{TROUBLESHOOTING}"));
+            footer.push(format!("更多排障办法：{TROUBLESHOOTING}"));
         }
-        lines.push(
+        footer.push(
             "这份报告只在本机生成，没有发送到任何地方；贴到 issue 之前看一眼里面的路径和地址。"
                 .into(),
         );
+        lines.extend(footer.iter().map(|line| paint(line, Tone::Quiet)));
         lines.join("\n")
     }
 }
@@ -269,6 +295,34 @@ mod tests {
         assert_eq!(version_mismatch("0.5.0", "0.5.0"), None);
         let problem = version_mismatch("0.5.0", "0.4.0").unwrap();
         assert!(problem.text.contains("v0.5.0") && problem.text.contains("v0.4.0"));
+    }
+
+    #[test]
+    fn a_colored_report_still_shows_what_the_service_said_as_text() {
+        // Contract: color is added around safe text, never instead of it.
+        let report = Report {
+            client_version: "0.4.0".into(),
+            socket: PathBuf::from("/x/control.sock"),
+            server_version: Some("0.4.0\x1b[2J".into()),
+            status: None,
+            problems: vec![
+                Problem::new(Severity::Error, "boom \x1b]52;c;eA==\x07").fix("fix \x1b[1A"),
+                Problem::new(Severity::Info, "fine"),
+            ],
+        };
+        let text = crate::style::with_color(true, || report.text());
+        assert!(text.contains("\x1b[31m[错误]\x1b[0m") && text.contains("\x1b[2m[提示]\x1b[0m"));
+        assert!(text.contains("\\u{1b}]52") && text.contains("\\u{1b}[2J"));
+        assert!(text.match_indices('\x1b').all(|(at, _)| {
+            let code = &text[at + 1..];
+            code.starts_with('[')
+                && code[1..]
+                    .split('m')
+                    .next()
+                    .is_some_and(|digits| digits.chars().all(|c| c.is_ascii_digit() || c == ';'))
+        }));
+        let plain = crate::style::with_color(false, || report.text());
+        assert!(!plain.contains('\x1b'));
     }
 
     #[test]

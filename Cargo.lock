@@ -24,6 +24,7 @@ dependencies = [
  "agentos-runtime",
  "agentos-services",
  "agentos-taskd",
+ "async-trait",
  "qrcode",
  "reqwest",
  "serde_json",

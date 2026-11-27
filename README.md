@@ -214,7 +214,7 @@ agentos-taskd --replay --tasks task-3,task-7 --planner claude   # 用模型回�
 
 回放不执行任何真实操作：能力一律用当时记录的结果代替，记录里没有的调用不执行。默认用离线规则规划器，守护进程运行时也能跑。
 
-设置 `AGENTOS_IMPROVE=1`（需要模型规划器，会消耗 token）后，任务服务在空闲时从失败的任务里总结经验、把反复出现的调用顺序写成技能，用回放比较有它和没有它的结局；没有任何退化、明显变好才采用，不需要批准，并显示在桌面“最近活动”里。之后任务成功率明显下降会自动撤回。说“你学到了什么”查看，“撤回 lesson-3”撤销；`AGENTOS_IMPROVE_AUTO=0` 只评测不采用，`AGENTOS_IMPROVE_TOKENS` 限制每轮的 token。插件和代码改动仍然要人批准。
+设置 `AGENTOS_IMPROVE=1`（需要模型规划器，会消耗 token）后，任务服务在空闲时从失败的任务里总结经验、把反复出现的调用顺序写成技能，用回放比较有它和没有它的结局；没有任何退化、明显变好才采用，不需要批准，并显示在桌面“最近活动”和 `agentos activity` 里。之后任务成功率明显下降会自动撤回。说“你学到了什么”查看，“撤回 lesson-3”撤销；`AGENTOS_IMPROVE_AUTO=0` 只评测不采用，`AGENTOS_IMPROVE_TOKENS` 限制每轮的 token。插件和代码改动仍然要人批准。
 
 状态目录默认是 `~/.local/state/agentos`（`--state-dir` 或 `AGENTOS_STATE_DIR` 可改），笔记保存在其中的 `notes.json`，重启后还在。审计日志默认写到状态目录里的 `audit.jsonl`，可用 `--audit <路径>` 或环境变量 `AGENTOS_TASK_AUDIT` 指定。每条记录都带上一条的 SHA-256（哈希链），`agentos-taskd --verify-audit` 可以检查中间有没有记录被改过、删过或插入过；想防止整段重写或截掉末尾，可以把它输出的“链头”另外记下来。
 

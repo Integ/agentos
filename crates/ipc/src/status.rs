@@ -167,12 +167,26 @@ impl SystemStatus {
 
 /// Problems as text, or a line saying there are none.
 pub fn render_problems(problems: &[Problem]) -> String {
+    render_problems_with(problems, |_, label| label.to_string())
+}
+
+/// The same, with each `[label]` passed through `decorate`: where a terminal
+/// client adds color, without a second copy of the layout.
+pub fn render_problems_with(
+    problems: &[Problem],
+    decorate: impl Fn(Severity, &str) -> String,
+) -> String {
     if problems.is_empty() {
         return "没有发现需要处理的问题。".into();
     }
     let mut lines = vec![format!("需要留意的 {} 件事：", problems.len())];
     for problem in problems {
-        lines.push(format!("  [{}] {}", problem.severity.label(), problem.text));
+        let label = format!("[{}]", problem.severity.label());
+        lines.push(format!(
+            "  {} {}",
+            decorate(problem.severity, &label),
+            problem.text
+        ));
         if let Some(fix) = &problem.fix {
             lines.push(format!("    怎么办：{fix}"));
         }
