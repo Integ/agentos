@@ -182,7 +182,7 @@ pub fn render_problems(problems: &[Problem]) -> String {
 
 /// Most severe first; equal ones keep their order.
 pub fn sort(problems: &mut [Problem]) {
-    problems.sort_by(|a, b| b.severity.cmp(&a.severity));
+    problems.sort_by_key(|problem| std::cmp::Reverse(problem.severity));
 }
 
 #[cfg(test)]
