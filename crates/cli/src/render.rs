@@ -552,7 +552,7 @@ pub fn activity_text(items: &[serde_json::Value], now_ms: u64) -> String {
             "crash" => (
                 format!("任务服务异常退出，已自动重启：{}", text("summary")),
                 Some(
-                    "完整报告在状态目录的 crash.prev.txt；说“诊断一下”或运行 agentos doctor 看现在的状态"
+                    "说“诊断一下崩溃”让管家读完整报告、解释原因；完整报告在状态目录的 crash.prev.txt"
                         .to_string(),
                 ),
             ),
@@ -1054,7 +1054,7 @@ mod tests {
         // An adopted lesson says how to undo it; a withdrawn one does not.
         assert!(text.contains("说“撤回 lesson-3”"));
         assert!(!text.contains("撤回 lesson-2”"));
-        assert!(text.contains("! 刚刚 · 任务服务异常退出") && text.contains("诊断一下"));
+        assert!(text.contains("! 刚刚 · 任务服务异常退出") && text.contains("诊断一下崩溃"));
         assert!(!text.contains('\x1b') && !text.contains('\x07'));
         assert_eq!(activity_text(&[], now), "还没有活动记录。");
     }

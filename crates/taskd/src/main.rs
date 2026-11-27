@@ -573,6 +573,15 @@ async fn serve() -> io::Result<()> {
     // everything has started.
     let status = Arc::new(StatusCapability::new(pins.clone(), schedules.clone()));
     registry.register(status.clone());
+    // The last crash report in full, and what it cut short if this run
+    // follows it, for the agent to explain when the user asks.
+    registry.register(Arc::new(crash::CrashReport::new(
+        &state_dir,
+        found
+            .crash
+            .is_some()
+            .then(|| tasks.interrupted_on_open().to_vec()),
+    )));
 
     // Self-evolution: plugins the system wrote for itself, sandboxed.
     let sandbox = SandboxMode::detect();

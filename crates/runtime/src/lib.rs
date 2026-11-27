@@ -400,6 +400,9 @@ pub struct TaskStore {
     state: RwLock<State>,
     _lock: Option<File>,
     changes: broadcast::Sender<TaskChange>,
+    /// The tasks opening found unfinished and marked interrupted, oldest
+    /// first: what the previous run left undone when it stopped or crashed.
+    interrupted_on_open: Vec<TaskId>,
 }
 
 /// Task activity captured under one read lock.
@@ -427,6 +430,7 @@ impl TaskStore {
         let mut state = load(&directory)?;
         let recovered_at = now_ms();
         let unfinished = std::mem::take(&mut state.unfinished);
+        let interrupted_on_open: Vec<TaskId> = unfinished.iter().copied().collect();
         if !unfinished.is_empty() {
             for id in unfinished {
                 let task = state.tasks.get_mut(&id).expect("indexed task exists");
@@ -455,6 +459,7 @@ impl TaskStore {
             state: RwLock::new(state),
             _lock: Some(lock),
             changes: broadcast::channel(256).0,
+            interrupted_on_open,
         })
     }
 
@@ -491,7 +496,14 @@ impl TaskStore {
             state: RwLock::new(State::default()),
             _lock: None,
             changes: broadcast::channel(256).0,
+            interrupted_on_open: Vec::new(),
         }
+    }
+
+    /// The tasks this store marked interrupted when it was opened, oldest
+    /// first. After a crash these are the tasks it cut short.
+    pub fn interrupted_on_open(&self) -> &[TaskId] {
+        &self.interrupted_on_open
     }
 
     // A poisoned lock is still used: a change is applied in one step after
@@ -1556,6 +1568,11 @@ mod tests {
         }
         drop(store);
         let store = TaskStore::open(&dir.0).unwrap();
+        // What a crash cut short is named exactly, for diagnosing it.
+        assert_eq!(
+            store.interrupted_on_open(),
+            &[TaskId(1), TaskId(2), TaskId(3), TaskId(4)]
+        );
         let tasks = store.list();
         assert_eq!(
             store.activity(),
@@ -1585,6 +1602,12 @@ mod tests {
                 assert_eq!(task.steps[0].state, StepState::Skipped);
             }
         }
+        // Once marked, they are outcomes; the next start cuts nothing short.
+        drop(store);
+        assert!(TaskStore::open(&dir.0)
+            .unwrap()
+            .interrupted_on_open()
+            .is_empty());
     }
 
     #[test]

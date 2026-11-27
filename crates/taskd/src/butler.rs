@@ -267,9 +267,10 @@ impl Frame {
 /// The blackboard is the user's shared memory; the self-improvement
 /// capabilities sum up or are learned from every task of the user's, and
 /// undoing what was learned is the user's decision, while a caller may only
-/// see its own tasks.
+/// see its own tasks. A crash report can quote whatever task the service was
+/// working on when it failed.
 fn caller_excluded(name: &str) -> bool {
-    name == "board.write" || name.starts_with("improve.")
+    name == "board.write" || name.starts_with("improve.") || name == crate::crash::CAPABILITY
 }
 
 /// Words the butler puts in a failed task's message for why it stopped. The

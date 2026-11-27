@@ -73,7 +73,11 @@ MCP server 在沙箱里还是起不来时，`agentos doctor` 会列出是哪一�
 
 ### 任务服务崩溃了
 
-崩溃报告（带调用栈）写在状态目录的 `crash.txt` 和日志里。任务服务下次启动时把它改名为 `crash.prev.txt`，记一条审计，桌面的“最近活动”和 `agentos activity` 里也会显示；`agentos doctor` 在服务还没起来时显示 `crash.txt` 的第一行，起来之后显示上次崩溃的摘要。报告 bug 时把 `crash.prev.txt` 和 `agentos doctor` 的输出一起附上。
+崩溃报告（带调用栈）写在状态目录的 `crash.txt` 和日志里。任务服务下次启动时把它改名为 `crash.prev.txt`，记一条审计，桌面的“最近活动”和 `agentos activity` 里也会显示；`agentos doctor` 在服务还没起来时显示 `crash.txt` 的第一行，起来之后显示上次崩溃的摘要。
+
+服务重新起来之后，对管家说“诊断一下崩溃”（或“为什么崩溃了”）：它读完整报告（只读能力 `system.crash`），说明哪里出了错、可能的原因、哪些任务因为崩溃被标为中断（不会自动重做，看看结果再决定要不要重新说一遍），以及接下来怎么办。报告里的错误信息可能引用了当时正在处理的数据，所以这个任务会标为读过外部内容，之后有副作用的步骤都会先问你。
+
+报告 bug 时把 `crash.prev.txt` 和 `agentos doctor` 的输出一起附上。
 
 ### 审计日志
 

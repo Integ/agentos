@@ -1006,6 +1006,19 @@ async fn direct_reads_return_state_without_creating_tasks_or_side_effects() {
             "{capability}"
         );
     }
+    // The refusal says why: a read-only capability is refused for its
+    // outside content, not called something it is not.
+    let message = |response: Response| match response.body {
+        ResponseBody::Error { error } => error.message,
+        _ => panic!("expected protocol error"),
+    };
+    let web = message(client.request(read("test.web", json!({}))).await);
+    assert!(
+        web.contains("外部内容") && !web.contains("不是只读"),
+        "{web}"
+    );
+    let write = message(client.request(read("notes.append", json!({}))).await);
+    assert!(write.contains("不是只读"), "{write}");
     assert_eq!(
         error_code(client.request(read("files.read", json!({}))).await),
         "not_found"
