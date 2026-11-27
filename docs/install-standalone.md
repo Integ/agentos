@@ -23,9 +23,24 @@ git clone https://github.com/Integ/agentos && cd agentos && ./install.sh
 ### 你需要
 
 - Linux。任务服务自动运行需要 systemd 用户实例（主流桌面发行版都有）；没有也能装，只是要自己启动。
-- Rust 1.88 或更新的版本（[rustup](https://rustup.rs)），以及 C 编译器（Debian/Ubuntu：`sudo apt install build-essential`）。不想装 Rust，见下面的「用编译好的程序」。
-- 推荐装 bubblewrap（`sudo apt install bubblewrap`）。没有它，插件每次调用都要你确认，MCP server 默认不启动，见 [mcp.md](mcp.md#沙箱)。
+- Rust 1.88 或更新的版本（[rustup](https://rustup.rs)），以及 C 编译器。不想装 Rust，见下面的「用编译好的程序」。
+- 推荐装 bubblewrap。没有它，插件每次调用都要你确认，MCP server 默认不启动，见 [mcp.md](mcp.md#沙箱)。
+- 推荐装 Python 3：Agent 给自己写的插件用它运行，见[自我进化](self-evolution.md)。
 - 模型 API key（Claude 或任意 OpenAI 兼容接口）可选；没有 key 时用离线规则规划器。
+
+各发行版的包名：
+
+| | Debian / Ubuntu | Arch |
+| --- | --- | --- |
+| C 编译器 | `build-essential` | `base-devel` |
+| bubblewrap | `bubblewrap` | `bubblewrap` |
+| Python 3 | `python3` | `python` |
+| Rust | 发行版自带的版本通常低于 1.88，用 rustup | `rust`，跟着 Rust 稳定版更新；和 `rustup` 二选一 |
+
+```sh
+sudo apt install build-essential bubblewrap python3          # Debian / Ubuntu
+sudo pacman -S --needed base-devel bubblewrap python rust    # Arch（已经用 rustup 时去掉 rust）
+```
 
 ### 选项
 
@@ -95,7 +110,7 @@ OPENAI_MODEL=gpt-4.1
 `./install.sh` 最后打印的就是 `agentos doctor` 的报告，之后随时可以再运行它。通常还要处理：
 
 - **PIN**：不可逆的操作需要 PIN。运行 `agentos-taskd --set-pin` 设置，正在运行的任务服务马上就会用上，不需要重启。
-- **沙箱**：装上 bubblewrap 后重启任务服务。装了但内核不让它用（有的发行版限制非特权用户命名空间）时，doctor 会指出来。
+- **沙箱**：装上 bubblewrap 后重启任务服务。装了但内核不让它用时，doctor 会指出来：有的发行版限制非特权用户命名空间，例如 Ubuntu 24.04 起用 AppArmor 限制，Arch 的 `linux-hardened` 内核默认禁止（默认的 `linux` 内核没有这个限制）。
 - **注销后继续运行**：systemd 默认在你最后一个会话结束时停掉用户服务，定时任务也就不会运行。想让它一直运行：`loginctl enable-linger`。
 
 日常使用：

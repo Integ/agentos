@@ -166,15 +166,19 @@ run_cli() {
   )
 }
 
+# pkg_install_hint APT [DNF] [PACMAN] [ZYPPER]: the package name differs
+# between distributions for some things (a C compiler is build-essential,
+# gcc or base-devel), and a hint naming a package that does not exist is
+# worse than none. Missing names fall back to the apt one.
 pkg_install_hint() {
   if command -v apt-get >/dev/null 2>&1; then
     say "sudo apt install $1"
   elif command -v dnf >/dev/null 2>&1; then
-    say "sudo dnf install $1"
+    say "sudo dnf install ${2:-$1}"
   elif command -v pacman >/dev/null 2>&1; then
-    say "sudo pacman -S $1"
+    say "sudo pacman -S --needed ${3:-$1}"
   elif command -v zypper >/dev/null 2>&1; then
-    say "sudo zypper install $1"
+    say "sudo zypper install ${4:-$1}"
   else
     say "用发行版的包管理器安装 $1"
   fi
@@ -287,7 +291,7 @@ else
   command -v cargo >/dev/null 2>&1 ||
     die "没有找到 cargo。安装 Rust 1.88 或更新的版本（https://rustup.rs），或者用 --from 指定编译好的程序"
   command -v cc >/dev/null 2>&1 ||
-    warn "没有找到 C 编译器 cc，编译多半会失败；安装方法：$(pkg_install_hint build-essential)"
+    warn "没有找到 C 编译器 cc，编译多半会失败；安装方法：$(pkg_install_hint build-essential gcc base-devel gcc)"
   say "编译 agentos-taskd 和 agentos（release；第一次要几分钟）…"
   (cd "$REPO" && cargo build --release --locked -p agentos-taskd -p agentos-cli) ||
     die "编译失败，见上面 cargo 的输出"
