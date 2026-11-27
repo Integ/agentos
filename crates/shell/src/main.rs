@@ -10,10 +10,19 @@
 //! (see `kernel.rs`) and renders what comes back. Every action still goes
 //! through the service's policy engine and audit log.
 //!
-//! Usage: `agentos-shell [--task-socket PATH] [--windowed | --fullscreen]`.
+//! Usage: `agentos-shell [--task-socket PATH] [--windowed | --fullscreen]`,
+//! or `agentos-shell --summon | --menu | --terminal` from a key binding.
+//!
+//! Key bindings reach the running desktop through a socket in the user's
+//! runtime directory (see `agentos_cli::desktop`): Super+Space brings up the
+//! overlay to talk to the butler, Super+Alt+Space the menu. Colors come from
+//! the user's theme (`agentos_cli::theme`), shared with the terminal and sway.
 
-use std::path::PathBuf;
+use std::io::{BufRead, Read};
+use std::path::{Path, PathBuf};
 
+use agentos_cli::desktop::{self, Signal};
+use agentos_cli::theme;
 use agentos_ipc::{ListenAction, SpeakMode};
 use serde_json::{json, Value};
 use tao::dpi::LogicalSize;
@@ -32,16 +41,40 @@ const READY: &str = "__ready";
 
 const HELP: &str = "\
 用法：agentos-shell [--task-socket 路径] [--windowed | --fullscreen]
+      agentos-shell --summon | --menu | --terminal
 
   --task-socket 路径
                   连接任务服务 agentos-taskd 的指定 socket（或 AGENTOS_TASK_SOCKET；
                   默认是状态目录下的 control.sock）
   --windowed      以 1440×900 的窗口运行，便于开发
   --fullscreen    无边框全屏
+  --summon        让正在运行的桌面弹出输入框，直接对管家说（给快捷键用）
+  --menu          让正在运行的桌面打开菜单（给快捷键用）
+  --terminal      用当前主题的配色打开一个终端
   --help, -h      查看帮助
   --version, -V   查看版本
 
-需要先启动任务服务 agentos-taskd。";
+需要先启动任务服务 agentos-taskd。主题用 agentos theme 切换。";
+
+/// What a key binding asks for, done without opening a window: a signal to
+/// the running desktop, or a terminal in the theme's colors.
+#[derive(Debug, PartialEq, Eq)]
+enum OneShot {
+    Signal(Signal),
+    Terminal,
+}
+
+fn one_shot(args: &[String]) -> Option<OneShot> {
+    match args {
+        [only] => match only.as_str() {
+            "--summon" => Some(OneShot::Signal(Signal::Summon)),
+            "--menu" => Some(OneShot::Signal(Signal::Menu)),
+            "--terminal" => Some(OneShot::Terminal),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
 /// What the command line asks for other than opening the desktop: text to
 /// print before exiting, or a usage error. Checked before any window exists,
@@ -137,6 +170,13 @@ fn butler_request(v: &Value) -> Option<kernel::Request> {
             let stop = v.get("action").and_then(Value::as_str) == Some("stop");
             (mode.is_some() || stop).then_some(kernel::Request::Speech { mode, stop })
         }
+        "read" => {
+            let name = v.get("capability")?.as_str()?;
+            kernel::READS
+                .iter()
+                .find(|known| **known == name)
+                .map(|known| kernel::Request::Read(known))
+        }
         _ => None,
     }
 }
@@ -171,14 +211,17 @@ fn system_action(v: &Value) -> Option<&'static str> {
 }
 
 fn run_system(action: &str) {
+    // The shell opens terminals itself, in the theme's colors.
+    if action == "terminal" {
+        launch_terminal();
+        return;
+    }
     match system_helper() {
         Some(helper) => {
             if let Err(e) = std::process::Command::new(&helper).arg(action).spawn() {
                 eprintln!("无法执行 {} {action}：{e}", helper.display());
             }
         }
-        // Outside the AgentOS image only the terminal is available.
-        None if action == "terminal" => launch_terminal(),
         None => eprintln!("没有 agentos-system，忽略 {action}"),
     }
 }
@@ -232,6 +275,11 @@ fn handle_ipc(
                 run_system(action);
             }
         }
+        Some("theme") => {
+            if let Some(chosen) = v.get("id").and_then(Value::as_str).and_then(theme::find) {
+                let _ = proxy.send_event(choose_theme(chosen));
+            }
+        }
         // Setup assistant: checked here, run off the UI thread (Wi-Fi scans
         // and connection tests take seconds), answered as a `setup` event.
         Some("setup") => {
@@ -252,16 +300,112 @@ fn handle_ipc(
     }
 }
 
-/// `AGENTOS_TERMINAL` (a program name, no arguments) or `foot`.
+/// `AGENTOS_TERMINAL` (a program name, no arguments) or `foot`, with the
+/// theme's colors when it is foot; another terminal keeps its own.
 fn launch_terminal() {
     let program = std::env::var("AGENTOS_TERMINAL").unwrap_or_else(|_| "foot".into());
-    if let Err(e) = std::process::Command::new(&program).spawn() {
+    if let Err(e) = terminal_command(&program, theme::current()).spawn() {
         eprintln!("无法启动终端 {program}：{e}");
     }
 }
 
+fn terminal_command(program: &str, theme: &theme::Theme) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    if Path::new(program)
+        .file_name()
+        .is_some_and(|name| name == "foot")
+    {
+        for setting in theme::foot_overrides(theme) {
+            command.arg("-o").arg(setting);
+        }
+    }
+    command
+}
+
+/// The theme as the page takes it, saying so if it could not be saved.
+fn theme_event(chosen: &theme::Theme, saved: Result<(), String>) -> Value {
+    let mut event = theme::page(chosen);
+    if let Err(error) = saved {
+        event["error"] = json!(format!("主题没有保存：{error}"));
+    }
+    event
+}
+
+/// Choose `theme` for this user: saved for every surface, applied to sway.
+fn choose_theme(chosen: &theme::Theme) -> Value {
+    let saved = match theme::config_dir() {
+        Some(dir) => theme::save(&dir, chosen).map_err(|e| e.to_string()),
+        None => Err("没有 HOME".into()),
+    };
+    theme::apply_sway(chosen);
+    theme_event(chosen, saved)
+}
+
+/// Take signals from key bindings and `agentos theme` (see
+/// `agentos_cli::desktop`) and turn them into events for the page.
+fn listen_for_signals(proxy: EventLoopProxy<Value>) {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let Some(path) = desktop::socket_path() else {
+        eprintln!("agentos-shell：没有 XDG_RUNTIME_DIR，快捷键唤起不可用");
+        return;
+    };
+    // Another desktop of this session already answers; leave it be.
+    if UnixStream::connect(&path).is_ok() {
+        eprintln!("agentos-shell：{} 已有桌面在监听", path.display());
+        return;
+    }
+    let _ = std::fs::remove_file(&path);
+    let listener = match UnixListener::bind(&path) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("agentos-shell：无法监听 {}：{error}", path.display());
+            return;
+        }
+    };
+    // The runtime directory is the user's own already; the socket is too.
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+            let mut line = String::new();
+            // One short word per connection; anything longer is not a signal.
+            if std::io::BufReader::new((&stream).take(32))
+                .read_line(&mut line)
+                .is_err()
+            {
+                continue;
+            }
+            let event = match Signal::parse(&line) {
+                Some(Signal::Summon) => json!({"type": "summon"}),
+                Some(Signal::Menu) => json!({"type": "menu"}),
+                Some(Signal::Theme) => theme::page(theme::current()),
+                None => continue,
+            };
+            if proxy.send_event(event).is_err() {
+                return;
+            }
+        }
+    });
+}
+
 fn main() -> wry::Result<()> {
-    match command_line(std::env::args().skip(1)) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match one_shot(&args) {
+        Some(OneShot::Signal(signal)) => match desktop::send(signal) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                eprintln!("桌面没有在运行（{error}）");
+                std::process::exit(1);
+            }
+        },
+        Some(OneShot::Terminal) => {
+            launch_terminal();
+            return Ok(());
+        }
+        None => {}
+    }
+    match command_line(args) {
         Ok(Some(text)) => {
             println!("{text}");
             return Ok(());
@@ -303,6 +447,7 @@ fn main() -> wry::Result<()> {
         })
     });
 
+    listen_for_signals(event_loop.create_proxy());
     let ipc_proxy = event_loop.create_proxy();
     let builder = WebViewBuilder::new()
         .with_html(UI)
@@ -333,11 +478,19 @@ fn main() -> wry::Result<()> {
                         mark_ready(v);
                     }
                 };
+                // A key binding asked for the desktop: take the keyboard.
+                if matches!(
+                    v.get("type").and_then(Value::as_str),
+                    Some("summon" | "menu")
+                ) {
+                    window.set_focus();
+                }
                 if v.get("type").and_then(Value::as_str) == Some(READY) {
                     if queued.is_none() {
                         return; // the page reloaded; nothing is queued any more
                     }
                     deliver(&host_info());
+                    deliver(&theme::page(theme::current()));
                     for v in queued.take().unwrap_or_default() {
                         deliver(&v);
                     }
@@ -388,6 +541,58 @@ mod tests {
         ] {
             assert!(parse(&args).is_err(), "{args:?}");
         }
+    }
+
+    #[test]
+    fn key_bindings_run_alone_and_never_with_other_arguments() {
+        let words =
+            |args: &[&str]| one_shot(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        assert_eq!(words(&["--summon"]), Some(OneShot::Signal(Signal::Summon)));
+        assert_eq!(words(&["--menu"]), Some(OneShot::Signal(Signal::Menu)));
+        assert_eq!(words(&["--terminal"]), Some(OneShot::Terminal));
+        // Anything else opens the desktop (or is a usage error there).
+        assert_eq!(words(&[]), None);
+        assert_eq!(words(&["--summon", "--windowed"]), None);
+        assert_eq!(words(&["--windowed"]), None);
+    }
+
+    #[test]
+    fn the_page_may_read_only_its_three_capabilities() {
+        // Guards "the interface never speaks for the user": showing data is a
+        // read of a known capability, never an intent or an arbitrary read.
+        let r = |s: &str| butler_request(&serde_json::from_str(s).unwrap());
+        assert_eq!(
+            r(r#"{"type":"read","capability":"notes.list"}"#),
+            Some(kernel::Request::Read("notes.list"))
+        );
+        assert_eq!(
+            r(r#"{"type":"read","capability":"system.status"}"#),
+            Some(kernel::Request::Read("system.status"))
+        );
+        for other in ["notes.append", "files.read", "web.fetch", ""] {
+            let body = format!(r#"{{"type":"read","capability":"{other}"}}"#);
+            assert_eq!(r(&body), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn a_foot_terminal_opens_in_the_theme_and_another_keeps_its_own() {
+        let forest = theme::find("forest").unwrap();
+        let args = |program: &str| {
+            terminal_command(program, forest)
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let foot = args("/usr/bin/foot");
+        assert!(foot.contains(&"colors.background=0d1712".to_string()));
+        assert_eq!(foot.iter().filter(|a| *a == "-o").count(), foot.len() / 2);
+        assert!(args("kitty").is_empty());
+        // A theme that could not be saved is still drawn, and says so.
+        let event = theme_event(forest, Err("只读".into()));
+        assert_eq!(event["id"], "forest");
+        assert!(event["error"].as_str().unwrap().contains("只读"));
+        assert!(theme_event(forest, Ok(())).get("error").is_none());
     }
 
     #[test]

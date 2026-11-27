@@ -6,13 +6,16 @@ AgentOS 的桌面借鉴了 macOS 的设计语言：半透明玻璃材质、大�
 
 | 区域 | 作用 |
 | --- | --- |
-| 菜单栏 | 右侧胶囊显示管家状态：待命、思考中、执行到第几步、等待确认、未连接；麦克风打开时亮起橙色标志，朗读时显示“正在播报 · 停止” |
+| 菜单栏 | 左边是系统菜单、“菜单”（Ctrl+K）、笔记、能力、终端；笔记和能力用协议的 `read` 直接显示，不替你提交意图。右边是状态栏：运行中的任务数、待你处理（等你批准或回答）的任务数、任务服务报告的问题数（点开读 `system.status` 看怎么办），没有的不显示，和工作台顶部那一行是同一份数据；再右边的胶囊显示管家状态：待命、思考中、执行到第几步、等待确认、未连接；麦克风打开时亮起橙色标志，朗读时显示“正在播报 · 停止” |
+| 唤起管家 | 在任何地方按 Super+空格，顶部弹出输入框，直接对管家说，回车发送。浮在桌面上的终端挡住中间的意图栏时也能用 |
+| 菜单 | Super+Alt+空格、Ctrl+K 或菜单栏的“菜单”：列出所有操作（对管家说话、诊断、笔记、能力、任务服务的状态、主题、终端、设置，镜像里还有网络和 AI 设置、更新、安装、重启、关机）。输入就过滤，↑↓ 选择，回车执行；输入的字没有对应的操作时，最后一行是“对管家说”。需要管家去做的项（“诊断一下崩溃”）只把句子填进输入框，由你回车发送 |
+| 主题 | 设置里选，或 `agentos theme <名字>`：桌面、从桌面打开的终端、sway 的边框和背景、终端工作台一起换。见下文 |
 | 意图栏 | 屏幕中间的主输入框，回车发送；按住麦克风按钮或 Caps Lock 说话（见 [voice.md](voice.md)）；下面是常用意图 |
 | 管家面板 | 对话记录。每个计划画成卡片，逐步显示能力名、风险等级（L0–L3）和执行状态 |
 | 最近活动 | 来自审计日志的能力调用和确认记录 |
 | 提问 | 连接任务服务时，Agent 的提问显示为一条消息，你输入的下一句话就是对它的回答；有提问在等时，输入不会被当成新的意图 |
 | 确认弹窗 | 策略引擎要求确认时弹出，列出能力、原因和参数；按钮是“停止任务”（取消整个任务）、“拒绝这一步”（这一步不执行，任务换别的办法继续）和“确认执行”；默认焦点在“拒绝这一步”，Esc 和 60 秒不回应都只拒绝这一步 |
-| Dock | 管家、笔记、终端、能力与插件、最近活动、设置（强调色） |
+| Dock | 管家、笔记、终端、能力与插件、最近活动、设置（主题、朗读） |
 
 ![确认弹窗](images/shell-confirm.jpg)
 
@@ -26,7 +29,9 @@ AgentOS 的桌面借鉴了 macOS 的设计语言：半透明玻璃材质、大�
 - 界面整体画在一个 WebKit 窗口里（`crates/shell/ui/index.html`），所以毛玻璃效果不依赖合成器支持，sway 下也能用。
 - 桌面连接任务服务 `agentos-taskd`，通过[协议 v1](protocol-v1.md) 工作：订阅任务变化，读取变化的任务，把它与页面上次看到的样子之间的差别翻译成下面的页面事件；意图是 `submit`，确认是 `approve`（不可逆的步骤带上确认框里输入的 PIN），拒绝是 `cancel`。批准令牌留在桥里，不交给页面。一次运行是一段对话；有问题在等回答时，你说的下一句话就是回答。
 - 按住说话：页面的说话键变成 `listen` 请求，任务服务录音和识别；识别出的文字回到这个窗口，先显示出来，再像打字一样提交（标明是说出来的，`auto` 模式下回复会被读出来）。“最近活动”来自任务服务的审计日志（协议的 `activity`）。
-- shell 本身没有任何权限。所有操作都经过任务服务的策略引擎并写入审计日志。界面能让 shell 做的本地动作只有系统菜单里固定的几项，以及设置助理的几个操作（见下文）。
+- shell 本身没有任何权限。所有操作都经过任务服务的策略引擎并写入审计日志。界面能让 shell 做的本地动作只有系统菜单里固定的几项、切换主题，以及设置助理的几个操作（见下文）。
+- 页面只能直接读三个只读能力：`notes.list`、`evolve.list`、`system.status`（协议的 `read`；任务服务本来也只提供只读、输出可信的能力）。菜单栏的状态栏用的是终端工作台同一个查询（`agentos_cli::workbench::waiting_on_user`），在任务换状态时刷新。
+- 快捷键通过 `$XDG_RUNTIME_DIR/agentos-shell.sock`（0600）找到正在运行的桌面：`agentos-shell --summon` 和 `--menu` 各发一个词，`agentos theme` 发 `theme`。信号不带任何数据，所以不能替你说话或批准什么，只改变屏幕上显示的东西。
 - socket 由任务服务创建，权限是 0600，只有当前用户能连接。
 
 ## 运行
@@ -61,7 +66,22 @@ for_window [app_id="foot"] floating enable, resize set 960 600, move position ce
 exec agentos-shell
 ```
 
-任务服务要先在运行（镜像里由 `agentos-session` 以用户单元启动）。终端程序可用 `AGENTOS_TERMINAL` 指定（默认 `foot`）。
+任务服务要先在运行（镜像里由 `agentos-session` 以用户单元启动）。终端程序可用 `AGENTOS_TERMINAL` 指定（默认 `foot`）；是 foot 时用主题的配色打开（`-o colors.…`），别的终端保留它自己的配色。
+
+快捷键和主题：
+
+```
+include ~/.config/agentos/sway-theme.conf
+bindsym Mod4+space [title="^AgentOS$"] focus; exec agentos-shell --summon
+bindsym Mod4+Mod1+space [title="^AgentOS$"] focus; exec agentos-shell --menu
+bindsym Mod4+Return exec agentos-shell --terminal
+```
+
+`--summon`、`--menu`、`--terminal` 不开窗口：前两个告诉正在运行的桌面，桌面没在运行时退出码为 1；`--terminal` 用主题的配色打开一个终端。
+
+### 主题
+
+`agentos theme` 列出主题，`agentos theme 森林`（或 `forest`）切换；桌面设置和菜单里也能切换。选择存在 `~/.config/agentos/theme`，同时生成 sway 的 `~/.config/agentos/sway-theme.conf`。切换时正在运行的桌面和 sway 马上换好（sway 通过 `swaymsg`），之后打开的终端用新配色，已经开着的终端窗口不变。主题有 夜空（默认）、森林、暮色、炭火、石墨，都是深色；色板只有一份，在 `crates/cli/src/theme.rs`，桌面、终端、sway 和工作台都从这里取，不会各自走样。文件缺失或写了不认识的名字时用默认主题，不会因此启动失败。
 
 安装镜像里已经这样配置好了：`agentos-session` 在登录时启动任务服务，`agentos-desktop` 运行 `agentos-shell`；左上角系统菜单通过 `agentos-system` 执行固定的几项操作（终端、设置、检查更新、安装、重启、关机），shell 拒绝其他任何名字。shell 连上任务服务后会写 `$XDG_RUNTIME_DIR/agentos-shell.ready`，开机自检和 QEMU 冒烟测试用它确认桌面已就绪。
 
@@ -78,6 +98,8 @@ exec agentos-shell
 | `{"type":"listen","action":"start"}` | 按下说话键；`stop` 松开并识别，`cancel` 丢弃这次录音 |
 | `{"type":"speech","mode":"auto"}` | 朗读模式：`auto` `always` `off` |
 | `{"type":"speech","action":"stop"}` | 停止朗读 |
+| `{"type":"read","capability":"notes.list"}` | 直接读一个只读能力，只认 `notes.list`、`evolve.list`、`system.status` |
+| `{"type":"theme","id":"forest"}` | 换主题：保存给所有界面，并应用到 sway |
 
 shell → 页面：
 
@@ -95,6 +117,10 @@ shell → 页面：
 | `voice_level` | 录音音量（0–1），约每 100 毫秒一次 |
 | `transcript` | 这个窗口的录音识别出的文字，随后由 shell 提交 |
 | `voice_notice` | 语音相关的提示或错误（没配置、没声音、识别失败等） |
+| `theme` | 当前主题的颜色（`base` `glow` `accent` `soft`）和全部主题，给设置里的选择器；保存失败时带 `error` |
+| `status` | 状态栏：`running`、`waiting`（等你批准或回答）、`problems`（任务服务报告的警告和错误数）、`planner` |
+| `read` | 直接读取的结果：`capability`、`ok`、`text` |
+| `summon`、`menu` | 快捷键要求弹出“对管家说”的输入框或菜单 |
 
 ## 设置助理
 
@@ -119,4 +145,5 @@ shell → 页面：
 ## 还没做的
 
 - 插件审阅窗口（设计稿第 3 张）：现在插件安装走通用确认弹窗。
-- 全局快捷键唤出意图栏（Caps Lock 说话目前只在 shell 有焦点时有效）。
+- Caps Lock 说话只在 shell 有焦点时有效；按 Super+空格 唤起后就有焦点了。
+- 浅色主题：玻璃材质和图标假定深色背景。

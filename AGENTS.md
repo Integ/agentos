@@ -49,16 +49,18 @@ v0.4.0 之后，开发集中在任务内核本身：
 - 能力：定时任务、文件、网页、聊天渠道，全部经过策略引擎和审计；
 - 不装镜像也能单独安装。
 
+另外，原生桌面为 [#60](https://github.com/Integ/agentos/issues/60) 解冻：一处切换的主题、键盘优先的菜单、常驻状态栏、一键唤起管家（参考 Omarchy）。色板和主题文件只有一份实现，在 `crates/cli/src/theme.rs`，桌面和终端都用它；镜像里为此只改桌面会话的配置（`image/rootfs/usr/share/agentos/sway.conf`）。
+
 下面这些部分已冻结：只修 bug 和安全问题，必要时跟着协议做适配，不加新功能。
 
 | 冻结的部分 | 位置 |
 | --- | --- |
 | Web Shell | `crates/web-shell/` |
-| 原生桌面和设置助理 | `crates/shell/`、`image/rootfs/usr/local/bin/agentos-setup` |
+| 设置助理（原生桌面的其余部分见上文 #60） | `crates/shell/src/setup.rs`、`image/rootfs/usr/local/bin/agentos-setup` |
 | 按住说话、朗读、录音指示灯 | `crates/taskd/src/voice.rs`、`mic_led.rs` |
 | 智能家居 | `crates/services/src/homeassistant.rs` |
 | 自我改进：体检、回放、学习。不做研究草案的第 4–6 阶段（插件自修复、提示与配置优化、代码补丁） | `crates/taskd/src/improve.rs`、`replay.rs`、`learn.rs`、`learned.rs` |
-| 镜像：只随版本发布，修启动和更新问题，不加新的系统功能 | `image/` |
+| 镜像：只随版本发布，修启动和更新问题，不加新的系统功能（#60 的桌面会话配置除外） | `image/` |
 
 终端的 `agentos` 命令和工作台是内核的参考客户端，不在冻结范围内。确实需要给冻结的部分加功能时，先在 issue 里说明理由，不要顺手加。
 

@@ -412,6 +412,39 @@ pub fn waiting_strip(waiting: &Waiting) -> Option<String> {
     Some(lines.join("\n"))
 }
 
+/// The workbench's status line, like a desktop bar: whether the service is
+/// there, what runs, what waits on the user, its problems, the planner and
+/// the theme. The desktop's menu bar shows the same facts.
+pub fn status_line(connected: bool, waiting: &Waiting, theme: &str) -> String {
+    let dot = paint("●", Tone::Accent);
+    if !connected {
+        return format!("{dot} {}", paint("连接中断，正在重连视图", Tone::Bad));
+    }
+    let mut parts = vec![format!("{dot} {}", paint("已连接", Tone::Good))];
+    let plus = |more: bool| if more { "+" } else { "" };
+    parts.push(format!(
+        "运行中 {}{}",
+        waiting.running,
+        plus(waiting.running_more)
+    ));
+    let asked = format!("待你处理 {}{}", waiting.tasks.len(), plus(waiting.more));
+    parts.push(if waiting.tasks.is_empty() {
+        asked
+    } else {
+        paint(&asked, Tone::Attention)
+    });
+    match waiting.problems {
+        Some(0) | None => {}
+        Some(n) => parts.push(paint(&format!("⚠ {n} 个问题"), Tone::Attention)),
+    }
+    if let Some(planner) = &waiting.planner {
+        parts.push(format!("规划器 {}", one_line(planner, 28)));
+    }
+    parts.push(format!("主题 {}", safe_text(theme)));
+    parts.join(&paint(" · ", Tone::Quiet))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn dashboard(
     tasks: &[TaskSummary],
     selected: Option<&Task>,
@@ -420,6 +453,7 @@ pub fn dashboard(
     page_number: usize,
     has_older: bool,
     waiting: &Waiting,
+    theme: &str,
 ) -> String {
     let active = tasks
         .iter()
@@ -443,10 +477,19 @@ pub fn dashboard(
             )
         })
         .count();
-    let mut out = format!("\n╭─ AgentOS v{} · 任务工作台 ─────────────────────────────\n│ {}  · 快照 #{revision} · 第 {page_number} 页\n│ 本页 {} 项  进行中 {active}  已完成 {done}  {}\n╰────────────────────────────────────────────────────────\n",env!("CARGO_PKG_VERSION"),if connected { paint("● 已连接后台", Tone::Good) } else { paint("○ 连接中断，正在重连视图", Tone::Bad) },tasks.len(),{
-        let needs = format!("需查看 {attention}");
-        if attention > 0 { paint(&needs, Tone::Bad) } else { needs }
-    });
+    let needs = format!("需查看 {attention}");
+    let needs = if attention > 0 {
+        paint(&needs, Tone::Bad)
+    } else {
+        needs
+    };
+    let mut out = format!(
+        "\n╭─ {} v{} · 任务工作台 ─────────────────────────────\n│ {}\n│ 快照 #{revision} · 第 {page_number} 页 · 本页 {} 项  进行中 {active}  已完成 {done}  {needs}\n╰────────────────────────────────────────────────────────\n",
+        paint("AgentOS", Tone::Accent),
+        env!("CARGO_PKG_VERSION"),
+        status_line(connected, waiting, theme),
+        tasks.len(),
+    );
     // Above the page, so it stays in view whichever page is shown.
     if let Some(strip) = waiting_strip(waiting) {
         out.push_str(&strip);
@@ -776,6 +819,7 @@ mod tests {
             1,
             false,
             &Waiting::default(),
+            "夜空",
         );
         assert!(
             view.contains("已完成") && view.contains("已记下：牛奶") && view.contains("快照 #3")
@@ -871,6 +915,7 @@ mod tests {
             1,
             false,
             &Waiting::default(),
+            "夜空",
         );
         assert!(view.contains("已完成 0") && view.contains("需查看 1"));
         assert_eq!(WaitOutcome::Settled(task.clone()).exit_code(), 3);
@@ -974,6 +1019,28 @@ mod tests {
     }
 
     #[test]
+    fn the_status_line_shows_what_runs_waits_and_is_wrong_at_a_glance() {
+        let waiting = Waiting {
+            tasks: vec![TaskSummary::from(&waiting_on(false))],
+            more: false,
+            problems: Some(2),
+            running: 3,
+            running_more: true,
+            planner: Some("Claude（claude-opus-5-5）".into()),
+        };
+        let line = style::with_color(false, || status_line(true, &waiting, "森林"));
+        assert_eq!(
+            line,
+            "● 已连接 · 运行中 3+ · 待你处理 1 · ⚠ 2 个问题 · 规划器 Claude（claude-opus-5-5） · 主题 森林"
+        );
+        // Nothing to report is not reported: no problems, no planner.
+        let quiet = style::with_color(false, || status_line(true, &Waiting::default(), "夜空"));
+        assert_eq!(quiet, "● 已连接 · 运行中 0 · 待你处理 0 · 主题 夜空");
+        let down = style::with_color(false, || status_line(false, &waiting, "夜空"));
+        assert!(down.contains("连接中断") && !down.contains("运行中"));
+    }
+
+    #[test]
     fn the_waiting_strip_appears_only_when_something_waits_on_the_user() {
         assert_eq!(waiting_strip(&Waiting::default()), None);
         assert_eq!(
@@ -990,6 +1057,7 @@ mod tests {
             ],
             more: false,
             problems: Some(2),
+            ..Waiting::default()
         })
         .unwrap();
         assert!(strip.contains("task-9") && strip.contains("待回答"));
@@ -1008,6 +1076,7 @@ mod tests {
             tasks: tasks.clone(),
             more: false,
             problems: None,
+            ..Waiting::default()
         })
         .unwrap();
         assert!(strip.contains("还有 2 个"));
@@ -1015,6 +1084,7 @@ mod tests {
             tasks,
             more: true,
             problems: None,
+            ..Waiting::default()
         })
         .unwrap();
         assert!(strip.contains("还有更多"));
@@ -1029,7 +1099,7 @@ mod tests {
             ..Waiting::default()
         };
         let page = [summary(20, TaskState::Succeeded, "现在几点")];
-        let view = dashboard(&page, None, 1, true, 1, true, &waiting);
+        let view = dashboard(&page, None, 1, true, 1, true, &waiting, "夜空");
         let strip = view.find("需要你处理").unwrap();
         assert!(view.contains("task-3") && strip < view.find("task-20").unwrap());
     }

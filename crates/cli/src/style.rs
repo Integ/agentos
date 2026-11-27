@@ -9,11 +9,19 @@
 //! Colored text must not go through `safe_text` again, which would turn the
 //! color codes into visible `\u{1b}` text.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use agentos_runtime::TaskState;
 
+use crate::theme::{self, Theme};
+
 static ENABLED: AtomicBool = AtomicBool::new(false);
+/// Whether the terminal takes 24-bit color; otherwise the nearest of the
+/// 256 colors nearly every terminal has.
+static TRUECOLOR: AtomicBool = AtomicBool::new(false);
+/// The theme's accent as `0xRRGGBB`, so the workbench follows the theme the
+/// desktop uses.
+static ACCENT: AtomicU32 = AtomicU32::new(0x3b82f6);
 
 #[cfg(test)]
 thread_local! {
@@ -36,6 +44,32 @@ pub fn init() {
         wanted(no_color.as_deref(), terminal, term.as_deref()),
         Ordering::Relaxed,
     );
+    let colorterm = std::env::var("COLORTERM").unwrap_or_default();
+    TRUECOLOR.store(
+        matches!(colorterm.as_str(), "truecolor" | "24bit"),
+        Ordering::Relaxed,
+    );
+    set_theme(theme::current());
+}
+
+/// Draw accents in `theme`'s color from now on.
+pub fn set_theme(theme: &Theme) {
+    let (r, g, b) = theme::soft_rgb(theme);
+    ACCENT.store(u32::from_be_bytes([0, r, g, b]), Ordering::Relaxed);
+}
+
+/// The escape code for a color, in 24 bits or as the nearest of the 256.
+fn color_code((r, g, b): (u8, u8, u8), truecolor: bool) -> String {
+    if truecolor {
+        return format!("38;2;{r};{g};{b}");
+    }
+    let level = |c: u8| (u16::from(c) * 5 + 127) / 255;
+    format!("38;5;{}", 16 + 36 * level(r) + 6 * level(g) + level(b))
+}
+
+fn accent() -> (u8, u8, u8) {
+    let [_, r, g, b] = ACCENT.load(Ordering::Relaxed).to_be_bytes();
+    (r, g, b)
 }
 
 fn enabled() -> bool {
@@ -68,6 +102,8 @@ pub enum Tone {
     Quiet,
     /// A heading.
     Strong,
+    /// The theme's color: the workbench's name and status line.
+    Accent,
 }
 
 /// `text` in `tone`, if color is on. `text` must already be safe.
@@ -76,13 +112,28 @@ pub fn paint(text: &str, tone: Tone) -> String {
         return text.to_string();
     }
     let code = match tone {
-        Tone::Attention => "1;33",
-        Tone::Bad => "31",
-        Tone::Good => "32",
-        Tone::Quiet => "2",
-        Tone::Strong => "1",
+        Tone::Attention => "1;33".to_string(),
+        Tone::Bad => "31".to_string(),
+        Tone::Good => "32".to_string(),
+        Tone::Quiet => "2".to_string(),
+        Tone::Strong => "1".to_string(),
+        Tone::Accent => format!(
+            "1;{}",
+            color_code(accent(), TRUECOLOR.load(Ordering::Relaxed))
+        ),
     };
     format!("\x1b[{code}m{text}\x1b[0m")
+}
+
+/// A small block in `color`, to show a theme; nothing when color is off.
+pub fn swatch(color: (u8, u8, u8)) -> String {
+    if !enabled() {
+        return String::new();
+    }
+    format!(
+        "\x1b[{}m██\x1b[0m",
+        color_code(color, TRUECOLOR.load(Ordering::Relaxed))
+    )
 }
 
 /// The tone of a task state; running and cancelled tasks stay plain.
@@ -116,5 +167,15 @@ mod tests {
             "\x1b[31m失败\x1b[0m"
         );
         assert_eq!(with_color(true, || paint("", Tone::Bad)), "");
+    }
+
+    #[test]
+    fn the_accent_is_the_themes_color_in_24_bits_or_the_nearest_of_256() {
+        assert_eq!(color_code((0x3b, 0x82, 0xf6), true), "38;2;59;130;246");
+        // Blue lands in the 6×6×6 cube's blue corner, not on a gray.
+        assert_eq!(color_code((0x3b, 0x82, 0xf6), false), "38;5;75");
+        assert_eq!(color_code((0, 0, 0), false), "38;5;16");
+        assert_eq!(color_code((255, 255, 255), false), "38;5;231");
+        assert_eq!(with_color(false, || swatch((1, 2, 3))), "");
     }
 }

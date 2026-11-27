@@ -6,7 +6,11 @@
 <title>AgentOS</title>
 <style>
 :root {
+  /* The theme (agentos theme): set from the shell's theme event. */
   --accent: #3b82f6;
+  --soft: #7cc4ff;
+  --base: #0b0f1c;
+  --glow1: #1f5bd8; --glow2: #0f9b8e; --glow3: #3a2a6b;
   --text: #fff;
   --text-2: rgba(255,255,255,.78);
   --text-3: rgba(255,255,255,.62);
@@ -26,15 +30,16 @@ html, body { margin: 0; height: 100%; }
 body {
   font-family: var(--sans); color: var(--text); overflow: hidden; user-select: none;
   background:
-    radial-gradient(1100px 700px at 18% 12%, #1f5bd8 0%, transparent 60%),
-    radial-gradient(900px 700px at 88% 80%, #0f9b8e 0%, transparent 62%),
-    radial-gradient(700px 500px at 60% 30%, #3a2a6b 0%, transparent 70%),
-    #0b0f1c;
+    radial-gradient(1100px 700px at 18% 12%, var(--glow1) 0%, transparent 60%),
+    radial-gradient(900px 700px at 88% 80%, var(--glow2) 0%, transparent 62%),
+    radial-gradient(700px 500px at 60% 30%, var(--glow3) 0%, transparent 70%),
+    var(--base);
+  transition: background .6s;
   -webkit-font-smoothing: antialiased;
 }
 button { font-family: inherit; color: inherit; cursor: pointer; }
 input { font-family: inherit; }
-:focus-visible { outline: 3px solid rgba(124,196,255,.7); outline-offset: 2px; }
+:focus-visible { outline: 3px solid color-mix(in srgb, var(--soft) 70%, transparent); outline-offset: 2px; }
 .mono { font-family: var(--mono); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
@@ -65,7 +70,16 @@ input { font-family: inherit; }
 #menubar .item { color: var(--text-2); background: none; border: 0; font-size: 13px; padding: 2px 4px; border-radius: 6px; }
 #menubar .item:hover { background: var(--fill-2); color: #fff; }
 .pill { display: flex; align-items: center; gap: 8px; padding: 3px 10px; border-radius: 999px; background: rgba(120,190,255,.20); box-shadow: inset 0 0 0 1px rgba(150,205,255,.35); transition: background .3s, box-shadow .3s; }
-.pill .dot { width: 7px; height: 7px; border-radius: 50%; background: #7cc4ff; box-shadow: 0 0 8px #7cc4ff; }
+.pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--soft); box-shadow: 0 0 8px var(--soft); }
+/* Status bar: what runs, what waits on you, the service's problems. */
+.stat { display: flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; border: 0; font-size: 12px; color: var(--text-2); background: var(--fill); box-shadow: inset 0 0 0 1px var(--line); }
+.stat[hidden] { display: none; }
+button.stat:hover { background: var(--fill-2); color: #fff; }
+.stat.attention { color: var(--r2-fg); background: var(--r2-bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--r2) 45%, transparent); }
+.stat.bad { color: var(--r3-fg); background: var(--r3-bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--r3) 45%, transparent); }
+.stat .n { font-variant-numeric: tabular-nums; font-weight: 600; color: #fff; }
+#menubar .item.menu-btn { display: flex; align-items: center; gap: 6px; }
+#menubar .item.menu-btn kbd { font-family: var(--mono); font-size: 10px; padding: 0 5px; border-radius: 4px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.3); color: var(--text-3); }
 .pill[data-state="busy"] .dot { animation: pulse 1.2s ease-in-out infinite; }
 .pill[data-state="confirm"] { background: rgba(255,170,80,.22); box-shadow: inset 0 0 0 1px rgba(255,190,120,.45); }
 .pill[data-state="confirm"] .dot { background: var(--r2); box-shadow: 0 0 8px var(--r2); }
@@ -153,7 +167,7 @@ input { font-family: inherit; }
 .app .run { position: absolute; bottom: -9px; left: 50%; margin-left: -2px; width: 4px; height: 4px; border-radius: 50%; background: #fff; }
 .app .badge { position: absolute; top: -4px; right: -4px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: #ff5b5b; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
 .sep { width: 1px; height: 46px; background: rgba(255,255,255,.25); margin: 0 4px; }
-.g-butler { background: linear-gradient(160deg, #7cc4ff, #3b6cff); }
+.g-butler { background: linear-gradient(160deg, var(--soft), var(--accent)); }
 .g-notes { background: linear-gradient(160deg, #ffe08a, #f5a524); }
 .g-term { background: linear-gradient(160deg, #3a4256, #151a26); }
 .g-plugins { background: linear-gradient(160deg, #c39bff, #7b4dff); }
@@ -200,9 +214,27 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
 #settings { position: fixed; bottom: 104px; left: 50%; transform: translateX(-50%); width: 300px; border-radius: 22px; padding: 16px 18px; z-index: 6; display: none; }
 #settings.open { display: block; animation: pop .3s var(--spring); }
 #settings h2 { margin: 0 0 12px; font-size: 14px; }
-.swatches { display: flex; gap: 10px; }
-.swatch { width: 36px; height: 36px; border-radius: 50%; border: 0; box-shadow: inset 0 1px 0 rgba(255,255,255,.35); }
-.swatch[aria-pressed="true"] { box-shadow: 0 0 0 3px rgba(255,255,255,.85); }
+.themes { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 16px; }
+.theme-opt { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 0; border: 0; background: none; font-size: 11px; color: var(--text-2); }
+.theme-opt .swatch { width: 40px; height: 40px; border-radius: 12px; box-shadow: inset 0 1px 0 rgba(255,255,255,.35), inset 0 0 0 1px rgba(255,255,255,.12); }
+.theme-opt[aria-pressed="true"] { color: #fff; }
+.theme-opt[aria-pressed="true"] .swatch { box-shadow: 0 0 0 2px var(--base), 0 0 0 4px rgba(255,255,255,.85); }
+
+/* The overlay: summoned to talk to the butler, or opened as the menu. */
+#palette { position: fixed; top: 64px; left: 50%; transform: translateX(-50%); width: min(660px, 92vw); border-radius: 22px; z-index: 15; display: none; flex-direction: column; overflow: hidden; }
+#palette.open { display: flex; animation: rise .25s var(--spring); }
+#palette form { display: flex; align-items: center; gap: 12px; padding: 0 18px; height: 60px; box-shadow: inset 0 -1px 0 var(--line); }
+#palette input { flex: 1; min-width: 0; height: 40px; background: transparent; border: 0; outline: none; color: #fff; font-size: 18px; }
+#palette input::placeholder { color: var(--text-3); }
+#palette .mode { font-size: 12px; color: var(--text-3); white-space: nowrap; }
+#pal-list { list-style: none; margin: 0; padding: 6px; max-height: min(420px, 60vh); overflow-y: auto; }
+#pal-list:empty { display: none; }
+#pal-list .group { padding: 10px 12px 4px; font-size: 11px; font-weight: 600; letter-spacing: .04em; color: var(--text-3); }
+#pal-list .row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 12px; font-size: 14px; color: var(--text-2); cursor: pointer; }
+#pal-list .row .hint { margin-left: auto; font-size: 12px; color: var(--text-3); font-family: var(--mono); }
+#pal-list .row .sw { width: 14px; height: 14px; border-radius: 4px; flex: none; }
+#pal-list .row[aria-selected="true"] { background: color-mix(in srgb, var(--accent) 34%, transparent); color: #fff; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--soft) 40%, transparent); }
+#palette .foot { padding: 8px 18px 10px; font-size: 11px; color: var(--text-3); box-shadow: inset 0 1px 0 var(--line); }
 
 /* Voice: microphone in use is always orange (privacy indicator), speaking is blue. */
 .mic-ind, .spk-ind { display: flex; align-items: center; gap: 7px; padding: 3px 10px; border-radius: 999px; font-size: 12px; border: 0; }
@@ -228,7 +260,7 @@ body:not(.managed) #sysmenu .managed, body.installed #sysmenu .not-installed { d
 .seg button { flex: 1; height: 30px; border: 0; border-radius: 9px; background: transparent; font-size: 12px; color: var(--text-2); }
 .seg button[aria-pressed="true"] { background: rgba(255,255,255,.18); color: #fff; box-shadow: inset 0 1px 0 rgba(255,255,255,.25); }
 #voice-info { font-size: 11px; line-height: 1.6; color: var(--text-3); }
-#settings h2 + .swatches { margin-bottom: 16px; }
+
 
 /* ---------- Setup assistant (first boot, and 网络和 AI 设置…) ----------
    One question per page in a large Liquid Glass window: clear rim light,
@@ -378,11 +410,15 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
   <nav aria-label="系统菜单">
     <button id="sysbtn" class="item" aria-label="AgentOS 系统菜单" aria-haspopup="menu" aria-expanded="false" aria-controls="sysmenu" style="display:flex;padding:2px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v3M12 15v3M6 12h3M15 12h3"/><circle cx="12" cy="12" r="1.6" fill="#fff"/></svg></button>
     <strong>管家</strong>
-    <button class="item" data-intent="看看笔记">笔记</button>
-    <button class="item" data-intent="看看插件">能力</button>
+    <button class="item menu-btn" data-action="menu" title="菜单（Super+Alt+空格 或 Ctrl+K）">菜单 <kbd>Ctrl K</kbd></button>
+    <button class="item" data-read="notes.list">笔记</button>
+    <button class="item" data-read="evolve.list">能力</button>
     <button class="item" data-action="terminal">终端</button>
   </nav>
   <div class="right">
+    <span id="st-run" class="stat" role="status" hidden>运行中 <span class="n">0</span></span>
+    <button id="st-wait" class="stat attention" hidden title="等你批准或回答的任务">待你处理 <span class="n">0</span></button>
+    <button id="st-prob" class="stat bad" hidden title="任务服务报告的问题，点开查看怎么办">⚠ <span class="n">0</span> 个问题</button>
     <span id="mic-ind" class="mic-ind" role="status" hidden><span class="mdot"></span><span id="mic-ind-text">麦克风</span></span>
     <button id="spk-ind" class="spk-ind" hidden title="停止播报（Esc）"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/></svg>正在播报 · 停止</button>
     <span id="status" class="pill" data-state="offline" role="status"><span class="dot"></span><span id="status-text">正在连接任务服务…</span></span>
@@ -437,9 +473,9 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
 
 <nav id="dock" class="glass-hi" aria-label="程序坞">
   <button class="app g-butler" data-action="focus" aria-label="管家"><span class="tip">管家</span><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/></svg><span class="run"></span></button>
-  <button class="app g-notes" data-intent="看看笔记" aria-label="笔记"><span class="tip">笔记</span><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M7 4h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM9 9h6M9 13h6M9 17h3"/></svg></button>
+  <button class="app g-notes" data-read="notes.list" aria-label="笔记"><span class="tip">笔记</span><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M7 4h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM9 9h6M9 13h6M9 17h3"/></svg></button>
   <button class="app g-term" data-action="terminal" aria-label="终端"><span class="tip">终端</span><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 7l5 5-5 5M12 17h7"/></svg></button>
-  <button class="app g-plugins" data-intent="看看插件" aria-label="能力与插件"><span class="tip">能力与插件</span><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><path d="M16.5 13.5v6M13.5 16.5h6"/></svg></button>
+  <button class="app g-plugins" data-read="evolve.list" aria-label="能力与插件"><span class="tip">能力与插件</span><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><path d="M16.5 13.5v6M13.5 16.5h6"/></svg></button>
   <button class="app g-audit" data-action="activity" aria-label="审计日志"><span class="tip">最近活动</span><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg></button>
   <span class="sep"></span>
   <button class="app g-settings" data-action="settings" aria-label="设置" aria-expanded="false" aria-controls="settings"><span class="tip">设置</span><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg></button>
@@ -455,14 +491,20 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
   <button role="menuitem" data-system="poweroff" class="managed">关机</button>
 </div>
 
+<section id="palette" class="sheet" role="dialog" aria-modal="false" aria-label="菜单">
+  <form id="pal-form" autocomplete="off">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/></svg>
+    <label for="pal-input" class="sr-only">输入</label>
+    <input id="pal-input" role="combobox" aria-controls="pal-list" aria-expanded="true" aria-autocomplete="list">
+    <span class="mode" id="pal-mode"></span>
+  </form>
+  <ul id="pal-list" role="listbox" aria-label="操作"></ul>
+  <div class="foot" id="pal-foot"></div>
+</section>
+
 <section id="settings" class="glass" aria-label="设置">
-  <h2>强调色</h2>
-  <div class="swatches">
-    <button class="swatch" style="background:#3b82f6" data-accent="#3b82f6" aria-label="蓝"></button>
-    <button class="swatch" style="background:#8b5cf6" data-accent="#8b5cf6" aria-label="紫"></button>
-    <button class="swatch" style="background:#14b8a6" data-accent="#14b8a6" aria-label="青"></button>
-    <button class="swatch" style="background:#f97316" data-accent="#f97316" aria-label="橙"></button>
-  </div>
+  <h2>主题</h2>
+  <div class="themes" id="themes" role="group" aria-label="主题"></div>
   <h2>朗读回复</h2>
   <div class="seg" role="group" aria-label="朗读回复">
     <button data-speak="auto" aria-pressed="true">语音提问时</button>
@@ -522,6 +564,8 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
     plans: new Map(),       // intent id -> { steps, card }
     descriptions: new Map(), // capability -> description
     activity: [],
+    theme: null,            // the theme event from the shell (agentos theme)
+    status: null,           // the menu bar's facts: running, waiting, problems, planner
     voice: { input: false, output: false, speak: "auto", mic: "idle", speaking: false, destination: null, input_label: null, output_label: null },
   };
 
@@ -547,6 +591,44 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
     } else { s = "idle"; t = "管家待命"; }
     pill.dataset.state = s; text.textContent = t;
     $("#w-sub").textContent = state.connected ? (state.planner || "管家待命中") : "管家离线";
+    renderBar();
+  }
+
+  // ---------- status bar ----------
+  // The same facts as the workbench's status line, from the same look-up.
+  function renderBar() {
+    const st = state.connected && state.status;
+    const show = (id, n, more) => {
+      const b = $(id);
+      b.hidden = !st || !n;
+      if (st && n) b.querySelector(".n").textContent = n + (more ? "+" : "");
+    };
+    show("#st-run", st && st.running, st && st.running_more);
+    show("#st-wait", st && st.waiting, st && st.waiting_more);
+    show("#st-prob", st && st.problems, false);
+  }
+
+  // ---------- theme ----------
+  // Colors come from the user's theme, shared with the terminal and sway;
+  // picking one here saves it for all of them.
+  function applyTheme(t) {
+    state.theme = t;
+    const root = document.documentElement.style;
+    root.setProperty("--base", t.base);
+    root.setProperty("--accent", t.accent);
+    root.setProperty("--soft", t.soft);
+    (t.glow || []).forEach((g, i) => root.setProperty(`--glow${i + 1}`, g));
+    $("#themes").replaceChildren(...(t.themes || []).map((o) => {
+      const b = el("button", "theme-opt");
+      b.type = "button"; b.dataset.theme = o.id; b.title = o.summary;
+      b.setAttribute("aria-pressed", String(o.id === t.id));
+      const sw = el("span", "swatch");
+      sw.style.background = `linear-gradient(140deg, ${o.glow[0]}, ${o.accent} 55%, ${o.glow[1]})`;
+      b.append(sw, el("span", null, o.name));
+      return b;
+    }));
+    if (t.error) bubble("error", t.error);
+    if (palette.open) renderPalette();
   }
 
   // ---------- clock ----------
@@ -573,14 +655,14 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
     cancelled: '<circle cx="12" cy="12" r="9"/><path d="M8 12h8"/>',
     confirm: '<circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 16.5v.5"/>',
   };
-  const ICON_COLOR = { pending: "rgba(255,255,255,.5)", running: "#7cc4ff", done: "#6ee7a8", failed: "#ff7a7a", denied: "#ff7a7a", cancelled: "rgba(255,255,255,.6)", confirm: "#ffb86b" };
+  const ICON_COLOR = { pending: "rgba(255,255,255,.5)", running: "var(--soft)", done: "#6ee7a8", failed: "#ff7a7a", denied: "#ff7a7a", cancelled: "rgba(255,255,255,.6)", confirm: "#ffb86b" };
   const STATUS_TEXT = { pending: "等待", running: "执行中", done: "已完成", failed: "失败", denied: "被策略拒绝", cancelled: "已取消", confirm: "等待确认" };
 
   function stepIcon(status) {
     const ns = "http://www.w3.org/2000/svg";
     const svg = document.createElementNS(ns, "svg");
     svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("class", "icon"); svg.setAttribute("fill", "none");
-    svg.setAttribute("stroke", ICON_COLOR[status]); svg.setAttribute("stroke-width", "2.2");
+    svg.style.stroke = ICON_COLOR[status]; svg.setAttribute("stroke-width", "2.2");
     svg.setAttribute("stroke-linecap", "round"); svg.setAttribute("stroke-linejoin", "round");
     svg.setAttribute("role", "img"); svg.setAttribute("aria-label", STATUS_TEXT[status]);
     svg.innerHTML = ICONS[status]; // static markup only
@@ -731,6 +813,7 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
 
   // ---------- confirmation sheet ----------
   function openConfirm(c) {
+    closePalette();
     state.confirm = c;
     const l3 = c.risk === "L3";
     const who = c.agent && c.agent !== "butler" ? c.agent_name || c.agent : "管家";
@@ -810,6 +893,19 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
         break;
       case "activity":
         state.activity = msg.items || []; renderActivity(); break;
+      case "theme": applyTheme(msg); break;
+      case "status":
+        state.status = msg;
+        if (msg.planner) { state.planner = msg.planner; $("#planner").textContent = msg.planner + " · 所有步骤都经过策略引擎"; }
+        break;
+      // A key binding: Super+Space to talk, Super+Alt+Space for the menu.
+      case "summon": openPalette("say"); break;
+      case "menu": openPalette("menu"); break;
+      case "read": {
+        const what = READ_TITLES[msg.capability] || msg.capability;
+        bubble(msg.ok ? "note" : "error", msg.ok ? `${what}\n${msg.text}` : `${what}读不出来：${msg.text}`);
+        break;
+      }
       case "plan": {
         // One card per round per agent; older daemons key plans by intent only.
         const key = msg.plan ?? msg.intent;
@@ -880,7 +976,12 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
     const b = e.target.closest("button");
     if (!b) return;
     if (b.dataset.intent) submit(b.dataset.intent);
+    if (b.dataset.read) readCapability(b.dataset.read);
+    if (b.dataset.theme) send({ type: "theme", id: b.dataset.theme });
+    if (b.id === "st-prob") readCapability("system.status");
+    if (b.id === "st-wait") { $("#panel").animate([{ transform: "scale(1)" }, { transform: "scale(1.015)" }, { transform: "scale(1)" }], { duration: 350 }); $("#reply").focus(); }
     const a = b.dataset.action;
+    if (a === "menu") openPalette("menu");
     if (a === "focus") $("#intent").focus();
     if (a === "terminal") send({ type: "system", action: "terminal" });
     if (b.dataset.system === "setup" && SA.available) { closeSysmenu(); openSetup(false); }
@@ -888,7 +989,6 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
     if (b.id === "sysbtn") { const m = $("#sysmenu"); const open = !m.classList.contains("open"); m.classList.toggle("open", open); b.setAttribute("aria-expanded", open); if (open) m.querySelector("button").focus(); }
     if (a === "activity") { $("#activity").scrollIntoView({ behavior: "smooth" }); $("#activity").animate([{ transform: "scale(1)" }, { transform: "scale(1.02)" }, { transform: "scale(1)" }], { duration: 350 }); }
     if (a === "settings") { const s = $("#settings"); s.classList.toggle("open"); b.setAttribute("aria-expanded", s.classList.contains("open")); }
-    if (b.dataset.accent) setAccent(b.dataset.accent);
     if (b.dataset.speak) send({ type: "speech", mode: b.dataset.speak });
   });
   $("#c-reject").addEventListener("click", () => answer("reject"));
@@ -897,6 +997,8 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
   $("#c-pin").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); answer("approve"); } });
   document.addEventListener("keydown", (e) => {
     if (SA.open) return;
+    if (!state.confirm && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); if (palette.open && palette.mode === "menu") closePalette(); else openPalette("menu"); return; }
+    if (palette.open && e.key === "Escape") { e.preventDefault(); closePalette(); return; }
     if (state.confirm && e.key === "Escape") { e.preventDefault(); answer("reject"); }
     else if (e.key === "Escape" && state.voice.speaking) send({ type: "speech", action: "stop" });
     else if (e.key === "Escape") { $("#settings").classList.remove("open"); closeSysmenu(); }
@@ -905,12 +1007,108 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
   function closeSysmenu() { $("#sysmenu").classList.remove("open"); $("#sysbtn").setAttribute("aria-expanded", "false"); }
   document.addEventListener("pointerdown", (e) => { if (!e.target.closest("#sysmenu, #sysbtn")) closeSysmenu(); });
 
-  function setAccent(c) {
-    document.documentElement.style.setProperty("--accent", c);
-    document.querySelectorAll(".swatch").forEach((s) => s.setAttribute("aria-pressed", s.dataset.accent === c));
-    try { localStorage.setItem("agentos.accent", c); } catch (_) {}
+  // ---------- reading ----------
+  // Showing data is a protocol read, never an intent in the user's name.
+  const READ_TITLES = { "notes.list": "笔记", "evolve.list": "能力与插件", "system.status": "任务服务的状态" };
+  function readCapability(name) {
+    if (!state.connected) { bubble("error", "还没连上任务服务，稍后再试"); return; }
+    send({ type: "read", capability: name });
   }
-  try { setAccent(localStorage.getItem("agentos.accent") || "#3b82f6"); } catch (_) { setAccent("#3b82f6"); }
+
+  // ---------- overlay: talk to the butler, or the menu ----------
+  // "say" sends what the user typed, as typed. "menu" lists everything the
+  // desktop can do; what needs the butler is only put in the box for the
+  // user to send, so the interface never speaks for them.
+  const palette = { open: false, mode: "menu", rows: [], sel: 0 };
+  function menuItems() {
+    const managed = document.body.classList.contains("managed");
+    const installed = document.body.classList.contains("installed");
+    const items = [
+      { group: "管家", label: "对管家说话", hint: "Super+空格", run: () => openPalette("say") },
+      { group: "管家", label: "诊断一下", hint: "填好，回车发送", run: () => openPalette("say", "诊断一下") },
+      { group: "管家", label: "诊断一下崩溃", hint: "填好，回车发送", run: () => openPalette("say", "诊断一下崩溃") },
+      { group: "查看", label: "笔记", run: () => readCapability("notes.list") },
+      { group: "查看", label: "能力与插件", run: () => readCapability("evolve.list") },
+      { group: "查看", label: "任务服务的状态和问题", run: () => readCapability("system.status") },
+      { group: "查看", label: "最近活动", run: () => $("#activity").scrollIntoView({ behavior: "smooth" }) },
+    ];
+    for (const t of (state.theme && state.theme.themes) || []) {
+      items.push({ group: "主题", label: `${t.name} · ${t.summary}`, swatch: t.accent, current: state.theme.id === t.id, run: () => send({ type: "theme", id: t.id }) });
+    }
+    items.push({ group: "系统", label: "打开终端", hint: "Super+回车", run: () => send({ type: "system", action: "terminal" }) });
+    if (managed && SA.available) items.push({ group: "系统", label: "网络和 AI 设置…", run: () => openSetup(false) });
+    if (managed) items.push({ group: "系统", label: "检查更新…", run: () => send({ type: "system", action: "update" }) });
+    if (managed && !installed) items.push({ group: "系统", label: "安装到这台电脑的硬盘…", run: () => send({ type: "system", action: "install" }) });
+    if (managed) items.push({ group: "系统", label: "重新启动", run: () => send({ type: "system", action: "reboot" }) });
+    if (managed) items.push({ group: "系统", label: "关机", run: () => send({ type: "system", action: "poweroff" }) });
+    items.push({ group: "桌面", label: "设置：主题、朗读", run: () => $("#settings").classList.add("open") });
+    return items;
+  }
+  function openPalette(mode, text) {
+    if (state.confirm || SA.open) return;
+    palette.open = true; palette.mode = mode; palette.sel = 0;
+    $("#palette").classList.add("open");
+    const input = $("#pal-input");
+    input.value = text || "";
+    renderPalette();
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+  function closePalette() {
+    if (!palette.open) return;
+    palette.open = false;
+    $("#palette").classList.remove("open");
+  }
+  function renderPalette() {
+    const text = $("#pal-input").value.trim();
+    const say = palette.mode === "say";
+    $("#pal-input").placeholder = say ? "告诉管家你想做什么…" : "搜索操作，或者直接对管家说…";
+    $("#pal-mode").textContent = say ? "对管家说" : "菜单";
+    $("#pal-foot").textContent = say ? "回车发送 · Esc 关闭 · Ctrl+K 菜单" : "↑↓ 选择 · 回车执行 · Esc 关闭";
+    palette.rows = [];
+    if (say) { $("#pal-list").replaceChildren(); return; }
+    const q = text.toLowerCase();
+    const found = menuItems().filter((i) => !q || (i.group + " " + i.label).toLowerCase().includes(q));
+    // Typed words are also the user's to send, as typed: after what they
+    // match, so Enter picks an action rather than sending a search.
+    palette.rows.push(...found);
+    if (text) palette.rows.push({ group: "对管家说", label: text, hint: "回车发送", run: () => { submit(text); } });
+    palette.sel = Math.min(palette.sel, Math.max(0, palette.rows.length - 1));
+    const nodes = [];
+    let group = "";
+    palette.rows.forEach((r, i) => {
+      if (r.group !== group) { group = r.group; nodes.push(el("li", "group", group)); }
+      const li = el("li", "row");
+      li.setAttribute("role", "option"); li.dataset.i = i;
+      li.setAttribute("aria-selected", String(i === palette.sel));
+      if (r.swatch) { const sw = el("span", "sw"); sw.style.background = r.swatch; li.append(sw); }
+      li.append(el("span", null, r.label + (r.current ? " · 当前" : "")));
+      if (r.hint) li.append(el("span", "hint", r.hint));
+      nodes.push(li);
+    });
+    $("#pal-list").replaceChildren(...nodes);
+    const chosen = $("#pal-list").querySelector('[aria-selected="true"]');
+    if (chosen) chosen.scrollIntoView({ block: "nearest" });
+  }
+  function runRow(i) {
+    const r = palette.rows[i];
+    if (!r) return;
+    closePalette();
+    r.run();
+  }
+  $("#pal-input").addEventListener("input", () => { palette.sel = 0; renderPalette(); });
+  $("#pal-input").addEventListener("keydown", (e) => {
+    if (palette.mode !== "menu") return;
+    if (e.key === "ArrowDown") { e.preventDefault(); palette.sel = Math.min(palette.sel + 1, palette.rows.length - 1); renderPalette(); }
+    if (e.key === "ArrowUp") { e.preventDefault(); palette.sel = Math.max(palette.sel - 1, 0); renderPalette(); }
+  });
+  $("#pal-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (palette.mode === "say") { const text = $("#pal-input").value.trim(); closePalette(); if (text) submit(text); return; }
+    runRow(palette.sel);
+  });
+  $("#pal-list").addEventListener("click", (e) => { const li = e.target.closest(".row"); if (li) runRow(Number(li.dataset.i)); });
+  document.addEventListener("pointerdown", (e) => { if (palette.open && !e.target.closest("#palette, [data-action='menu']")) closePalette(); });
 
   // ---------- setup assistant ----------
   // First boot (until /etc/agentos/setup-done exists) and 系统菜单 → 网络和 AI
@@ -1452,6 +1650,8 @@ button.sa-row:hover { background: rgba(255,255,255,.06); }
   }
   function demo(msg) {
     if (msg.type === "setup") { demoSetup(msg); return; }
+    if (msg.type === "read") { later(150, () => receive({ type: "read", capability: msg.capability, ok: true, text: "演示模式：连上任务服务后显示真实内容。" })); return; }
+    if (msg.type === "theme") { bubble("note", "演示模式：主题由桌面程序读写，这里不会保存"); return; }
     if (msg.type === "speech") { if (msg.mode) demoVoice({ speak: msg.mode }); return; }
     if (msg.type === "listen") {
       if (msg.action === "start") {

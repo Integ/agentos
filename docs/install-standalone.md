@@ -123,6 +123,19 @@ systemctl --user status agentos-taskd    # 有没有在运行
 agentos activity                         # 最近活动：调用、批准、崩溃、自动采用的经验（没有桌面时看这里）
 ```
 
+### 一键唤起
+
+没有 AgentOS 桌面时，管家就在终端工作台里。在你的桌面环境里绑一个快捷键打开它，例如 Super+A：
+
+```sh
+# sway：~/.config/sway/config
+bindsym Mod4+a exec foot agentos
+# Hyprland：~/.config/hypr/hyprland.conf
+bind = SUPER, A, exec, foot agentos
+```
+
+GNOME 在“设置 → 键盘 → 自定义快捷键”里添加命令 `foot agentos`（或 `gnome-terminal -- agentos`），KDE 在“系统设置 → 快捷键”里添加。终端换成你用的那个。`agentos theme <名字>` 换的是工作台的强调色；终端自己的配色跟着你的终端或桌面主题。
+
 ## 更新
 
 ```sh
