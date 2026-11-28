@@ -398,7 +398,9 @@ pub struct TaskStore {
     /// replaces.
     writer: Mutex<Journal>,
     state: RwLock<State>,
-    _lock: Option<File>,
+    /// Field order matters: it drops after `Drop for TaskStore` has written
+    /// the final snapshot, so the next runtime never sees a half-closed store.
+    _lock: Option<DirectoryLock>,
     changes: broadcast::Sender<TaskChange>,
     /// The tasks opening found unfinished and marked interrupted, oldest
     /// first: what the previous run left undone when it stopped or crashed.
@@ -1200,15 +1202,46 @@ fn snapshot_bytes(
     Ok(bytes)
 }
 
-#[cfg(unix)]
-fn exclusive_lock(path: &Path) -> io::Result<File> {
-    use std::os::fd::AsRawFd;
-    use std::os::raw::c_int;
-    use std::os::unix::fs::OpenOptionsExt;
+/// The exclusive `flock` on a state directory, held for a store's lifetime.
+///
+/// flock locks belong to the open file description, not to the descriptor:
+/// every duplicate of the descriptor holds the same lock, and closing one
+/// releases nothing while another is open. Any `Command::spawn` elsewhere in
+/// the process duplicates the whole descriptor table into the child, and the
+/// close-on-exec copy only goes away once the child reaches `exec`. Closing
+/// the file alone could therefore leave the directory locked for a moment
+/// after the store is gone, and a runtime reopening it right then would be
+/// refused. Unlocking explicitly releases the lock for every duplicate.
+struct DirectoryLock(File);
 
-    extern "C" {
-        fn flock(fd: c_int, operation: c_int) -> c_int;
+#[cfg(unix)]
+extern "C" {
+    fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::os::raw::c_int;
+}
+
+#[cfg(unix)]
+const LOCK_EX: std::os::raw::c_int = 2;
+#[cfg(unix)]
+const LOCK_NB: std::os::raw::c_int = 4;
+#[cfg(unix)]
+const LOCK_UN: std::os::raw::c_int = 8;
+
+impl Drop for DirectoryLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // SAFETY: the descriptor is owned by `self.0` and still open.
+            // A failure leaves the lock to be released when the file closes.
+            unsafe { flock(self.0.as_raw_fd(), LOCK_UN) };
+        }
     }
+}
+
+#[cfg(unix)]
+fn exclusive_lock(path: &Path) -> io::Result<DirectoryLock> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
 
     let file = OpenOptions::new()
         .read(true)
@@ -1219,17 +1252,17 @@ fn exclusive_lock(path: &Path) -> io::Result<File> {
         .open(path)?;
     // SAFETY: `file` owns a live descriptor. flock retains no pointer and the
     // descriptor stays open in TaskStore for the lifetime of the lock.
-    if unsafe { flock(file.as_raw_fd(), 2 | 4) } != 0 {
+    if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
         return Err(io::Error::new(
             io::Error::last_os_error().kind(),
             "task state directory is already locked by another runtime",
         ));
     }
-    Ok(file)
+    Ok(DirectoryLock(file))
 }
 
 #[cfg(not(unix))]
-fn exclusive_lock(_path: &Path) -> io::Result<File> {
+fn exclusive_lock(_path: &Path) -> io::Result<DirectoryLock> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "persistent task stores require Unix file locking",
@@ -1770,6 +1803,21 @@ mod tests {
         );
         drop(store);
         assert!(TaskStore::open(&dir.0).is_ok());
+    }
+
+    #[test]
+    fn a_dropped_store_unlocks_its_directory_even_while_a_child_holds_a_copy_of_the_lock() {
+        // Guards reopening after a drop while another thread spawns a
+        // process: the child briefly holds a duplicate of the lock
+        // descriptor until it reaches exec. A dup shares the open file
+        // description the same way, so it stands in for that child here.
+        let dir = TempDir::new();
+        let store = TaskStore::open(&dir.0).unwrap();
+        let inherited = store._lock.as_ref().unwrap().0.try_clone().unwrap();
+        drop(store);
+        let reopened = TaskStore::open(&dir.0);
+        drop(inherited);
+        assert!(reopened.is_ok(), "{:?}", reopened.err());
     }
 
     #[test]
