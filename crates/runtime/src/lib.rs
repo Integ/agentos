@@ -398,8 +398,9 @@ pub struct TaskStore {
     /// replaces.
     writer: Mutex<Journal>,
     state: RwLock<State>,
-    /// Field order matters: it drops after `Drop for TaskStore` has written
-    /// the final snapshot, so the next runtime never sees a half-closed store.
+    /// Released only after `Drop for TaskStore` has written the final
+    /// snapshot (fields drop after `drop` runs), so the next runtime never
+    /// sees a half-closed store.
     _lock: Option<DirectoryLock>,
     changes: broadcast::Sender<TaskChange>,
     /// The tasks opening found unfinished and marked interrupted, oldest
