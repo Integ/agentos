@@ -17,7 +17,7 @@
 响应保留原请求的 `id`：
 
 ```json
-{"version":1,"id":7,"body":{"status":"ok","data":{"type":"pong","server_version":"0.4.0","revision":12}}}
+{"version":1,"id":7,"body":{"status":"ok","data":{"type":"pong","server_version":"0.5.0","revision":12}}}
 ```
 
 错误响应：
