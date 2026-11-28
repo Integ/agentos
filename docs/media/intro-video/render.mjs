@@ -3,6 +3,7 @@
 //   npm install                 # playwright-core (drives a headless Chromium)
 //   node capture.mjs            # screenshots of the real UIs
 //   .venv/bin/python tts.py     # narration.wav + timeline.json
+//   .venv/bin/python music.py   # music.wav, the soundtrack under the narration
 //   node render.mjs             # → docs/media/agentos-intro.mp4, agentos-intro-poster.jpg
 //
 //   node render.mjs --stills 5,30,61.5   # only write those frames to out/intro-video/stills/
@@ -91,21 +92,26 @@ const segments = await Promise.all(Array.from({ length: workers }, async (_, ind
 
 // --- poster: the title card without caption, plus a play badge ---
 const poster = await openPage();
-const title = timeline.scenes[0];
+const title = timeline.scenes.find((scene) => scene.id === 'intro');
 const minutes = Math.floor(timeline.duration / 60);
 const seconds = String(Math.round(timeline.duration % 60)).padStart(2, '0');
-await poster.evaluate(({ t, label }) => window.poster(t, label), { t: title.lines[1].start - 0.05, label: `${minutes}:${seconds}` });
+await poster.evaluate(({ t, label }) => window.poster(t, label), { t: title.lines[1].start - 0.3, label: `${minutes}:${seconds}` });
 const posterPng = path.join(work, 'poster.png');
 await poster.screenshot({ path: posterPng });
 await browser.close();
 await ffmpeg(['-i', posterPng, '-vf', 'scale=1280:720:flags=lanczos', '-q:v', '3', path.join(media, 'agentos-intro-poster.jpg')]).done;
 
-// --- join segments and add the narration ---
+// --- join segments and add the narration and the soundtrack ---
 const list = path.join(work, 'segments.txt');
 fs.writeFileSync(list, segments.filter(Boolean).map((file) => `file '${file}'\n`).join(''));
 const output = path.join(media, 'agentos-intro.mp4');
-await ffmpeg(['-f', 'concat', '-safe', '0', '-i', list, '-i', path.join(work, 'narration.wav'),
-  '-c:v', 'copy', '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000', '-c:a', 'aac', '-b:a', '112k', '-ac', '2',
+const music = path.join(work, 'music.wav');
+if (!fs.existsSync(music)) throw new Error(`no ${music}: run music.py after tts.py`);
+// music.py already keeps the music under the voice; mix as is, then bring the whole to -16 LUFS.
+const mix = '[1:a]pan=stereo|c0=c0|c1=c0[voice];[voice][2:a]amix=inputs=2:normalize=0:duration=first,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000[a]';
+await ffmpeg(['-f', 'concat', '-safe', '0', '-i', list, '-i', path.join(work, 'narration.wav'), '-i', music,
+  '-filter_complex', mix, '-map', '0:v', '-map', '[a]',
+  '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', '-ac', '2',
   '-t', String(frames / FPS), '-movflags', '+faststart', output]).done;
 for (const file of segments.filter(Boolean)) fs.rmSync(file);
 

@@ -4,7 +4,7 @@
 
 https://github.com/user-attachments/assets/9f5a5a5d-f6d5-4771-89d6-abba112102b9
 
-<sub>▶ 介绍视频（3 分 07 秒，1080p，带字幕；播放不了时看仓库里的 [docs/media/agentos-intro.mp4](docs/media/agentos-intro.mp4)）：架构与唯一的任务内核、原生桌面、安全模型、能力扩展、v0.4 的一等公民 Agent、自我改进（体检、回放与学习）、持久任务、情景式 Web Shell、安装方法。</sub>
+<sub>▶ 介绍视频（2 分 34 秒，1080p，带字幕和配乐；播放不了时看仓库里的 [docs/media/agentos-intro.mp4](docs/media/agentos-intro.mp4)）：意图变成计划、唯一的任务内核、风险分级与污点、沙箱与调用时限、v0.5 的新能力（网页、文件、定时任务、微信）、原生桌面的主题与键盘菜单、回放与提示注入评测、两种安装方法。</sub>
 
 AgentOS 构建在 Linux 内核之上，在用户态自建完整的 Agent OS 层：意图总线、Agent 运行时、统一的感知/表达设备抽象，以及基于能力令牌和风险分级的权限模型。
 
@@ -261,15 +261,16 @@ CI 每次提交都会跑上面全部检查，其中这一组在 macOS 和 Rust 1
 
 ### 介绍视频
 
-[docs/media/agentos-intro.mp4](docs/media/agentos-intro.mp4) 由 [docs/media/intro-video/](docs/media/intro-video/) 里的源文件生成：`narration.json` 是旁白，`video.html` 是画面，界面镜头是两套真实界面的截图。配音用微软 Edge 的神经网络语音 `zh-CN-XiaoxiaoNeural`（[edge-tts](https://github.com/rany2/edge-tts)，需要联网，旁白文字会发给微软的语音服务），不用 macOS 自带的 `say`，所以在任何系统上生成的声音都一样。功能有变化时改旁白和画面，然后重新生成（需要 Node 22+、Python 3、ffmpeg 和一个 Playwright 的 headless Chromium）：
+[docs/media/agentos-intro.mp4](docs/media/agentos-intro.mp4) 由 [docs/media/intro-video/](docs/media/intro-video/) 里的源文件生成：`narration.json` 是旁白，`video.html` 是画面，`music.py` 是配乐。界面镜头是原生桌面（演示模式）的真实截图，五个主题、菜单和确认框都是这个页面自己画的；终端里的文字照抄 `agentos` 和 `install.sh` 的真实输出，评测的数字来自 `agentos-eval` 的脚本化运行。配乐由 `music.py` 用振荡器和固定种子的噪声合成，跟着时间轴在每个转场处起落，说话时自动压低，没有需要授权的音源。配音用微软 Edge 的神经网络语音 `zh-CN-XiaoxiaoNeural`（[edge-tts](https://github.com/rany2/edge-tts)，需要联网，旁白文字会发给微软的语音服务），不用 macOS 自带的 `say`，所以在任何系统上生成的声音都一样。功能有变化时改旁白和画面，然后重新生成（需要 Node 22+、Python 3、ffmpeg 和一个 Playwright 的 headless Chromium）：
 
 ```sh
 cd docs/media/intro-video
 npm install
-python3 -m venv .venv && .venv/bin/pip install edge-tts
-node capture.mjs            # 截取原生桌面（演示模式）和 Web Shell（离线模式）
+python3 -m venv .venv && .venv/bin/pip install edge-tts numpy
+node capture.mjs            # 截取原生桌面（演示模式）：五个主题、菜单、唤起框、确认框、设置助理
 .venv/bin/python tts.py     # 合成配音，生成时间轴和字幕
-node render.mjs             # 逐帧渲染并合成 mp4 和封面
+.venv/bin/python music.py   # 按时间轴合成配乐
+node render.mjs             # 逐帧渲染，混音，合成 mp4 和封面
 ```
 
 中间产物在 `out/intro-video/`（不进仓库）。
@@ -277,8 +278,8 @@ node render.mjs             # 逐帧渲染并合成 mp4 和封面
 GitHub 不会在 README 里播放仓库里的视频文件，所以 README 开头的播放器是上传到 GitHub 的附件。重新生成后，先压到 10 MB 以内（GitHub 附件的上限），拖进任意 issue 的评论框（不用提交），再把得到的 `https://github.com/user-attachments/assets/…` 链接换到 README 开头：
 
 ```sh
-ffmpeg -i docs/media/agentos-intro.mp4 -c:v libx264 -preset slow -b:v 330k -pass 1 -an -f mp4 /dev/null
-ffmpeg -i docs/media/agentos-intro.mp4 -c:v libx264 -preset slow -b:v 330k -pass 2 -pix_fmt yuv420p -c:a aac -b:a 64k -movflags +faststart out/intro-video/agentos-intro-upload.mp4
+ffmpeg -i docs/media/agentos-intro.mp4 -vf scale=1280:-2 -c:v libx264 -preset slow -b:v 420k -pass 1 -an -f mp4 /dev/null
+ffmpeg -i docs/media/agentos-intro.mp4 -vf scale=1280:-2 -c:v libx264 -preset slow -b:v 420k -pass 2 -pix_fmt yuv420p -c:a aac -b:a 80k -movflags +faststart out/intro-video/agentos-intro-upload.mp4
 ```
 
 ## 许可证
