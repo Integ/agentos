@@ -2,7 +2,7 @@
 
 一个以 Agent 为一等公民的操作系统，目标是让人和 AI 更顺畅地协作：Agent 通过各种输入设备接收人的意图，通过输出设备与人沟通并展示自己的工作。
 
-https://github.com/user-attachments/assets/9f5a5a5d-f6d5-4771-89d6-abba112102b9
+https://github.com/user-attachments/assets/922fcc6d-afb6-45be-a5b1-0dbdb7bcf400
 
 <sub>▶ 介绍视频（2 分 34 秒，1080p，带字幕和配乐；播放不了时看仓库里的 [docs/media/agentos-intro.mp4](docs/media/agentos-intro.mp4)）：意图变成计划、唯一的任务内核、风险分级与污点、沙箱与调用时限、v0.5 的新能力（网页、文件、定时任务、微信）、原生桌面的主题与键盘菜单、回放与提示注入评测、两种安装方法。</sub>
 
